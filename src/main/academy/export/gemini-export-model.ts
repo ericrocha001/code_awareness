@@ -16,19 +16,27 @@ import type { AcademyStore } from '../academy-store'
 import { createDeterministicZip, type ZipEntry } from '../publication/deterministic-zip'
 import type { AcademyPluginTaskResult } from '../publication/academy-plugin-executor'
 
+export const GEMINI_ADAPTATION_PROFILE_VERSION = 'v1-script-markdown-reference'
 export const GEMINI_MAX_SKILL_BYTES = 100 * 1024 * 1024 // 100 MB
 
-export const GEMINI_ALLOWED_EXTENSIONS = new Set<string>([
+export const GEMINI_NATIVE_ALLOWED_EXTENSIONS = new Set<string>([
   // Documents & Plain Text
   '.doc', '.docx', '.dot', '.dotx', '.hwp', '.hwpx', '.pdf', '.rtf', '.txt', '.md',
   // Spreadsheets & Tabular Data
   '.csv', '.tsv', '.xls', '.xlsx',
   // Presentations
   '.pptx',
-  // Code & Structured Data
-  '.c', '.cpp', '.cs', '.css', '.go', '.html', '.htm', '.java', '.js', '.json', '.jsx', '.php', '.py', '.rb', '.rs', '.sql', '.ts', '.tsx', '.xml', '.yaml', '.yml',
+  // Code & Structured Data natively accepted by Gemini Apps Web
+  '.py', '.sh', '.js', '.json', '.yaml', '.yml', '.xml', '.html', '.htm',
   // Images
   '.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'
+])
+
+export const GEMINI_ADAPTABLE_CODE_EXTENSIONS = new Set<string>([
+  // Scripts and code formats to convert non-destructively into Markdown references
+  '.ts', '.tsx', '.jsx', '.sql', '.cs', '.php', '.rb',
+  '.c', '.cpp', '.h', '.hpp', '.go', '.java', '.rs',
+  '.cjs', '.mjs', '.ps1', '.bat', '.cmd', '.css'
 ])
 
 export const GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS = new Set<string>([
@@ -36,6 +44,16 @@ export const GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS = new Set<string>([
   '.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a', '.wma',
   // Video
   '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'
+])
+
+export const GEMINI_REJECTED_BINARY_EXTENSIONS = new Set<string>([
+  '.exe', '.dll', '.bin', '.so', '.dylib', '.zip', '.tar', '.gz', '.7z',
+  '.iso', '.class', '.o', '.obj', '.pyc', '.wasm'
+])
+
+export const GEMINI_ALLOWED_EXTENSIONS = new Set<string>([
+  ...GEMINI_NATIVE_ALLOWED_EXTENSIONS,
+  ...GEMINI_ADAPTABLE_CODE_EXTENSIONS
 ])
 
 export const GEMINI_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -55,6 +73,216 @@ export function sha256(value: Buffer | string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
+export function inferCodeLanguage(ext: string): string {
+  switch (ext.toLowerCase()) {
+    case '.ts':
+    case '.tsx':
+      return 'typescript'
+    case '.js':
+    case '.jsx':
+    case '.cjs':
+    case '.mjs':
+      return 'javascript'
+    case '.sql':
+      return 'sql'
+    case '.cs':
+      return 'csharp'
+    case '.php':
+      return 'php'
+    case '.rb':
+      return 'ruby'
+    case '.c':
+    case '.h':
+      return 'c'
+    case '.cpp':
+    case '.hpp':
+      return 'cpp'
+    case '.go':
+      return 'go'
+    case '.java':
+      return 'java'
+    case '.rs':
+      return 'rust'
+    case '.ps1':
+      return 'powershell'
+    case '.bat':
+    case '.cmd':
+      return 'batch'
+    case '.py':
+      return 'python'
+    case '.sh':
+    case '.bash':
+      return 'bash'
+    case '.css':
+      return 'css'
+    default:
+      return ext.replace(/^\./, '').toLowerCase() || 'text'
+  }
+}
+
+export function generateMarkdownFence(content: string): string {
+  const matches = content.match(/`+/g)
+  let maxBackticks = 0
+  if (matches) {
+    for (const m of matches) {
+      if (m.length > maxBackticks) {
+        maxBackticks = m.length
+      }
+    }
+  }
+  const fenceLength = Math.max(3, maxBackticks + 1)
+  return '`'.repeat(fenceLength)
+}
+
+export function formatAdaptedReferenceMarkdown(originalPath: string, content: string, language: string): string {
+  const fence = generateMarkdownFence(content)
+  return [
+    `# Referência: ${originalPath}`,
+    '',
+    '> [!WARNING]',
+    '> **Aviso de Compatibilidade Gemini:** Este arquivo é uma **referência textual** do script original e **não é executável** no ambiente Gemini Web. Não execute comandos locais ou tente invocar este arquivo diretamente.',
+    '',
+    `- **Caminho original:** \`${originalPath}\``,
+    `- **Linguagem:** \`${language}\``,
+    '',
+    `${fence}${language}`,
+    content,
+    fence,
+    ''
+  ].join('\n')
+}
+
+export function mapAdaptedPath(normalizedPath: string): string {
+  if (normalizedPath.startsWith('references/')) {
+    return `${normalizedPath}.md`
+  }
+  return posix.join('references', `${normalizedPath}.md`)
+}
+
+export interface AdaptedFileMapping {
+  originalPath: string
+  adaptedPath: string
+  language: string
+}
+
+export interface GeminiPackageAdaptationResult {
+  package: AcademyPackage
+  adaptedFiles: AdaptedFileMapping[]
+  rejectionReason?: string
+}
+
+export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPackageAdaptationResult {
+  const adaptedFiles: AdaptedFileMapping[] = []
+  const derivedArtifacts: Record<string, string> = {}
+  const occupiedPaths = new Set<string>()
+
+  for (const [rawPath, content] of Object.entries(canonicalPackage.artifacts ?? {})) {
+    if (rawPath.includes('\\') || rawPath.startsWith('/') || rawPath.split('/').includes('..')) {
+      return {
+        package: canonicalPackage,
+        adaptedFiles: [],
+        rejectionReason: `Caminho de artefato inválido '${rawPath}': caminhos não podem conter barras invertidas, iniciar com barra ou conter '..'.`
+      }
+    }
+    const normalized = posix.normalize(rawPath)
+    if (normalized === 'SKILL.md') {
+      return {
+        package: canonicalPackage,
+        adaptedFiles: [],
+        rejectionReason: `Artefato não pode sobrescrever 'SKILL.md'.`
+      }
+    }
+
+    const ext = extname(normalized).toLowerCase()
+
+    if (GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS.has(ext)) {
+      return {
+        package: canonicalPackage,
+        adaptedFiles: [],
+        rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`
+      }
+    }
+
+    if (GEMINI_REJECTED_BINARY_EXTENSIONS.has(ext) || content.includes('\0')) {
+      return {
+        package: canonicalPackage,
+        adaptedFiles: [],
+        rejectionReason: `Arquivo '${rawPath}' é binário ou não conversível para referência textual no Gemini Web.`
+      }
+    }
+
+    if (GEMINI_NATIVE_ALLOWED_EXTENSIONS.has(ext)) {
+      if (occupiedPaths.has(normalized)) {
+        return {
+          package: canonicalPackage,
+          adaptedFiles: [],
+          rejectionReason: `Colisão de caminho: '${normalized}' já está registrado no pacote.`
+        }
+      }
+      occupiedPaths.add(normalized)
+      derivedArtifacts[normalized] = content
+      continue
+    }
+
+    if (GEMINI_ADAPTABLE_CODE_EXTENSIONS.has(ext)) {
+      const adaptedPath = mapAdaptedPath(normalized)
+      if (occupiedPaths.has(adaptedPath) || (canonicalPackage.artifacts && adaptedPath in canonicalPackage.artifacts)) {
+        return {
+          package: canonicalPackage,
+          adaptedFiles: [],
+          rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino já ocupado.`
+        }
+      }
+      occupiedPaths.add(adaptedPath)
+      const language = inferCodeLanguage(ext)
+      const referenceContent = formatAdaptedReferenceMarkdown(rawPath, content, language)
+      derivedArtifacts[adaptedPath] = referenceContent
+      adaptedFiles.push({
+        originalPath: rawPath,
+        adaptedPath,
+        language
+      })
+      continue
+    }
+
+    return {
+      package: canonicalPackage,
+      adaptedFiles: [],
+      rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext || '(sem extensão)'}' não suportada pelo Gemini Web.`
+    }
+  }
+
+  let derivedSkillMd = canonicalPackage.skillMd
+  if (adaptedFiles.length > 0) {
+    for (const item of adaptedFiles) {
+      const regexExact = new RegExp(`\\]\\(\\s*\\.?/?${item.originalPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*\\)`, 'g')
+      derivedSkillMd = derivedSkillMd.replace(regexExact, `](${item.adaptedPath})`)
+    }
+
+    const adaptationNotes = [
+      '',
+      '## Compatibilidade Gemini — Scripts Adaptados',
+      '',
+      '> [!NOTE]',
+      '> Os seguintes scripts foram convertidos em referências textuais não executáveis para compatibilidade com o Gemini Web:',
+      ...adaptedFiles.map(
+        (f) => `> - \`${f.originalPath}\` → \`${f.adaptedPath}\` (referência textual; não executável)`
+      ),
+      ''
+    ].join('\n')
+
+    derivedSkillMd = `${derivedSkillMd.trimEnd()}\n${adaptationNotes}`
+  }
+
+  return {
+    package: {
+      skillMd: derivedSkillMd,
+      artifacts: derivedArtifacts
+    },
+    adaptedFiles
+  }
+}
+
 export interface GeminiValidationResult {
   valid: boolean
   details?: string
@@ -68,38 +296,17 @@ export function validateGeminiSkill(detail: AcademySkillDetail): GeminiValidatio
     }
   }
 
-  const skillMdBytes = Buffer.byteLength(detail.current.package.skillMd, 'utf8')
-  let totalBytes = skillMdBytes
+  const adaptation = adaptGeminiPackage(detail.current.package)
+  if (adaptation.rejectionReason) {
+    return {
+      valid: false,
+      details: adaptation.rejectionReason
+    }
+  }
 
-  for (const [path, content] of Object.entries(detail.current.package.artifacts ?? {})) {
-    if (path.includes('\\') || path.startsWith('/') || path.split('/').includes('..')) {
-      return {
-        valid: false,
-        details: `Caminho de artefato inválido '${path}': caminhos não podem conter barras invertidas, iniciar com barra ou conter '..'.`
-      }
-    }
-    const normalized = posix.normalize(path)
-    if (normalized === 'SKILL.md') {
-      return {
-        valid: false,
-        details: `Artefato não pode sobrescrever 'SKILL.md'.`
-      }
-    }
-
-    const ext = extname(path).toLowerCase()
-    if (GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS.has(ext)) {
-      return {
-        valid: false,
-        details: `Arquivo '${path}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`
-      }
-    }
-    if (!GEMINI_ALLOWED_EXTENSIONS.has(ext)) {
-      return {
-        valid: false,
-        details: `Arquivo '${path}' possui extensão '${ext || '(sem extensão)'}' não suportada pelo Gemini Web.`
-      }
-    }
-
+  const derived = adaptation.package
+  let totalBytes = Buffer.byteLength(derived.skillMd, 'utf8')
+  for (const content of Object.values(derived.artifacts ?? {})) {
     totalBytes += Buffer.byteLength(content, 'utf8')
   }
 
@@ -170,7 +377,12 @@ export interface CanonicalGeminiSnapshotEntry {
   packageHash: string
 }
 
-export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGeminiSnapshotEntry[] {
+export interface CanonicalGeminiSnapshot {
+  profileVersion: string
+  entries: CanonicalGeminiSnapshotEntry[]
+}
+
+export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGeminiSnapshot {
   const entries: CanonicalGeminiSnapshotEntry[] = []
   for (const skill of store.list()) {
     const inclusion = geminiInclusion(store, skill)
@@ -184,10 +396,14 @@ export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGemi
       })
     }
   }
-  return entries.sort((a, b) => a.skillId.localeCompare(b.skillId))
+  entries.sort((a, b) => a.skillId.localeCompare(b.skillId))
+  return {
+    profileVersion: GEMINI_ADAPTATION_PROFILE_VERSION,
+    entries
+  }
 }
 
-export function hashGeminiSnapshot(snapshot: CanonicalGeminiSnapshotEntry[]): string {
+export function hashGeminiSnapshot(snapshot: CanonicalGeminiSnapshot): string {
   return sha256(canonicalJson(snapshot))
 }
 
@@ -199,6 +415,7 @@ export function buildGeminiCoverage(
   let notApplicable = 0
   const includedIds = new Set<string>()
   const excluded: AcademyGeminiExcludedSkill[] = []
+  let adaptedCount = 0
 
   const shippedSkills = new Map(latestExport?.skills.map((s) => [s.name, s]))
 
@@ -212,6 +429,11 @@ export function buildGeminiCoverage(
       notApplicable++
     } else if (inclusion.status === 'INCLUDED') {
       includedIds.add(skill.id)
+      const detail = store.get(skill.id)
+      const adaptation = adaptGeminiPackage(detail.current.package)
+      if (adaptation.adaptedFiles.length > 0) {
+        adaptedCount++
+      }
     } else if (inclusion.status === 'EXCLUDED' && inclusion.reason) {
       excluded.push({
         skillId: skill.id,
@@ -226,26 +448,31 @@ export function buildGeminiCoverage(
 
   let awaitingZip = 0
   if (latestExport) {
-    for (const skillId of includedIds) {
-      const skill = store.get(skillId)
-      const shipped = shippedSkills.get(skill.name)
-      if (!shipped) {
-        awaitingZip++
-      } else if (shipped.packageHash) {
-        if (shipped.packageHash !== skill.current.packageHash) {
+    if (latestExport.profileVersion !== GEMINI_ADAPTATION_PROFILE_VERSION) {
+      awaitingZip = includedIds.size
+    } else {
+      for (const skillId of includedIds) {
+        const skill = store.get(skillId)
+        const shipped = shippedSkills.get(skill.name)
+        if (!shipped) {
           awaitingZip++
-        }
-      } else {
-        const expectedCount = Object.keys(skill.current.package.artifacts ?? {}).length + 1
-        if (shipped.entryCount !== expectedCount) {
-          awaitingZip++
+        } else if (shipped.packageHash) {
+          if (shipped.packageHash !== skill.current.packageHash) {
+            awaitingZip++
+          }
+        } else {
+          const adaptation = adaptGeminiPackage(skill.current.package)
+          const expectedCount = Object.keys(adaptation.package.artifacts ?? {}).length + 1
+          if (shipped.entryCount !== expectedCount) {
+            awaitingZip++
+          }
         }
       }
-    }
-    for (const shippedName of shippedSkills.keys()) {
-      const current = store.list().find((s) => s.name === shippedName)
-      if (!current || !includedIds.has(current.id)) {
-        awaitingZip++
+      for (const shippedName of shippedSkills.keys()) {
+        const current = store.list().find((s) => s.name === shippedName)
+        if (!current || !includedIds.has(current.id)) {
+          awaitingZip++
+        }
       }
     }
   } else {
@@ -258,6 +485,7 @@ export function buildGeminiCoverage(
     includedInLastZip: latestExport ? latestExport.skillCount : null,
     awaitingZip,
     notApplicable,
+    adaptedCount,
     excluded
   }
 }
@@ -268,17 +496,24 @@ export interface GeneratedGeminiSkillZip {
   zipSha256: string
   entryCount: number
   byteLength: number
+  adaptedFiles: AdaptedFileMapping[]
 }
 
 export function createGeminiSkillZip(detail: { name: string; current: { package: AcademyPackage } }): GeneratedGeminiSkillZip {
+  const adaptation = adaptGeminiPackage(detail.current.package)
+  if (adaptation.rejectionReason) {
+    throw new Error(`Falha ao adaptar skill '${detail.name}': ${adaptation.rejectionReason}`)
+  }
+
+  const derived = adaptation.package
   const entries: ZipEntry[] = [
     {
       path: 'SKILL.md',
-      data: Buffer.from(detail.current.package.skillMd, 'utf8')
+      data: Buffer.from(derived.skillMd, 'utf8')
     }
   ]
 
-  for (const [path, content] of Object.entries(detail.current.package.artifacts ?? {})) {
+  for (const [path, content] of Object.entries(derived.artifacts ?? {})) {
     entries.push({
       path: posix.normalize(path),
       data: Buffer.from(content, 'utf8')
@@ -293,7 +528,8 @@ export function createGeminiSkillZip(detail: { name: string; current: { package:
     zipBuffer,
     zipSha256: sha256(zipBuffer),
     entryCount: entries.length,
-    byteLength: zipBuffer.length
+    byteLength: zipBuffer.length,
+    adaptedFiles: adaptation.adaptedFiles
   }
 }
 
@@ -326,6 +562,7 @@ export interface AcademyGeminiExportTask {
   receiptPath: string
   downloadsPath?: string
   snapshotHash: string
+  profileVersion?: string
   skills: Array<{
     id: string
     name: string
@@ -358,11 +595,15 @@ export async function executeGeminiExport(
   }
 
   const skillZips: Array<GeneratedGeminiSkillZip & { packageHash: string }> = []
+  let convertedCount = 0
   for (const skill of task.skills) {
     const generated = createGeminiSkillZip({
       name: skill.name,
       current: { package: skill.package }
     })
+    if (generated.adaptedFiles.length > 0) {
+      convertedCount++
+    }
     skillZips.push({
       ...generated,
       packageHash: skill.packageHash
@@ -377,16 +618,19 @@ export async function executeGeminiExport(
     exportId: randomUUID(),
     exportedAt: new Date().toISOString(),
     snapshotHash: task.snapshotHash,
+    profileVersion: task.profileVersion ?? GEMINI_ADAPTATION_PROFILE_VERSION,
     artifactPath: task.masterZipPath,
     artifactHash: master.masterHash,
     skillCount: skillZips.length,
+    convertedCount,
     totalBytes: master.totalBytes,
     skills: skillZips.map((s) => ({
       name: s.name,
       packageHash: s.packageHash,
       zipSha256: s.zipSha256,
       entryCount: s.entryCount,
-      byteLength: s.byteLength
+      byteLength: s.byteLength,
+      adaptedFiles: s.adaptedFiles.length > 0 ? s.adaptedFiles : undefined
     }))
   }
   const receiptJson = Buffer.from(JSON.stringify(receipt, null, 2), 'utf8')

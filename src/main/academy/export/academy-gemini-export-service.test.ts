@@ -10,7 +10,11 @@ import {
   createGeminiMasterZip,
   validateGeminiSkill,
   geminiInclusion,
-  buildGeminiCoverage
+  buildGeminiCoverage,
+  adaptGeminiPackage,
+  generateMarkdownFence,
+  formatAdaptedReferenceMarkdown,
+  GEMINI_ADAPTATION_PROFILE_VERSION
 } from './gemini-export-model'
 import { readZipEntries } from '../publication/deterministic-zip'
 import { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
@@ -100,18 +104,32 @@ describe('Gemini Export Packager & Service', () => {
       expect(result.details).toContain('kebab-case')
     })
 
-    it('rejects skill with unsupported executable artifact extensions like .sh, .exe, or .bin', () => {
+    it('approves native shell scripts (.sh), python (.py), and javascript (.js)', () => {
       const skill = store.create({
-        package: makePackage('shell-helper', 'Helper with script', {
-          'scripts/run.sh': '#!/bin/bash\necho hi'
+        package: makePackage('script-runner', 'Helper with native scripts', {
+          'scripts/run.sh': '#!/bin/bash\necho hi',
+          'scripts/calc.py': 'print("hello")',
+          'scripts/main.js': 'console.log("js")'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const result = validateGeminiSkill(skill)
+      expect(result.valid).toBe(true)
+    })
+
+    it('rejects skill with non-convertible binary files like .exe or .bin', () => {
+      const skill = store.create({
+        package: makePackage('binary-helper', 'Helper with binary', {
+          'bin/run.exe': 'fake-exe-bytes'
         }),
         scope: 'GLOBAL',
         origin: 'UI'
       })
       const result = validateGeminiSkill(skill)
       expect(result.valid).toBe(false)
-      expect(result.details).toContain('.sh')
-      expect(result.details).toContain('não suportada pelo Gemini Web')
+      expect(result.details).toContain('.exe')
+      expect(result.details).toContain('binário ou não conversível')
     })
 
     it('rejects skill with audio or video files not allowed in ZIPs', () => {
@@ -169,8 +187,8 @@ describe('Gemini Export Packager & Service', () => {
       expect(geminiInclusion(store, projectSkill).status).toBe('NOT_APPLICABLE')
 
       const incompatibleSkill = store.create({
-        package: makePackage('incompatible-tool', 'Tool with shell script', {
-          'run.sh': '#!/bin/bash\necho hi'
+        package: makePackage('incompatible-tool', 'Tool with binary executable', {
+          'run.exe': 'fake-binary-bytes'
         }),
         scope: 'GLOBAL',
         origin: 'UI'
@@ -178,6 +196,108 @@ describe('Gemini Export Packager & Service', () => {
       store.approvePublicSkill(incompatibleSkill.id, incompatibleSkill.currentVersion)
       expect(geminiInclusion(store, incompatibleSkill).status).toBe('EXCLUDED')
       expect(geminiInclusion(store, incompatibleSkill).reason).toBe('INCOMPATIBLE')
+    })
+  })
+
+  describe('Non-Destructive In-Memory Script Adaptation', () => {
+    it('guarantees absolute canonical immutability: store is never altered by export', async () => {
+      const canonicalPackage = makePackage('immutable-skill', 'Skill that must not be altered', {
+        'scripts/worker.ts': 'export const run = () => true;',
+        'scripts/query.sql': 'SELECT * FROM users;'
+      })
+      const skill = store.create({
+        package: canonicalPackage,
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const detailBefore = store.get(skill.id)
+      const packageHashBefore = detailBefore.current.packageHash
+      const skillMdBefore = detailBefore.current.package.skillMd
+      const artifactsBefore = { ...detailBefore.current.package.artifacts }
+
+      // Perform full export
+      const service = new AcademyGeminiExportService(store, dbPath)
+      const receipt = await service.prepareExport()
+
+      // Verify receipt shows 1 skill exported, 1 adapted
+      expect(receipt.skillCount).toBe(1)
+      expect(receipt.convertedCount).toBe(1)
+      expect(receipt.skills[0].adaptedFiles).toHaveLength(2)
+
+      // Verify canonical store state is 100% byte-for-byte identical
+      const detailAfter = store.get(skill.id)
+      expect(detailAfter.current.packageHash).toBe(packageHashBefore)
+      expect(detailAfter.currentVersion).toBe(detailBefore.currentVersion)
+      expect(detailAfter.current.package.skillMd).toBe(skillMdBefore)
+      expect(detailAfter.current.package.artifacts).toEqual(artifactsBefore)
+    })
+
+    it('adapts .ts, .sql, and .cjs into Markdown references under references/ with warnings and fences', () => {
+      const canonical = makePackage('multi-script-skill', 'Skill with scripts', {
+        'scripts/build.cjs': 'const x = require("fs");',
+        'src/handler.ts': 'export function handle() { return 42; }',
+        'db/schema.sql': 'CREATE TABLE test (id INT);'
+      })
+      canonical.skillMd = `---\nname: multi-script-skill\n---\n\n# Multi Script\n\nExecute [build script](scripts/build.cjs) or [handler](./src/handler.ts).`
+
+      const adaptation = adaptGeminiPackage(canonical)
+      expect(adaptation.rejectionReason).toBeUndefined()
+      expect(adaptation.adaptedFiles).toHaveLength(3)
+
+      const adaptedPaths = Object.keys(adaptation.package.artifacts).sort()
+      expect(adaptedPaths).toEqual([
+        'references/db/schema.sql.md',
+        'references/scripts/build.cjs.md',
+        'references/src/handler.ts.md'
+      ])
+
+      // Original scripts are not in derived artifacts
+      expect(adaptation.package.artifacts['scripts/build.cjs']).toBeUndefined()
+      expect(adaptation.package.artifacts['src/handler.ts']).toBeUndefined()
+      expect(adaptation.package.artifacts['db/schema.sql']).toBeUndefined()
+
+      // Derived markdown content has execution warning and language
+      const buildMd = adaptation.package.artifacts['references/scripts/build.cjs.md']
+      expect(buildMd).toContain('# Referência: scripts/build.cjs')
+      expect(buildMd).toContain('Aviso de Compatibilidade Gemini')
+      expect(buildMd).toContain('não é executável')
+      expect(buildMd).toContain('const x = require("fs");')
+
+      // Derived SKILL.md has updated links and compatibility notes
+      expect(adaptation.package.skillMd).toContain('[build script](references/scripts/build.cjs.md)')
+      expect(adaptation.package.skillMd).toContain('[handler](references/src/handler.ts.md)')
+      expect(adaptation.package.skillMd).toContain('## Compatibilidade Gemini — Scripts Adaptados')
+
+      // Canonical package was not modified in-place
+      expect(canonical.skillMd).toContain('scripts/build.cjs')
+      expect(canonical.artifacts['scripts/build.cjs']).toBeDefined()
+    })
+
+    it('generates resilient Markdown fences when source code contains internal backticks', () => {
+      const codeWithTripleBackticks = `
+const template = \`\`\`
+hello world
+\`\`\`;
+console.log(template);
+`
+      const fence = generateMarkdownFence(codeWithTripleBackticks)
+      expect(fence.length).toBeGreaterThanOrEqual(4)
+
+      const formatted = formatAdaptedReferenceMarkdown('scripts/test.ts', codeWithTripleBackticks, 'typescript')
+      expect(formatted).toContain(fence)
+      expect(formatted.endsWith(`${fence}\n`)).toBe(true)
+    })
+
+    it('detects and rejects collisions with existing files', () => {
+      const collisionPackage = makePackage('colliding-skill', 'Colliding paths', {
+        'scripts/tool.ts': 'export const a = 1;',
+        'references/scripts/tool.ts.md': '# Existing file'
+      })
+      const adaptation = adaptGeminiPackage(collisionPackage)
+      expect(adaptation.rejectionReason).toBeDefined()
+      expect(adaptation.rejectionReason).toContain('Colisão de caminho')
     })
   })
 
@@ -266,7 +386,7 @@ describe('Gemini Export Packager & Service', () => {
         keepPrivate: true
       })
       const excludedIncompatible = store.create({
-        package: makePackage('delta-script', 'Delta with sh', { 'test.sh': '#!/bin/bash\nexit 0' }),
+        package: makePackage('delta-binary', 'Delta with exe', { 'test.exe': 'binary-payload' }),
         scope: 'GLOBAL',
         origin: 'UI'
       })
@@ -522,6 +642,33 @@ describe('Gemini Export Packager & Service', () => {
       const innerEntries = readZipEntries(innerZip!.data)
       const skillMd = innerEntries.find((e) => e.path === 'SKILL.md')
       expect(skillMd!.data.toString('utf8')).toContain('Version 2 updated content')
+    })
+
+    it('detects drift when receipt has a different profile version', async () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+
+      const skill = store.create({
+        package: makePackage('versioned-skill', 'Test profile versioning'),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const receipt = await service.prepareExport()
+      expect(receipt.profileVersion).toBe(GEMINI_ADAPTATION_PROFILE_VERSION)
+      expect(service.getState().drifted).toBe(false)
+
+      // Manually tamper the disk receipt to simulate legacy receipt from before adaptation
+      const diskReceipt = JSON.parse(readFileSync(service.receiptPath, 'utf8'))
+      diskReceipt.profileVersion = 'v0-legacy'
+      const { writeFile } = await import('node:fs/promises')
+      await writeFile(service.receiptPath, JSON.stringify(diskReceipt, null, 2))
+
+      // New service instance loading the legacy receipt
+      const serviceLegacy = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const legacyState = serviceLegacy.getState()
+      expect(legacyState.drifted).toBe(true)
+      expect(legacyState.coverage.awaitingZip).toBe(1)
     })
   })
 })

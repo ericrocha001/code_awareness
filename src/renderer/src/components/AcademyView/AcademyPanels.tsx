@@ -380,6 +380,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
   const eligibleCount = coverage?.eligible ?? 0
   const catalogCount = coverage?.catalog ?? 0
   const notApplicableCount = coverage?.notApplicable ?? 0
+  const adaptedCount = coverage?.adaptedCount ?? 0
   const excluded = coverage?.excluded ?? []
   const awaitingCount = coverage?.awaitingZip ?? 0
   const latest = geminiExport?.latestExport ?? null
@@ -446,6 +447,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
             {hydration !== 'LOADING' && (
               <span>
                 {' '}· {catalogCount} no catálogo{notApplicableCount > 0 ? ` · ${notApplicableCount} de projeto (não aplicável)` : ''}
+                {adaptedCount > 0 ? ` · ${adaptedCount} com scripts adaptados` : ''}
               </span>
             )}
           </p>
@@ -465,7 +467,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
           )}
 
           <p className="academy-policy-caption">
-            Requisitos do Gemini Web: identificador kebab-case, tamanho até 100MB e extensões suportadas (documentos, markdown, JSON, imagens).
+            Requisitos do Gemini Web: identificador kebab-case, tamanho até 100MB e extensões suportadas. Scripts incompatíveis são convertidos em referências textuais não executáveis.
           </p>
 
           <div className="academy-plugin-cta-row">
@@ -516,6 +518,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
                 <strong className="academy-plugin-version">academy-gemini.zip</strong>
                 <span>
                   {latest.skillCount} {latest.skillCount === 1 ? 'Skill individual' : 'Skills individuais'}
+                  {latest.convertedCount && latest.convertedCount > 0 ? ` (${latest.convertedCount} com scripts adaptados)` : ''}
                 </span>
               </div>
               <p className="academy-plugin-freshness">
