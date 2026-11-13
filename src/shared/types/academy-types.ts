@@ -98,6 +98,7 @@ export interface AcademyGeminiCoverage {
   includedInLastZip: number | null
   awaitingZip: number
   notApplicable: number
+  adaptedCount?: number
   excluded: AcademyGeminiExcludedSkill[]
 }
 
@@ -107,15 +108,18 @@ export interface AcademyGeminiSkillExportEntry {
   zipSha256: string
   entryCount: number
   byteLength: number
+  adaptedFiles?: Array<{ originalPath: string; adaptedPath: string; language?: string }>
 }
 
 export interface AcademyGeminiExportReceipt {
   exportId: string
   exportedAt: string
   snapshotHash: string
+  profileVersion?: string
   artifactPath: string
   artifactHash: string
   skillCount: number
+  convertedCount?: number
   totalBytes: number
   skills: AcademyGeminiSkillExportEntry[]
 }

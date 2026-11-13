@@ -11,6 +11,7 @@ import {
   executeGeminiExport,
   geminiInclusion,
   hashGeminiSnapshot,
+  GEMINI_ADAPTATION_PROFILE_VERSION,
   type AcademyGeminiExportTask
 } from './gemini-export-model'
 import type { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
@@ -80,7 +81,8 @@ export class AcademyGeminiExportService {
     const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
     const canonicalSnapshotHash = hashGeminiSnapshot(canonicalSnapshot)
     const artifactAvailable = Boolean(this.latestReceipt && existsSync(this.latestReceipt.artifactPath))
-    const drifted = !this.latestReceipt || this.latestReceipt.snapshotHash !== canonicalSnapshotHash || !artifactAvailable
+    const profileMatch = this.latestReceipt?.profileVersion === GEMINI_ADAPTATION_PROFILE_VERSION
+    const drifted = !this.latestReceipt || !profileMatch || this.latestReceipt.snapshotHash !== canonicalSnapshotHash || !artifactAvailable
 
     return {
       latestExport: this.latestReceipt,
@@ -121,6 +123,7 @@ export class AcademyGeminiExportService {
         receiptPath: this.receiptPath,
         downloadsPath: this.downloadsPath,
         snapshotHash: currentSnapshotHash,
+        profileVersion: GEMINI_ADAPTATION_PROFILE_VERSION,
         skills: eligible.map((skill) => {
           const detail = this.store.get(skill.id)
           return {
