@@ -92,7 +92,7 @@ export class AcademyGeminiExportService {
     }
   }
 
-  async prepareExport(): Promise<AcademyGeminiExportReceipt> {
+  async prepareExport(taskOverrides?: Partial<AcademyGeminiExportTask>): Promise<AcademyGeminiExportReceipt> {
     const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
     const snapshotHash = hashGeminiSnapshot(canonicalSnapshot)
 
@@ -129,7 +129,8 @@ export class AcademyGeminiExportService {
             packageHash: detail.current.packageHash,
             package: detail.current.package
           }
-        })
+        }),
+        ...taskOverrides
       }
 
       try {
@@ -154,9 +155,10 @@ export class AcademyGeminiExportService {
 
     this.flights.set(snapshotHash, flight)
     this.executionTail = flight.catch(() => {})
-    void flight.finally(() => {
+    const settleFlight = () => {
       this.flights.delete(snapshotHash)
-    })
+    }
+    void flight.then(settleFlight, settleFlight)
 
     return flight
   }

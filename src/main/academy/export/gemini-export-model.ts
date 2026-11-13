@@ -332,16 +332,15 @@ export interface AcademyGeminiExportTask {
     packageHash: string
     package: AcademyPackage
   }>
+  _failStage?: 'stage-zip' | 'stage-receipt' | 'promote'
 }
 
-async function atomicWrite(filePath: string, buffer: Buffer): Promise<void> {
-  const temporary = `${filePath}.${randomUUID()}.tmp`
-  await writeFile(temporary, buffer)
+async function safeMove(source: string, destination: string): Promise<void> {
   try {
-    await rename(temporary, filePath)
+    await rename(source, destination)
   } catch {
-    await copyFile(temporary, filePath)
-    await unlink(temporary).catch(() => {})
+    await copyFile(source, destination)
+    await unlink(source).catch(() => {})
   }
 }
 
@@ -374,20 +373,6 @@ export async function executeGeminiExport(
   const master = createGeminiMasterZip(skillZips)
   recordPhase('masterCompressionMs')
 
-  await mkdir(task.exportDirectory, { recursive: true })
-  await atomicWrite(task.masterZipPath, master.masterBuffer)
-
-  if (task.downloadsPath) {
-    try {
-      await mkdir(task.downloadsPath, { recursive: true })
-      const dest = join(task.downloadsPath, 'academy-gemini.zip')
-      await atomicWrite(dest, master.masterBuffer)
-    } catch {
-      // Ignore download destination failure
-    }
-  }
-  recordPhase('diskWriteMs')
-
   const receipt: AcademyGeminiExportReceipt = {
     exportId: randomUUID(),
     exportedAt: new Date().toISOString(),
@@ -404,15 +389,102 @@ export async function executeGeminiExport(
       byteLength: s.byteLength
     }))
   }
-
   const receiptJson = Buffer.from(JSON.stringify(receipt, null, 2), 'utf8')
-  await atomicWrite(task.receiptPath, receiptJson)
-  recordPhase('receiptWriteMs')
 
-  return {
-    artifactPath: task.masterZipPath,
-    artifactHash: master.masterHash,
-    receipt,
-    phases
+  await mkdir(task.exportDirectory, { recursive: true })
+
+  // Stage new artifacts in temporary files first to protect existing valid export
+  const stagedZipPath = `${task.masterZipPath}.${randomUUID()}.stage`
+  const stagedReceiptPath = `${task.receiptPath}.${randomUUID()}.stage`
+  let stagedDownloadPath: string | null = null
+
+  if (task.downloadsPath) {
+    try {
+      await mkdir(task.downloadsPath, { recursive: true })
+      stagedDownloadPath = `${join(task.downloadsPath, 'academy-gemini.zip')}.${randomUUID()}.stage`
+    } catch {
+      stagedDownloadPath = null
+    }
+  }
+
+  try {
+    if (task._failStage === 'stage-zip') {
+      throw new Error('SIMULATED_STAGE_ZIP_FAILURE')
+    }
+    await writeFile(stagedZipPath, master.masterBuffer)
+
+    if (task._failStage === 'stage-receipt') {
+      throw new Error('SIMULATED_STAGE_RECEIPT_FAILURE')
+    }
+    await writeFile(stagedReceiptPath, receiptJson)
+
+    if (stagedDownloadPath) {
+      try {
+        await writeFile(stagedDownloadPath, master.masterBuffer)
+      } catch {
+        stagedDownloadPath = null
+      }
+    }
+    recordPhase('diskWriteMs')
+
+    // Two-phase promotion with rollback preservation of previous artifacts
+    let backupZipPath: string | null = null
+    let backupReceiptPath: string | null = null
+
+    try {
+      if (existsSync(task.masterZipPath)) {
+        backupZipPath = `${task.masterZipPath}.${randomUUID()}.bak`
+        await safeMove(task.masterZipPath, backupZipPath)
+      }
+      if (existsSync(task.receiptPath)) {
+        backupReceiptPath = `${task.receiptPath}.${randomUUID()}.bak`
+        await safeMove(task.receiptPath, backupReceiptPath)
+      }
+
+      if (task._failStage === 'promote') {
+        throw new Error('SIMULATED_PROMOTE_FAILURE')
+      }
+
+      await safeMove(stagedZipPath, task.masterZipPath)
+      await safeMove(stagedReceiptPath, task.receiptPath)
+
+      if (stagedDownloadPath && task.downloadsPath) {
+        const downloadDest = join(task.downloadsPath, 'academy-gemini.zip')
+        try {
+          await safeMove(stagedDownloadPath, downloadDest)
+        } catch {
+          await unlink(stagedDownloadPath).catch(() => {})
+        }
+      }
+
+      // Promotion succeeded: remove backups
+      if (backupZipPath) await unlink(backupZipPath).catch(() => {})
+      if (backupReceiptPath) await unlink(backupReceiptPath).catch(() => {})
+    } catch (promotionError) {
+      // Rollback to restore previous valid export
+      if (backupZipPath && existsSync(backupZipPath)) {
+        await safeMove(backupZipPath, task.masterZipPath).catch(() => {})
+      }
+      if (backupReceiptPath && existsSync(backupReceiptPath)) {
+        await safeMove(backupReceiptPath, task.receiptPath).catch(() => {})
+      }
+      throw promotionError
+    }
+
+    recordPhase('receiptWriteMs')
+
+    return {
+      artifactPath: task.masterZipPath,
+      artifactHash: master.masterHash,
+      receipt,
+      phases
+    }
+  } finally {
+    // Always clean up any leftover staging files
+    await unlink(stagedZipPath).catch(() => {})
+    await unlink(stagedReceiptPath).catch(() => {})
+    if (stagedDownloadPath) {
+      await unlink(stagedDownloadPath).catch(() => {})
+    }
   }
 }

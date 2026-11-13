@@ -422,5 +422,106 @@ describe('Gemini Export Packager & Service', () => {
       const masterEntries = readZipEntries(readFileSync(receipt.artifactPath))
       expect(masterEntries.map((e) => e.path)).toEqual(['worker-tested-skill.zip'])
     })
+
+    it('manages flight rejection cleanly without unhandled rejection and recovers on retry', async () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+
+      const skill = store.create({
+        package: makePackage('resilient-skill', 'Tests failure and recovery'),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const unhandledRejections: unknown[] = []
+      const onUnhandled = (reason: unknown) => {
+        unhandledRejections.push(reason)
+      }
+      process.on('unhandledRejection', onUnhandled)
+
+      try {
+        // 1. Success validation
+        const receipt1 = await service.prepareExport()
+        expect(receipt1.skillCount).toBe(1)
+        expect(service.getState().lastError).toBeNull()
+
+        // 2. Failure validation: simulated failure during staging phase
+        await expect(service.prepareExport({ _failStage: 'stage-receipt' })).rejects.toThrow('SIMULATED_STAGE_RECEIPT_FAILURE')
+
+        // Allow microtasks to complete to detect any stray unhandled rejection
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(unhandledRejections).toHaveLength(0)
+
+        // Error registered in state, but latestExport remains intact
+        const stateAfterFail = service.getState()
+        expect(stateAfterFail.lastError).toContain('SIMULATED_STAGE_RECEIPT_FAILURE')
+        expect(stateAfterFail.latestExport?.exportId).toBe(receipt1.exportId)
+
+        // 3. Recovery validation: consecutive call succeeds and clears lastError
+        const receiptRecovered = await service.prepareExport()
+        expect(receiptRecovered.skillCount).toBe(1)
+        expect(service.getState().lastError).toBeNull()
+        expect(unhandledRejections).toHaveLength(0)
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
+    })
+
+    it('preserves previous valid export on intermediate write and promotion failures', async () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+
+      const skill = store.create({
+        package: makePackage('preserved-skill', 'Version 1 baseline content'),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      // 1. Establish initial valid export
+      const initialReceipt = await service.prepareExport()
+      const initialZipBytes = readFileSync(initialReceipt.artifactPath)
+      const initialReceiptBytes = readFileSync(service.receiptPath)
+
+      // 2. Update skill in store so a new export will be generated
+      store.update({
+        skillId: skill.id,
+        expectedVersion: skill.currentVersion,
+        package: makePackage('preserved-skill', 'Version 2 updated content'),
+        origin: 'UI'
+      })
+
+      // 3. Simulate failure at staging phase
+      await expect(service.prepareExport({ _failStage: 'stage-receipt' })).rejects.toThrow('SIMULATED_STAGE_RECEIPT_FAILURE')
+
+      // Verify previous valid zip and receipt are 100% UNTOUCHED
+      expect(readFileSync(initialReceipt.artifactPath)).toEqual(initialZipBytes)
+      expect(readFileSync(service.receiptPath)).toEqual(initialReceiptBytes)
+      expect(service.getState().latestExport?.exportId).toBe(initialReceipt.exportId)
+      expect(service.getState().artifactAvailable).toBe(true)
+
+      // 4. Simulate failure at promotion phase (after backup created)
+      await expect(service.prepareExport({ _failStage: 'promote' })).rejects.toThrow('SIMULATED_PROMOTE_FAILURE')
+
+      // Verify rollback restored the previous valid zip and receipt
+      expect(readFileSync(initialReceipt.artifactPath)).toEqual(initialZipBytes)
+      expect(readFileSync(service.receiptPath)).toEqual(initialReceiptBytes)
+      expect(service.getState().latestExport?.exportId).toBe(initialReceipt.exportId)
+      expect(service.getState().artifactAvailable).toBe(true)
+
+      // 5. Recovery: normal export succeeds and cleanly replaces artifact
+      const recoveredReceipt = await service.prepareExport()
+      expect(recoveredReceipt.snapshotHash).not.toBe(initialReceipt.snapshotHash)
+      expect(recoveredReceipt.artifactHash).not.toBe(initialReceipt.artifactHash)
+      expect(service.getState().lastError).toBeNull()
+      expect(service.getState().drifted).toBe(false)
+
+      // Content inside updated master zip reflects Version 2
+      const masterEntries = readZipEntries(readFileSync(recoveredReceipt.artifactPath))
+      const innerZip = masterEntries.find((e) => e.path === 'preserved-skill.zip')
+      expect(innerZip).toBeDefined()
+      const innerEntries = readZipEntries(innerZip!.data)
+      const skillMd = innerEntries.find((e) => e.path === 'SKILL.md')
+      expect(skillMd!.data.toString('utf8')).toContain('Version 2 updated content')
+    })
   })
 })
