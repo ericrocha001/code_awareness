@@ -22,7 +22,7 @@ import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '..
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChannelState } from '../../shared/types/channel-state-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademySkillDeliveryStatus, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type { AcademyCreateInput, AcademySkillDeliveryStatus, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyGeminiExportReceipt, AcademyGeminiExportState } from '../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../../shared/types/github-types'
 
@@ -118,6 +118,9 @@ declare global {
       saveAcademyManifestVersion: (input: { preview: import('../../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }) => Promise<AcademyGitStatusProjection>
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
+      getAcademyGeminiExportState: () => Promise<AcademyGeminiExportState>
+      prepareAcademyGeminiExport: () => Promise<AcademyGeminiExportReceipt>
+      revealAcademyGeminiExport: () => Promise<string>
       getChannelState: () => Promise<ChannelState>
       chooseCliMode: (mode: import('../../shared/types/cli-policy-types').CliMode, scope?: import('../../shared/types/cli-policy-types').CliTrustScope) => Promise<{ accepted: boolean }>
       stopCliExecution: () => Promise<{ stopped: boolean }>

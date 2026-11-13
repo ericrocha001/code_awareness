@@ -12,10 +12,12 @@ import { observeStableSkillDirectory, readSkillDirectory, removeSkillDirectory, 
 import { AcademyDistributionService } from './distribution/academy-distribution-service'
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
+import { AcademyPluginExecutor } from './publication/academy-plugin-executor'
+import { AcademyGeminiExportService } from './export/academy-gemini-export-service'
 import { canonicalJson } from './publication/openai-plugin-model'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
 import type { AcademyGitBuildRequest } from '../../shared/types/academy-git-source-types'
-import type { AcademyOpenAiRelease } from '../../shared/types/academy-types'
+import type { AcademyOpenAiRelease, AcademyGeminiExportReceipt, AcademyGeminiExportState } from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
 import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
@@ -30,6 +32,7 @@ export class AcademyService {
   readonly distribution: AcademyDistributionService
   readonly packageRevisions: AcademyPluginPackageRevisionService
   readonly openAiPublication: OpenAiPluginPublicationService
+  readonly geminiExport: AcademyGeminiExportService
   gitSync: AcademyGitSyncService | null = null
   private readonly canonicalChangeListeners: Set<() => void> = new Set()
   private readonly distributionChangeListeners: Set<(kind: 'distribution' | 'git' | 'publication') => void> = new Set()
@@ -47,8 +50,11 @@ export class AcademyService {
     this.projections = new AcademyProjectionService(this.store)
     this.distribution = new AcademyDistributionService(this.store)
     this.packageRevisions = new AcademyPluginPackageRevisionService(this.store)
+    const pluginExecutor = new AcademyPluginExecutor(pluginWorkerPath)
     this.openAiPublication = new OpenAiPluginPublicationService(this.store, this.packageRevisions, databasePath, downloadsPath, pluginWorkerPath)
     this.openAiPublication.onOperationChange(() => this.emitDistributionChange('publication'))
+    this.geminiExport = new AcademyGeminiExportService(this.store, databasePath, downloadsPath, pluginExecutor)
+    this.geminiExport.onChange(() => this.emitDistributionChange('publication'))
     this.importer = new AcademyImporter(this.store)
     this.watcher = new AcademyWatcher(this.store, this.projections)
   }
@@ -793,6 +799,9 @@ export class AcademyService {
     return this.openAiPublication.prepareRelease()
   }
   confirmOpenAiUpload(releaseId: string, artifactHash: string) { return this.openAiPublication.confirmUpload(releaseId, artifactHash) }
+  getGeminiExportState(): AcademyGeminiExportState { return this.geminiExport.getState() }
+  prepareGeminiExport(): Promise<AcademyGeminiExportReceipt> { return this.geminiExport.prepareExport() }
+  getGeminiExportArtifactPath(): Promise<string | null> { return Promise.resolve(this.geminiExport.getArtifactPath()) }
   start(): void {
     this.assertNotClosed()
     this.watcher.start()

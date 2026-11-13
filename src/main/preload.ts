@@ -32,7 +32,7 @@ import type { ConnectionResult, ConnectionState } from '../shared/types/connecti
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { LocalMcpClientApi } from '../shared/types/local-mcp-client-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem, AcademyGeminiExportReceipt, AcademyGeminiExportState } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
@@ -146,6 +146,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   saveAcademyManifestVersion: (input: { preview: import('../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:manifest-version-save', input),
   confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
+  getAcademyGeminiExportState: (): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-state'),
+  prepareAcademyGeminiExport: (): Promise<AcademyGeminiExportReceipt> => ipcRenderer.invoke('academy:gemini-export-prepare'),
+  revealAcademyGeminiExport: (): Promise<string> => ipcRenderer.invoke('academy:gemini-export-reveal'),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),
   syncAcademyGitNow: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-sync-now'),
   resolveAcademyGitConflict: (expectedRemoteHead: string | null, expectedDesiredTree: string): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-resolve-conflict', expectedRemoteHead, expectedDesiredTree),

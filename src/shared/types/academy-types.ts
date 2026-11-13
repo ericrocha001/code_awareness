@@ -81,6 +81,54 @@ export interface AcademyPluginCoverage {
   preference: AcademyPublicationPreference
 }
 
+export type AcademyGeminiExclusionReason = 'PRIVATE' | 'DISABLED' | 'INCOMPATIBLE' | 'REMOVED'
+
+export interface AcademyGeminiExcludedSkill {
+  skillId: string
+  name: string
+  version: number
+  reason: AcademyGeminiExclusionReason
+  action?: 'APPROVE_PUBLICATION' | 'ENABLE_SKILL' | 'REINTRODUCE_SKILL' | 'VIEW_SKILL'
+  details?: string
+}
+
+export interface AcademyGeminiCoverage {
+  catalog: number
+  eligible: number
+  includedInLastZip: number | null
+  awaitingZip: number
+  notApplicable: number
+  excluded: AcademyGeminiExcludedSkill[]
+}
+
+export interface AcademyGeminiSkillExportEntry {
+  name: string
+  packageHash?: string
+  zipSha256: string
+  entryCount: number
+  byteLength: number
+}
+
+export interface AcademyGeminiExportReceipt {
+  exportId: string
+  exportedAt: string
+  snapshotHash: string
+  artifactPath: string
+  artifactHash: string
+  skillCount: number
+  totalBytes: number
+  skills: AcademyGeminiSkillExportEntry[]
+}
+
+export interface AcademyGeminiExportState {
+  latestExport: AcademyGeminiExportReceipt | null
+  coverage: AcademyGeminiCoverage
+  canonicalSnapshotHash: string
+  drifted: boolean
+  artifactAvailable: boolean
+  lastError: string | null
+}
+
 export type AcademyPublicationOutcome =
   | { included: true; reason: 'APPROVED_BY_PREFERENCE' | 'APPROVED_EXPLICITLY' }
   | { included: false; reason: 'PRIVATE_NO_AUTHORIZATION' | 'PRIVATE_BY_CHOICE' | 'PROJECT_SCOPE'; action?: 'APPROVE_PUBLICATION' }

@@ -18,13 +18,16 @@ import type {
   AcademySkillDetail,
   AcademySkillScope,
   AcademySkillSummary,
-  AcademySkillVersion
+  AcademySkillVersion,
+  AcademyGeminiExcludedSkill,
+  AcademyGeminiExportReceipt,
+  AcademyGeminiExportState
 } from '../../../../shared/types/academy-types'
 import type { AcademyPersistedPublication } from '../../../../shared/types/academy-bootstrap-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
 import { AcademyConflicts } from './AcademyConflicts'
 
-export type AcademySurface = 'PLUGIN' | 'SKILLS'
+export type AcademySurface = 'PLUGIN' | 'GEMINI' | 'SKILLS'
 export type AcademyTab = 'skill' | 'history'
 
 function resolveCurrentRelease(publication: AcademyOpenAiPublicationState | null): AcademyOpenAiRelease | null {
@@ -100,7 +103,7 @@ export const AcademyHeader: React.FC<AcademyHeaderProps> = ({
     <div className="academy-header-brand">
       <div>
         <h2>Academy</h2>
-        <p className="academy-header-subtitle">Empacote e mantenha suas Skills para o ChatGPT</p>
+        <p className="academy-header-subtitle">Empacote e mantenha suas Skills</p>
       </div>
       <nav className="academy-surface-nav" aria-label="Navegação da Academy">
         <button
@@ -110,6 +113,14 @@ export const AcademyHeader: React.FC<AcademyHeaderProps> = ({
           onClick={() => onSurfaceChange('PLUGIN')}
         >
           Plugin ChatGPT
+        </button>
+        <button
+          type="button"
+          className={`academy-surface-tab${surface === 'GEMINI' ? ' active' : ''}`}
+          aria-pressed={surface === 'GEMINI'}
+          onClick={() => onSurfaceChange('GEMINI')}
+        >
+          Gemini
         </button>
         <button
           type="button"
@@ -329,6 +340,220 @@ export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function formatDate(iso: string): string {
+  try {
+    const d = new Date(iso)
+    return d.toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })
+  } catch {
+    return iso
+  }
+}
+
+interface GeminiOverviewSurfaceProps {
+  hydration: 'LOADING' | 'READY' | 'ERROR'
+  geminiExport: AcademyGeminiExportState | null
+  preparing: boolean
+  geminiError: string | null
+  onPrepareExport: () => void
+  onRevealExport: () => void
+  onOpenReview: () => void
+  onOpenSkills: () => void
+}
+
+export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
+  hydration,
+  geminiExport,
+  preparing,
+  geminiError,
+  onPrepareExport,
+  onRevealExport,
+  onOpenReview,
+  onOpenSkills
+}) => {
+  const coverage = geminiExport?.coverage
+  const eligibleCount = coverage?.eligible ?? 0
+  const catalogCount = coverage?.catalog ?? 0
+  const notApplicableCount = coverage?.notApplicable ?? 0
+  const excluded = coverage?.excluded ?? []
+  const awaitingCount = coverage?.awaitingZip ?? 0
+  const latest = geminiExport?.latestExport ?? null
+  const artifactAvailable = Boolean(geminiExport?.artifactAvailable)
+  const drifted = Boolean(geminiExport?.drifted)
+
+  const headline = !latest
+    ? 'Exporte suas Skills para o Gemini Web com um clique'
+    : drifted
+      ? 'Alterações recentes aguardam novo pacote Gemini'
+      : 'Pacote Gemini pronto para importação'
+
+  const exclusionCounts = {
+    PRIVATE: excluded.filter((item) => item.reason === 'PRIVATE').length,
+    DISABLED: excluded.filter((item) => item.reason === 'DISABLED').length,
+    INCOMPATIBLE: excluded.filter((item) => item.reason === 'INCOMPATIBLE').length,
+    REMOVED: excluded.filter((item) => item.reason === 'REMOVED').length
+  }
+  const exclusionParts: string[] = []
+  if (exclusionCounts.INCOMPATIBLE > 0) {
+    exclusionParts.push(
+      `${exclusionCounts.INCOMPATIBLE} ${exclusionCounts.INCOMPATIBLE === 1 ? 'incompatível' : 'incompatíveis'}`
+    )
+  }
+  if (exclusionCounts.PRIVATE > 0) {
+    exclusionParts.push(`${exclusionCounts.PRIVATE} ${exclusionCounts.PRIVATE === 1 ? 'privada' : 'privadas'}`)
+  }
+  if (exclusionCounts.DISABLED > 0) {
+    exclusionParts.push(`${exclusionCounts.DISABLED} ${exclusionCounts.DISABLED === 1 ? 'desativada' : 'desativadas'}`)
+  }
+  if (exclusionCounts.REMOVED > 0) {
+    exclusionParts.push(`${exclusionCounts.REMOVED} ${exclusionCounts.REMOVED === 1 ? 'removida' : 'removidas'}`)
+  }
+
+  const exportSignal = !latest
+    ? { tone: 'draft' as const, label: 'Aguardando geração' }
+    : drifted
+      ? { tone: 'stale' as const, label: 'Desatualizado' }
+      : { tone: 'published' as const, label: 'Pronto' }
+
+  const nextStepText = artifactAvailable
+    ? 'Extraia o arquivo academy-gemini.zip para obter os ZIPs individuais e importe-os no Gemini Apps Web.'
+    : awaitingCount > 0
+      ? 'Gere o pacote mestre atualizado para incluir todas as Skills compatíveis.'
+      : 'Gere o pacote Gemini a qualquer momento; edição de Skills continua na aba secundária.'
+
+  return (
+    <section className="academy-plugin-shell" aria-label="Exportação Gemini">
+      <div className="academy-plugin-stage">
+        <div className="academy-plugin-action">
+          <div className="academy-plugin-eyebrow-row">
+            <span className="academy-plugin-eyebrow">Gemini Apps Web</span>
+            <ContextHelp label="Como funciona a exportação Gemini" hint="ZIP mestre com Skills individuais compatíveis">
+              O Gemini Apps Web aceita Skills empacotadas em arquivos ZIP individuais, com o arquivo SKILL.md na raiz de cada pasta. Esta exportação cria um arquivo mestre academy-gemini.zip contendo os ZIPs prontos para importação.
+            </ContextHelp>
+          </div>
+          <h3 className="academy-plugin-title">{headline}</h3>
+          <p className="academy-plugin-coverage-summary" data-testid="academy-gemini-coverage-summary">
+            <strong>
+              {hydration === 'LOADING'
+                ? 'Carregando catálogo…'
+                : `${eligibleCount} ${eligibleCount === 1 ? 'Skill compatível' : 'Skills compatíveis'} para Gemini`}
+            </strong>
+            {hydration !== 'LOADING' && (
+              <span>
+                {' '}· {catalogCount} no catálogo{notApplicableCount > 0 ? ` · ${notApplicableCount} de projeto (não aplicável)` : ''}
+              </span>
+            )}
+          </p>
+
+          {excluded.length > 0 && (
+            <div className="academy-excluded-notice" data-ui-state="warning">
+              <div className="academy-excluded-copy">
+                <strong>
+                  {excluded.length} {excluded.length === 1 ? 'Skill fora do pacote' : 'Skills fora do pacote'}
+                </strong>
+                <span> ({exclusionParts.join(' · ')})</span>
+              </div>
+              <Button variant="outline" intent="neutral" size="compact" onClick={onOpenReview}>
+                Revisar
+              </Button>
+            </div>
+          )}
+
+          <p className="academy-policy-caption">
+            Requisitos do Gemini Web: identificador kebab-case, tamanho até 100MB e extensões suportadas (documentos, markdown, JSON, imagens).
+          </p>
+
+          <div className="academy-plugin-cta-row">
+            {preparing ? (
+              <Button variant="solid" intent="primary" size="comfortable" disabled>
+                Gerando pacote Gemini…
+              </Button>
+            ) : artifactAvailable && !drifted && latest ? (
+              <>
+                <Button variant="solid" intent="primary" size="comfortable" onClick={onRevealExport}>
+                  Abrir ZIP
+                </Button>
+                <Button variant="ghost" intent="neutral" size="compact" onClick={onPrepareExport}>
+                  Regerar ZIP
+                </Button>
+              </>
+            ) : artifactAvailable && drifted && latest ? (
+              <>
+                <Button variant="solid" intent="primary" size="comfortable" onClick={onPrepareExport}>
+                  Gerar ZIP atualizado
+                </Button>
+                <Button variant="ghost" intent="neutral" size="compact" onClick={onRevealExport}>
+                  Abrir ZIP anterior
+                </Button>
+              </>
+            ) : (
+              <Button variant="solid" intent="primary" size="comfortable" onClick={onPrepareExport}>
+                Gerar pacote Gemini
+              </Button>
+            )}
+          </div>
+
+          {(geminiError || geminiExport?.lastError) && (
+            <div className="academy-plugin-diagnostic" data-ui-state="error" role="status">
+              {geminiError || geminiExport?.lastError}
+            </div>
+          )}
+        </div>
+
+        <aside className="academy-plugin-result" aria-label="Resultado do pacote Gemini">
+          <div className="academy-plugin-result-header">
+            <span>Pacote Gemini</span>
+            <span className={`academy-signal ${exportSignal.tone}`}>{exportSignal.label}</span>
+          </div>
+          {latest ? (
+            <div className="academy-plugin-result-body">
+              <div className="academy-plugin-version-row">
+                <strong className="academy-plugin-version">academy-gemini.zip</strong>
+                <span>
+                  {latest.skillCount} {latest.skillCount === 1 ? 'Skill individual' : 'Skills individuais'}
+                </span>
+              </div>
+              <p className="academy-plugin-freshness">
+                {drifted
+                  ? `${awaitingCount} ${awaitingCount === 1 ? 'alteração aguarda' : 'alterações aguardam'} novo pacote.`
+                  : artifactAvailable
+                    ? `Gerado em ${formatDate(latest.exportedAt)} (${formatBytes(latest.totalBytes)}). Pronto para importação.`
+                    : 'Arquivo ZIP não encontrado no disco. Clique para gerar novamente.'}
+              </p>
+              <div className="academy-plugin-result-actions">
+                {artifactAvailable && (
+                  <Button variant="outline" intent="neutral" size="compact" onClick={onRevealExport}>
+                    Mostrar ZIP
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="academy-plugin-empty">
+              <strong>Nenhum pacote Gemini gerado ainda</strong>
+              <p>Gere um arquivo mestre com todas as Skills globais e compatíveis para o Gemini Web.</p>
+            </div>
+          )}
+        </aside>
+      </div>
+
+      <footer className="academy-plugin-footer">
+        <span>{nextStepText}</span>
+        <div className="academy-plugin-footer-actions">
+          <button type="button" className="academy-inline-link" onClick={onOpenSkills}>
+            Ver catálogo de Skills
+          </button>
+        </div>
+      </footer>
+    </section>
+  )
+}
+
 interface PluginReviewModalProps {
   excluded: AcademyPluginExcludedSkill[]
   notApplicableCount: number
@@ -465,6 +690,156 @@ export const PluginReviewModal: React.FC<PluginReviewModalProps> = ({
               onClick={onApproveBatch}
             >
               Incluir selecionadas no plugin ({selectedIds.length})
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+interface GeminiReviewModalProps {
+  excluded: AcademyGeminiExcludedSkill[]
+  notApplicableCount: number
+  selectedIds: string[]
+  busy: boolean
+  onToggleSelected: (skillId: string) => void
+  onApproveSingle: (skillId: string, expectedVersion: number) => void
+  onApproveBatch: () => void
+  onEnableSkill: (skillId: string) => void
+  onOpenSkill: (skillId: string) => void
+  onClose: () => void
+}
+
+export const GeminiReviewModal: React.FC<GeminiReviewModalProps> = ({
+  excluded,
+  notApplicableCount,
+  selectedIds,
+  busy,
+  onToggleSelected,
+  onApproveSingle,
+  onApproveBatch,
+  onEnableSkill,
+  onOpenSkill,
+  onClose
+}) => {
+  const privateItems = excluded.filter((item) => item.reason === 'PRIVATE')
+  const reasonLabel = (reason: AcademyGeminiExcludedSkill['reason']) => {
+    switch (reason) {
+      case 'PRIVATE':
+        return 'Privada · Requer aprovação'
+      case 'DISABLED':
+        return 'Desativada'
+      case 'INCOMPATIBLE':
+        return 'Incompatível com Gemini'
+      case 'REMOVED':
+        return 'Removida localmente'
+    }
+  }
+
+  return (
+    <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Revisar Skills fora do pacote Gemini">
+      <div className="academy-modal academy-modal-wide">
+        <div className="academy-drawer-header">
+          <div>
+            <h3>Skills fora do pacote Gemini</h3>
+            <p className="academy-modal-subcopy">
+              {excluded.length > 0
+                ? 'Veja o motivo pelo qual estas Skills não foram incluídas no pacote Gemini.'
+                : 'Todas as Skills globais ativas são compatíveis e estão incluídas.'}
+              {notApplicableCount > 0 ? ` (${notApplicableCount} com escopo PROJECT não entram no pacote.)` : ''}
+            </p>
+          </div>
+          <Button variant="ghost" intent="neutral" size="compact" onClick={onClose}>
+            Fechar
+          </Button>
+        </div>
+
+        <div className="academy-review-list">
+          {excluded.length === 0 ? (
+            <p className="academy-empty-note">Nenhuma Skill excluída no momento.</p>
+          ) : (
+            excluded.map((item) => (
+              <div key={item.skillId} className="academy-review-row">
+                <div className="academy-review-info">
+                  {item.reason === 'PRIVATE' && (
+                    <input
+                      type="checkbox"
+                      aria-label={`Selecionar ${item.name} para inclusão`}
+                      checked={selectedIds.includes(item.skillId)}
+                      onChange={() => onToggleSelected(item.skillId)}
+                    />
+                  )}
+                  <div>
+                    <strong>{item.name}</strong>
+                    <div className="academy-review-reason">
+                      <span className={`academy-badge ${item.reason === 'INCOMPATIBLE' ? 'warning' : 'scope'}`}>
+                        {reasonLabel(item.reason)}
+                      </span>
+                      <span>v{item.version}</span>
+                    </div>
+                    {item.details && <p className="academy-review-details">{item.details}</p>}
+                  </div>
+                </div>
+                <div className="academy-review-actions">
+                  {item.reason === 'PRIVATE' && (
+                    <Button
+                      variant="solid"
+                      intent="primary"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onApproveSingle(item.skillId, item.version)}
+                    >
+                      Aprovar publicação
+                    </Button>
+                  )}
+                  {item.reason === 'DISABLED' && (
+                    <Button
+                      variant="outline"
+                      intent="neutral"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onEnableSkill(item.skillId)}
+                    >
+                      Habilitar
+                    </Button>
+                  )}
+                  {item.reason === 'INCOMPATIBLE' && (
+                    <Button
+                      variant="outline"
+                      intent="neutral"
+                      size="compact"
+                      onClick={() => onOpenSkill(item.skillId)}
+                    >
+                      Ver Skill
+                    </Button>
+                  )}
+                  {item.reason === 'REMOVED' && (
+                    <Button
+                      variant="outline"
+                      intent="neutral"
+                      size="compact"
+                      onClick={() => onOpenSkill(item.skillId)}
+                    >
+                      Ver detalhes
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {privateItems.length > 0 && (
+          <div className="academy-modal-actions">
+            <Button
+              variant="solid"
+              intent="primary"
+              size="comfortable"
+              disabled={busy || selectedIds.length === 0}
+              onClick={onApproveBatch}
+            >
+              Aprovar selecionadas ({selectedIds.length})
             </Button>
           </div>
         )}

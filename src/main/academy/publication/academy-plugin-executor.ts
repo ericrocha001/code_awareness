@@ -1,8 +1,10 @@
 import { Worker } from 'node:worker_threads'
 import { join } from 'node:path'
+import { existsSync } from 'node:fs'
 import type { AcademyPluginTask } from './academy-plugin-worker'
 import type { AcademyBuildProjection } from '../../../shared/types/academy-publication-types'
 import { AcademyError } from '../academy-package'
+import type { AcademyGeminiExportReceipt } from '../../../shared/types/academy-types'
 
 export interface AcademyPluginTaskResult {
   projection?: AcademyBuildProjection
@@ -10,11 +12,16 @@ export interface AcademyPluginTaskResult {
   artifactHash?: string
   reused?: boolean
   phases: Record<string, number>
+  receipt?: AcademyGeminiExportReceipt
 }
 
 export class AcademyPluginExecutor {
   private tail: Promise<unknown> = Promise.resolve()
-  constructor(private readonly workerPath = join(__dirname, 'academy-plugin-worker.js')) {}
+  constructor(readonly workerPath = join(__dirname, 'academy-plugin-worker.js')) {}
+
+  hasWorker(): boolean {
+    return existsSync(this.workerPath)
+  }
 
   run(task: AcademyPluginTask, phase?: (name: string, durationMs: number) => void): Promise<AcademyPluginTaskResult> {
     const result = this.tail.then(() => this.execute(task, phase))
