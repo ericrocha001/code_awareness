@@ -1,10 +1,21 @@
 import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
-import type { AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyOpenAiSnapshotEntry } from '../../../shared/types/academy-types'
+import type {
+  AcademyImportConfirmationMode,
+  AcademyImportConfirmationOrigin,
+  AcademyImportConfirmationPreference,
+  AcademyOpenAiDeletionSemantics,
+  AcademyOpenAiPluginProfile,
+  AcademyOpenAiPublicationState,
+  AcademyOpenAiRelease,
+  AcademyOpenAiSnapshotEntry,
+  AcademyOpenAiUploadConfirmation
+} from '../../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage } from '../academy-package'
 import { readSkillDirectory } from '../academy-filesystem'
+import { readSharedImportConfirmationPreference, writeSharedImportConfirmationPreference } from '../import-confirmation-preference'
 import type { AcademyStore } from '../academy-store'
 import type { AcademyPluginPackageRevisionService } from './academy-plugin-package-revision-service'
 import { createDeterministicZip, readZipEntries, type ZipEntry } from './deterministic-zip'
@@ -17,6 +28,7 @@ import { AcademyPluginExecutor, type AcademyPluginTaskResult } from './academy-p
 
 export class OpenAiPluginPublicationService {
   readonly storageRoot: string
+  private readonly academyBaseDir: string
   private readonly executor: AcademyPluginExecutor
   private readonly inventoryFlights = new Map<string, Promise<AcademyBuildProjection>>()
   private readonly physicalFlights = new Map<string, Promise<AcademyPluginTaskResult>>()
@@ -31,7 +43,8 @@ export class OpenAiPluginPublicationService {
     private readonly downloadsPath?: string,
     workerPath?: string
   ) {
-    this.storageRoot = join(dirname(academyDatabasePath), 'openai-plugin')
+    this.academyBaseDir = dirname(academyDatabasePath)
+    this.storageRoot = join(this.academyBaseDir, 'openai-plugin')
     this.executor = new AcademyPluginExecutor(workerPath)
   }
 
@@ -128,8 +141,19 @@ export class OpenAiPluginPublicationService {
       artifactAvailable: Boolean(selectedRelease?.artifactPath && existsSync(selectedRelease.artifactPath)), canonicalSnapshotHash,
       drifted: Boolean(selectedRelease && canonicalSnapshotHash !== selectedRelease.snapshotHash),
       currentPackageRevision,
-      hostedStatus
+      hostedStatus,
+      importConfirmationPreference: this.getImportConfirmationPreference()
     }
+  }
+
+  getImportConfirmationPreference(): AcademyImportConfirmationPreference {
+    return readSharedImportConfirmationPreference(this.academyBaseDir)
+  }
+
+  setImportConfirmationPreference(mode: AcademyImportConfirmationMode): AcademyImportConfirmationPreference {
+    const next = writeSharedImportConfirmationPreference(this.academyBaseDir, mode)
+    this.changed()
+    return next
   }
 
   getRelease(id: string): AcademyOpenAiRelease { this.refreshDrift(); return this.store.getOpenAiRelease(id) }
@@ -338,7 +362,7 @@ export class OpenAiPluginPublicationService {
     console.info('[Academy package]', JSON.stringify({ requestId, buildKey, sourceCommitSha: header.sourceCommitSha, reused: artifact.reused, phases: timings }))
     return result
   }
-  confirmUpload(releaseId: string, artifactHash: string): AcademyOpenAiRelease {
+  confirmUpload(releaseId: string, artifactHash: string, origin: AcademyImportConfirmationOrigin = 'MANUAL'): AcademyOpenAiRelease {
     this.refreshDrift()
     const release = this.store.getOpenAiRelease(releaseId)
     if (this.store.usesGitFirst()) {
@@ -350,11 +374,60 @@ export class OpenAiPluginPublicationService {
     if (latestPrepared?.id !== release.id) throw new AcademyError('OPENAI_RELEASE_NOT_SELECTED')
     if (release.status !== 'READY_TO_UPLOAD') throw new AcademyError('OPENAI_RELEASE_NOT_CONFIRMABLE')
     if (!release.artifactHash || release.artifactHash !== artifactHash) throw new AcademyError('OPENAI_RELEASE_HASH_MISMATCH')
-    const confirmation = { releaseId, pluginVersion: release.pluginVersion, artifactHash, confirmedAt: new Date().toISOString(), method: 'MANUAL_UPLOAD' as const }
+    const confirmation: AcademyOpenAiUploadConfirmation = {
+      releaseId,
+      pluginVersion: release.pluginVersion,
+      artifactHash,
+      confirmedAt: new Date().toISOString(),
+      method: origin === 'ASSUMED_ON_DOWNLOAD' ? 'ASSUMED_ON_DOWNLOAD' : 'MANUAL_UPLOAD',
+      origin
+    }
     this.store.supersedeOpenAiPublishedReleases(releaseId)
     const confirmed = this.store.transitionOpenAiRelease(releaseId, ['READY_TO_UPLOAD'], 'UPLOADED_UNVERIFIED', { uploadConfirmation: confirmation })
     this.store.setOpenAiPublishedVersion(release.pluginVersion)
     return confirmed
+  }
+
+  downloadRelease(releaseId: string, targetDirectory?: string): AcademyOpenAiRelease {
+    this.refreshDrift()
+    const release = this.store.getOpenAiRelease(releaseId)
+    if (!release.artifactPath || !existsSync(release.artifactPath) || !release.artifactHash) {
+      throw new AcademyError('OPENAI_RELEASE_ARTIFACT_MISSING')
+    }
+    const sourceHash = sha256(readFileSync(release.artifactPath))
+    if (sourceHash !== release.artifactHash) {
+      throw new AcademyError('OPENAI_RELEASE_HASH_MISMATCH')
+    }
+    const destinationRoot = targetDirectory ?? this.downloadsPath
+    if (!destinationRoot) {
+      throw new AcademyError('OPENAI_DOWNLOAD_DIRECTORY_UNAVAILABLE')
+    }
+    mkdirSync(destinationRoot, { recursive: true })
+    const destinationPath = join(destinationRoot, `academy-skills-${release.pluginVersion}.zip`)
+    const tempPath = `${destinationPath}.tmp-${process.pid}-${Date.now()}`
+    try {
+      copyFileSync(release.artifactPath, tempPath)
+      if (sha256(readFileSync(tempPath)) !== release.artifactHash) {
+        throw new AcademyError('OPENAI_PLUGIN_DOWNLOAD_COPY_MISMATCH')
+      }
+      renameSync(tempPath, destinationPath)
+    } catch (error) {
+      try { if (existsSync(tempPath)) unlinkSync(tempPath) } catch {}
+      throw error
+    }
+    if (sha256(readFileSync(destinationPath)) !== release.artifactHash) {
+      throw new AcademyError('OPENAI_PLUGIN_DOWNLOAD_COPY_MISMATCH')
+    }
+    if (this.getImportConfirmationPreference().mode === 'AUTOMATIC' && release.status === 'READY_TO_UPLOAD') {
+      return this.confirmUpload(release.id, release.artifactHash, 'ASSUMED_ON_DOWNLOAD')
+    }
+    return this.store.getOpenAiRelease(release.id)
+  }
+
+  revokeUploadConfirmation(releaseId: string): AcademyOpenAiRelease {
+    const revoked = this.store.revokeOpenAiReleaseUpload(releaseId)
+    this.refreshDrift()
+    return this.store.getOpenAiRelease(revoked.id)
   }
 
   verifyRelease(releaseId: string, evidence: string): AcademyOpenAiRelease {

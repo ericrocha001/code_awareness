@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { extname, join, posix } from 'node:path'
 import type {
   AcademyPackage,
@@ -9,7 +9,10 @@ import type {
   AcademyGeminiCoverage,
   AcademyGeminiExcludedSkill,
   AcademyGeminiExclusionReason,
-  AcademyGeminiExportReceipt
+  AcademyGeminiExportMode,
+  AcademyGeminiExportReceipt,
+  AcademyGeminiPendingReason,
+  AcademyGeminiSkillExportEntry
 } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import { createDeterministicZip, type ZipEntry } from '../publication/deterministic-zip'
@@ -19,6 +22,7 @@ import type {
 } from '../publication/academy-plugin-executor'
 
 export const GEMINI_ADAPTATION_PROFILE_VERSION = 'v1-script-markdown-reference'
+export const GEMINI_MCP_STUB_PROFILE_VERSION = 'v1-mcp-trigger-stub'
 export const GEMINI_MAX_SKILL_BYTES = 100 * 1024 * 1024 // 100 MB
 
 export const GEMINI_NATIVE_ALLOWED_EXTENSIONS = new Set<string>([
@@ -707,6 +711,7 @@ export interface GeminiCatalogEvaluation {
   canonicalSnapshot: CanonicalGeminiSnapshot
   canonicalSnapshotHash: string
   eligibleSkills: AcademySkillSummary[]
+  eligiblePackageHashes: Map<string, string>
 }
 
 /**
@@ -731,6 +736,7 @@ export function evaluateGeminiCatalog(
   const excluded: AcademyGeminiExcludedSkill[] = []
   const snapshotEntries: CanonicalGeminiSnapshotEntry[] = []
   const eligibleSkills: AcademySkillSummary[] = []
+  const eligiblePackageHashes = new Map<string, string>()
   const skillsByName = new Map<string, AcademySkillSummary>()
 
   for (const skill of skills) {
@@ -748,6 +754,7 @@ export function evaluateGeminiCatalog(
       includedIds.add(skill.id)
       includedById.set(skill.id, evaluated)
       eligibleSkills.push(skill)
+      eligiblePackageHashes.set(skill.id, evaluated.packageHash!)
       if ((inclusion.adaptedFileCount ?? 0) > 0) {
         adaptedCount++
       }
@@ -822,8 +829,127 @@ export function evaluateGeminiCatalog(
     },
     canonicalSnapshot,
     canonicalSnapshotHash,
-    eligibleSkills
+    eligibleSkills,
+    eligiblePackageHashes
   }
+}
+
+export function computeGeminiIncrementalFingerprint(
+  skill: { id: string; name: string; currentVersion: number; packageHash: string },
+  profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+): string {
+  return sha256(
+    canonicalJson({
+      mode: 'INCREMENTAL',
+      profileVersion,
+      skillId: skill.id,
+      name: skill.name,
+      academyVersion: skill.currentVersion,
+      packageHash: skill.packageHash
+    })
+  )
+}
+
+export function computeGeminiMcpTriggerFingerprint(
+  skill: { id: string; name: string; description: string },
+  profileVersion = GEMINI_MCP_STUB_PROFILE_VERSION
+): string {
+  return sha256(
+    canonicalJson({
+      mode: 'MCP_TRIGGERS',
+      profileVersion,
+      skillId: skill.id,
+      name: skill.name,
+      description: skill.description
+    })
+  )
+}
+
+export function evaluateGeminiMcpTriggerCatalog(store: AcademyStore): {
+  catalog: number
+  notApplicable: number
+  eligibleSkills: AcademySkillSummary[]
+  excluded: AcademyGeminiExcludedSkill[]
+  packageHashes: Map<string, string>
+} {
+  const gitFirst = store.usesGitFirst()
+  const skills = store.list()
+  let catalog = 0
+  let notApplicable = 0
+  const eligibleSkills: AcademySkillSummary[] = []
+  const excluded: AcademyGeminiExcludedSkill[] = []
+  const packageHashes = new Map<string, string>()
+
+  for (const skill of skills) {
+    if (skill.scope !== 'GLOBAL') {
+      catalog++
+      notApplicable++
+      continue
+    }
+    if (!gitFirst && store.isDeleted(skill.id)) {
+      excluded.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.currentVersion,
+        reason: 'REMOVED',
+        details: 'Skill removida do catálogo.',
+        action: 'REINTRODUCE_SKILL'
+      })
+      continue
+    }
+    catalog++
+    if (skill.status !== 'ACTIVE') {
+      excluded.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.currentVersion,
+        reason: 'DISABLED',
+        details: 'Skill desativada no catálogo.',
+        action: 'ENABLE_SKILL'
+      })
+      continue
+    }
+    if (!gitFirst && store.publicationEligibility(skill.id) !== 'APPROVED') {
+      excluded.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.currentVersion,
+        reason: 'PRIVATE',
+        details: 'Skill privada sem aprovação para publicação.',
+        action: 'APPROVE_PUBLICATION'
+      })
+      continue
+    }
+    if (!GEMINI_NAME_PATTERN.test(skill.name)) {
+      excluded.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.currentVersion,
+        reason: 'INCOMPATIBLE',
+        details: `Nome '${skill.name}' não segue o padrão kebab-case exigido pelo Gemini (apenas letras minúsculas, números e hífens).`,
+        action: 'VIEW_SKILL'
+      })
+      continue
+    }
+    if (!skill.description || !skill.description.trim()) {
+      excluded.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.currentVersion,
+        reason: 'INCOMPATIBLE',
+        details: `Skill '${skill.name}' não possui description no frontmatter para gerar o gatilho MCP.`,
+        action: 'VIEW_SKILL'
+      })
+      continue
+    }
+    eligibleSkills.push(skill)
+    const metaHash = getCurrentVersionPackageHash(store, skill)
+    if (metaHash) {
+      packageHashes.set(skill.id, metaHash)
+    }
+  }
+
+  return { catalog, notApplicable, eligibleSkills, excluded, packageHashes }
 }
 
 export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGeminiSnapshot {
@@ -893,6 +1019,65 @@ export function createGeminiSkillZip(detail: { name: string; current: { package:
   }
 }
 
+export function formatGeminiMcpTriggerStub(skill: { id: string; name: string; description: string }): string {
+  const sanitizedDescription = skill.description.replace(/\r?\n/g, ' ').trim()
+  return [
+    '---',
+    `name: ${skill.name}`,
+    `description: ${JSON.stringify(sanitizedDescription)}`,
+    '---',
+    '',
+    `# ${skill.name}`,
+    '',
+    `Skill ID: \`${skill.id}\``,
+    '',
+    '## Execução via Code Awareness MCP (obrigatório)',
+    '',
+    'Ao ativar esta Skill, chame imediatamente a tool `get_academy_skill` do servidor **Code Awareness MCP** com:',
+    '',
+    '```json',
+    `{ "skillId": "${skill.id}" }`,
+    '```',
+    '',
+    'Leia e siga integralmente as instruções canônicas retornadas por `get_academy_skill` antes de responder ou executar qualquer ação.',
+    '',
+    '### Regras estritas',
+    '- **NUNCA** chame `list_academy_skills` nem enumere catálogo/tools na ativação normal (`list_academy_skills` é reservado apenas para descoberta sem ID ou diagnóstico).',
+    '- Este pacote é um gatilho fino e não contém corpo canônico, scripts nem artefatos embutidos.',
+    `- Se o servidor **Code Awareness MCP** estiver indisponível ou falhar ao responder, informe explicitamente ao usuário que o Code Awareness MCP é obrigatório para carregar a Skill \`${skill.name}\` (\`${skill.id}\`) e interrompa sem improvisar execução local.`,
+    ''
+  ].join('\n')
+}
+
+export function createGeminiMcpTriggerZip(skill: {
+  id: string
+  name: string
+  description: string
+}): GeneratedGeminiSkillZip {
+  if (!GEMINI_NAME_PATTERN.test(skill.name)) {
+    throw new Error(
+      `Falha ao gerar gatilho MCP para '${skill.name}': nome não segue o padrão kebab-case exigido pelo Gemini.`
+    )
+  }
+  const stubMarkdown = formatGeminiMcpTriggerStub(skill)
+  const stubBuffer = Buffer.from(stubMarkdown, 'utf8')
+  if (stubBuffer.byteLength > GEMINI_MAX_SKILL_BYTES) {
+    throw new Error(
+      `Falha ao gerar gatilho MCP para '${skill.name}': tamanho (${stubBuffer.byteLength} bytes) excede 100MB.`
+    )
+  }
+  const zipBuffer = createDeterministicZip([{ path: 'SKILL.md', data: stubBuffer }])
+  return {
+    name: skill.name,
+    zipBuffer,
+    zipSha256: sha256(zipBuffer),
+    entryCount: 1,
+    byteLength: zipBuffer.length,
+    uncompressedBytes: stubBuffer.byteLength,
+    adaptedFiles: []
+  }
+}
+
 export interface GeneratedGeminiMasterZip {
   masterBuffer: Buffer
   masterHash: string
@@ -915,21 +1100,29 @@ export function createGeminiMasterZip(skillZips: GeneratedGeminiSkillZip[]): Gen
   }
 }
 
+export interface AcademyGeminiExportTaskSkill {
+  id: string
+  name: string
+  description?: string
+  version: number
+  packageHash: string
+  package: AcademyPackage
+  fingerprint?: string
+  reason?: AcademyGeminiPendingReason
+  previousName?: string
+}
+
 export interface AcademyGeminiExportTask {
   kind: 'gemini-export'
+  mode?: AcademyGeminiExportMode
   exportDirectory: string
   masterZipPath: string
+  targetDirectoryPath?: string
   receiptPath: string
   downloadsPath?: string
   snapshotHash: string
   profileVersion?: string
-  skills: Array<{
-    id: string
-    name: string
-    version: number
-    packageHash: string
-    package: AcademyPackage
-  }>
+  skills: AcademyGeminiExportTaskSkill[]
   carriedExcludedSkills?: AcademyGeminiWorkerExcludedSkill[]
   _failStage?: 'stage-zip' | 'stage-receipt' | 'promote'
 }
@@ -940,6 +1133,223 @@ async function safeMove(source: string, destination: string): Promise<void> {
   } catch {
     await copyFile(source, destination)
     await unlink(source).catch(() => {})
+  }
+}
+
+async function safeMoveDirectory(source: string, destination: string): Promise<void> {
+  try {
+    await rename(source, destination)
+  } catch {
+    await cp(source, destination, { recursive: true })
+    await rm(source, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+async function executeGeminiDirectoryExport(
+  task: AcademyGeminiExportTask,
+  mode: 'INCREMENTAL' | 'MCP_TRIGGERS',
+  phases: Record<string, number>,
+  recordPhase: (name: string) => void
+): Promise<AcademyPluginTaskResult> {
+  const profileVersion =
+    task.profileVersion ??
+    (mode === 'MCP_TRIGGERS' ? GEMINI_MCP_STUB_PROFILE_VERSION : GEMINI_ADAPTATION_PROFILE_VERSION)
+  const targetDirectoryPath =
+    task.targetDirectoryPath ??
+    join(task.exportDirectory, mode === 'INCREMENTAL' ? 'incremental' : 'mcp-triggers')
+
+  const generatedZips: Array<
+    GeneratedGeminiSkillZip & {
+      skillId: string
+      academyVersion: number
+      packageHash: string
+      fingerprint: string
+      reason?: AcademyGeminiPendingReason
+      previousName?: string
+    }
+  > = []
+
+  const excludedById = new Map<string, AcademyGeminiWorkerExcludedSkill>()
+  for (const carried of task.carriedExcludedSkills ?? []) {
+    if (carried.profileVersion === profileVersion) {
+      excludedById.set(carried.skillId, carried)
+    }
+  }
+
+  let convertedCount = 0
+  for (const skill of task.skills) {
+    try {
+      const generated =
+        mode === 'MCP_TRIGGERS'
+          ? createGeminiMcpTriggerZip({
+              id: skill.id,
+              name: skill.name,
+              description: skill.description ?? ''
+            })
+          : createGeminiSkillZip({
+              name: skill.name,
+              current: { package: skill.package }
+            })
+      if (generated.adaptedFiles.length > 0) {
+        convertedCount++
+      }
+      const fingerprint =
+        skill.fingerprint ??
+        (mode === 'MCP_TRIGGERS'
+          ? computeGeminiMcpTriggerFingerprint(
+              { id: skill.id, name: skill.name, description: skill.description ?? '' },
+              profileVersion
+            )
+          : computeGeminiIncrementalFingerprint(
+              {
+                id: skill.id,
+                name: skill.name,
+                currentVersion: skill.version,
+                packageHash: skill.packageHash
+              },
+              profileVersion
+            ))
+      generatedZips.push({
+        ...generated,
+        skillId: skill.id,
+        academyVersion: skill.version,
+        packageHash: skill.packageHash,
+        fingerprint,
+        reason: skill.reason,
+        previousName: skill.previousName
+      })
+      excludedById.delete(skill.id)
+    } catch (error) {
+      excludedById.set(skill.id, {
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.version,
+        packageHash: skill.packageHash,
+        profileVersion,
+        details: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+  recordPhase('skillCompressionMs')
+
+  const excludedSkills = [...excludedById.values()].sort((a, b) => a.name.localeCompare(b.name))
+  const sortedZips = [...generatedZips].sort((a, b) => a.name.localeCompare(b.name))
+  const totalBytes = sortedZips.reduce((sum, item) => sum + item.byteLength, 0)
+  const artifactHash = sha256(
+    canonicalJson(
+      sortedZips.map((item) => ({
+        skillId: item.skillId,
+        zipFileName: `${item.name}.zip`,
+        zipSha256: item.zipSha256,
+        fingerprint: item.fingerprint
+      }))
+    )
+  )
+  recordPhase('masterCompressionMs')
+
+  const skillEntries: AcademyGeminiSkillExportEntry[] = sortedZips.map((s) => ({
+    skillId: s.skillId,
+    name: s.name,
+    academyVersion: s.academyVersion,
+    packageHash: s.packageHash,
+    zipFileName: `${s.name}.zip`,
+    zipSha256: s.zipSha256,
+    entryCount: s.entryCount,
+    byteLength: s.byteLength,
+    fingerprint: s.fingerprint,
+    ...(s.reason ? { reason: s.reason } : {}),
+    ...(s.previousName ? { previousName: s.previousName } : {}),
+    ...(s.adaptedFiles.length > 0 ? { adaptedFiles: s.adaptedFiles } : {})
+  }))
+
+  const receipt: AcademyGeminiExportReceipt = {
+    mode,
+    exportId: randomUUID(),
+    exportedAt: new Date().toISOString(),
+    snapshotHash: task.snapshotHash,
+    profileVersion,
+    artifactPath: targetDirectoryPath,
+    targetDirectoryPath,
+    downloadsPath: null,
+    artifactHash,
+    skillCount: sortedZips.length,
+    convertedCount,
+    totalBytes,
+    skills: skillEntries,
+    ...(excludedSkills.length > 0 ? { excludedSkills } : {})
+  }
+  const receiptJson = Buffer.from(JSON.stringify(receipt, null, 2), 'utf8')
+
+  await mkdir(task.exportDirectory, { recursive: true })
+
+  const stagedDirPath = `${targetDirectoryPath}.${randomUUID()}.stage`
+  const stagedReceiptPath = `${task.receiptPath}.${randomUUID()}.stage`
+
+  try {
+    if (task._failStage === 'stage-zip') {
+      throw new Error('SIMULATED_STAGE_ZIP_FAILURE')
+    }
+    await mkdir(stagedDirPath, { recursive: true })
+    for (const item of sortedZips) {
+      await writeFile(join(stagedDirPath, `${item.name}.zip`), item.zipBuffer)
+    }
+
+    if (task._failStage === 'stage-receipt') {
+      throw new Error('SIMULATED_STAGE_RECEIPT_FAILURE')
+    }
+    await writeFile(stagedReceiptPath, receiptJson)
+    recordPhase('diskWriteMs')
+
+    let backupDirPath: string | null = null
+    let backupReceiptPath: string | null = null
+
+    try {
+      if (existsSync(targetDirectoryPath)) {
+        backupDirPath = `${targetDirectoryPath}.${randomUUID()}.bak`
+        await safeMoveDirectory(targetDirectoryPath, backupDirPath)
+      }
+      if (existsSync(task.receiptPath)) {
+        backupReceiptPath = `${task.receiptPath}.${randomUUID()}.bak`
+        await safeMove(task.receiptPath, backupReceiptPath)
+      }
+
+      if (task._failStage === 'promote') {
+        throw new Error('SIMULATED_PROMOTE_FAILURE')
+      }
+
+      await safeMoveDirectory(stagedDirPath, targetDirectoryPath)
+      await safeMove(stagedReceiptPath, task.receiptPath)
+
+      if (backupDirPath) await rm(backupDirPath, { recursive: true, force: true }).catch(() => {})
+      if (backupReceiptPath) await unlink(backupReceiptPath).catch(() => {})
+    } catch (promotionError) {
+      if (existsSync(targetDirectoryPath)) {
+        await rm(targetDirectoryPath, { recursive: true, force: true }).catch(() => {})
+      }
+      if (backupDirPath && existsSync(backupDirPath)) {
+        await safeMoveDirectory(backupDirPath, targetDirectoryPath).catch(() => {})
+      }
+      if (existsSync(task.receiptPath)) {
+        await unlink(task.receiptPath).catch(() => {})
+      }
+      if (backupReceiptPath && existsSync(backupReceiptPath)) {
+        await safeMove(backupReceiptPath, task.receiptPath).catch(() => {})
+      }
+      throw promotionError
+    }
+
+    recordPhase('receiptWriteMs')
+
+    return {
+      artifactPath: targetDirectoryPath,
+      artifactHash,
+      receipt,
+      phases,
+      ...(excludedSkills.length > 0 ? { excludedSkills } : {})
+    }
+  } finally {
+    await rm(stagedDirPath, { recursive: true, force: true }).catch(() => {})
+    await unlink(stagedReceiptPath).catch(() => {})
   }
 }
 
@@ -956,8 +1366,13 @@ export async function executeGeminiExport(
     start = performance.now()
   }
 
+  const mode: AcademyGeminiExportMode = task.mode ?? 'FULL'
+  if (mode === 'INCREMENTAL' || mode === 'MCP_TRIGGERS') {
+    return executeGeminiDirectoryExport(task, mode, phases, recordPhase)
+  }
+
   const profileVersion = task.profileVersion ?? GEMINI_ADAPTATION_PROFILE_VERSION
-  const skillZips: Array<GeneratedGeminiSkillZip & { packageHash: string }> = []
+  const skillZips: Array<GeneratedGeminiSkillZip & { skillId: string; academyVersion: number; packageHash: string }> = []
   const excludedById = new Map<string, AcademyGeminiWorkerExcludedSkill>()
   for (const carried of task.carriedExcludedSkills ?? []) {
     if (carried.profileVersion === profileVersion) {
@@ -978,6 +1393,8 @@ export async function executeGeminiExport(
       }
       skillZips.push({
         ...generated,
+        skillId: skill.id,
+        academyVersion: skill.version,
         packageHash: skill.packageHash
       })
       includedEntries.push({
@@ -1010,18 +1427,23 @@ export async function executeGeminiExport(
   })
 
   const receipt: AcademyGeminiExportReceipt = {
+    mode: 'FULL',
     exportId: randomUUID(),
     exportedAt: new Date().toISOString(),
     snapshotHash,
     profileVersion,
     artifactPath: task.masterZipPath,
     artifactHash: master.masterHash,
+    downloadsPath: null,
     skillCount: skillZips.length,
     convertedCount,
     totalBytes: master.totalBytes,
     skills: skillZips.map((s) => ({
+      skillId: s.skillId,
       name: s.name,
+      academyVersion: s.academyVersion,
       packageHash: s.packageHash,
+      zipFileName: `${s.name}.zip`,
       zipSha256: s.zipSha256,
       entryCount: s.entryCount,
       byteLength: s.byteLength,

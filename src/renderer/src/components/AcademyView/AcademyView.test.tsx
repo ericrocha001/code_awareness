@@ -156,6 +156,7 @@ beforeEach(() => {
       canonicalSnapshotHash: 'snapshot',
       drifted: false,
       currentPackageRevision: null,
+      importConfirmationPreference: { mode: 'MANUAL' as const, updatedAt: null },
       hostedStatus: 'HOSTED_UPDATE_AVAILABLE'
     })),
     listAcademyOpenAiReleases: vi.fn(async () => [openAiRelease]),
@@ -192,6 +193,11 @@ beforeEach(() => {
     confirmAcademyOpenAiUpload: vi.fn(async () => ({ ...openAiRelease, status: 'UPLOADED_UNVERIFIED' as const })),
     revealAcademyOpenAiPackage: vi.fn(async () => true),
     getAcademyGeminiExportState: vi.fn(async () => ({
+      mode: 'FULL' as const,
+      requiresMcp: false,
+      baselineEstablished: false,
+      importConfirmationPreference: { mode: 'MANUAL' as const, updatedAt: null },
+      fullImportConfirmation: null,
       latestExport: {
         exportId: 'gemini-export-1',
         exportedAt: detail.createdAt,
@@ -211,10 +217,26 @@ beforeEach(() => {
         excluded: []
       },
       canonicalSnapshotHash: 'snapshot',
+      pendingSkills: [],
+      importedSkills: [],
+      manualActions: [],
       drifted: false,
       artifactAvailable: true,
       lastError: null
     })),
+    getAcademyImportConfirmationPreference: vi.fn(async () => ({ mode: 'MANUAL' as const, updatedAt: null })),
+    setAcademyImportConfirmationPreference: vi.fn(async (mode: 'MANUAL' | 'AUTOMATIC') => ({
+      mode,
+      updatedAt: detail.updatedAt
+    })),
+    setAcademyGeminiExportMode: vi.fn(),
+    downloadAcademyGeminiExport: vi.fn(),
+    confirmAcademyGeminiImport: vi.fn(),
+    revokeAcademyGeminiImport: vi.fn(),
+    establishAcademyGeminiBaseline: vi.fn(),
+    acknowledgeAcademyGeminiManualAction: vi.fn(),
+    downloadAcademyOpenAiPackage: vi.fn(async () => openAiRelease),
+    revokeAcademyOpenAiUpload: vi.fn(async () => openAiRelease),
     prepareAcademyGeminiExport: vi.fn(async () => ({
       exportId: 'gemini-export-2',
       exportedAt: detail.createdAt,
@@ -293,6 +315,11 @@ it('navigates to Gemini surface and supports 1-click export and reveal', async (
 
 it('reviews excluded Gemini skills and displays incompatibility details', async () => {
   vi.mocked(window.codeAwareness.getAcademyGeminiExportState).mockResolvedValueOnce({
+    mode: 'FULL',
+    requiresMcp: false,
+    baselineEstablished: false,
+    importConfirmationPreference: { mode: 'MANUAL', updatedAt: null },
+    fullImportConfirmation: null,
     latestExport: null,
     coverage: {
       catalog: 3,
@@ -320,6 +347,9 @@ it('reviews excluded Gemini skills and displays incompatibility details', async 
       ]
     },
     canonicalSnapshotHash: 'hash',
+    pendingSkills: [],
+    importedSkills: [],
+    manualActions: [],
     drifted: true,
     artifactAvailable: false,
     lastError: null
@@ -907,4 +937,214 @@ it('renders actionable conflicts inside Configurações and switches tabs cleanl
   const historyPanel = screen.getByText('IMPORT · ' + new Date(detail.createdAt).toLocaleString())
   expect(historyPanel).toBeTruthy()
   expect(window.codeAwareness.getAcademySkill).toHaveBeenCalledTimes(reads)
+})
+
+it('supports Gemini mode switching, differential pending/imported/manual-action controls, and baseline actions', async () => {
+  const incrementalState = {
+    mode: 'INCREMENTAL' as const,
+    requiresMcp: false,
+    baselineEstablished: false,
+    importConfirmationPreference: { mode: 'AUTOMATIC' as const, updatedAt: detail.updatedAt },
+    fullImportConfirmation: null,
+    latestExport: {
+      exportId: 'inc-export-1',
+      mode: 'INCREMENTAL' as const,
+      exportedAt: detail.createdAt,
+      snapshotHash: 'snapshot',
+      artifactPath: 'C:/gemini/incremental',
+      artifactHash: 'i'.repeat(64),
+      skillCount: 1,
+      totalBytes: 512,
+      skills: [{
+        skillId: 'skill-pending',
+        name: 'pending-skill',
+        academyVersion: 1,
+        fingerprint: 'fp-pending',
+        reason: 'NEW_SKILL' as const,
+        zipFileName: 'pending-skill.zip',
+        zipSha256: 'sha',
+        entryCount: 1,
+        byteLength: 512
+      }]
+    },
+    coverage: {
+      catalog: 3,
+      eligible: 2,
+      includedInLastZip: 1,
+      awaitingZip: 0,
+      notApplicable: 1,
+      adaptedCount: 0,
+      excluded: [],
+      imported: 1,
+      upToDate: 1,
+      pendingExport: 0,
+      awaitingImport: 1,
+      manualActionsCount: 1
+    },
+    canonicalSnapshotHash: 'snapshot',
+    pendingSkills: [{
+      skillId: 'skill-pending',
+      name: 'pending-skill',
+      academyVersion: 1,
+      packageHash: 'pkg-pending',
+      profileVersion: 'v1-script-markdown-reference',
+      fingerprint: 'fp-pending',
+      reason: 'NEW_SKILL' as const,
+      zipFileName: 'pending-skill.zip',
+      zipPath: 'C:/gemini/incremental/pending-skill.zip',
+      zipHash: 'sha',
+      zipSizeBytes: 512,
+      awaitingImport: true
+    }],
+    importedSkills: [{
+      skillId: 'skill-imported',
+      name: 'imported-skill',
+      academyVersion: 2,
+      packageHash: 'pkg-imported',
+      profileVersion: 'v1-script-markdown-reference',
+      fingerprint: 'fp-imported',
+      confirmedAt: detail.updatedAt,
+      origin: 'ASSUMED_ON_DOWNLOAD' as const,
+      upToDate: true
+    }],
+    manualActions: [{
+      skillId: 'skill-removed',
+      previousName: 'old-skill',
+      action: 'REMOVE_IN_GEMINI' as const,
+      reason: "Skill 'old-skill' foi excluída da Academy. Remova manualmente no Gemini Web.",
+      checkpointedAt: detail.updatedAt
+    }],
+    drifted: false,
+    artifactAvailable: true,
+    lastError: null
+  }
+
+  vi.mocked(window.codeAwareness.setAcademyGeminiExportMode).mockResolvedValue(incrementalState)
+  vi.mocked(window.codeAwareness.downloadAcademyGeminiExport).mockResolvedValue(incrementalState)
+  vi.mocked(window.codeAwareness.confirmAcademyGeminiImport).mockResolvedValue(incrementalState)
+  vi.mocked(window.codeAwareness.revokeAcademyGeminiImport).mockResolvedValue(incrementalState)
+  vi.mocked(window.codeAwareness.acknowledgeAcademyGeminiManualAction).mockResolvedValue({ ...incrementalState, manualActions: [] })
+  vi.mocked(window.codeAwareness.establishAcademyGeminiBaseline).mockResolvedValue(incrementalState)
+
+  render(<AcademyView />)
+  await openGeminiSurface()
+  expect(screen.getByTestId('gemini-active-mode').textContent).toBe('Completo')
+
+  // Open mode switcher dialog and apply Incremental mode
+  fireEvent.click(screen.getByRole('button', { name: 'Configurar modo' }))
+  const modeDialog = await screen.findByRole('dialog', { name: 'Modo de exportação Gemini' })
+  fireEvent.click(within(modeDialog).getByLabelText(/Incremental/))
+  fireEvent.click(within(modeDialog).getByRole('button', { name: 'Aplicar modo' }))
+  await waitFor(() => expect(window.codeAwareness.setAcademyGeminiExportMode).toHaveBeenCalledWith('INCREMENTAL'))
+
+  const region = await screen.findByRole('region', { name: 'Exportação Gemini' })
+  expect(within(region).getByTestId('gemini-active-mode').textContent).toBe('Incremental')
+
+  // Batch download & confirm controls
+  fireEvent.click(within(region).getAllByRole('button', { name: 'Baixar pacote' })[0])
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyGeminiExport).toHaveBeenCalled())
+  fireEvent.click(within(region).getAllByRole('button', { name: 'Confirmar importação' })[0])
+  await waitFor(() => expect(window.codeAwareness.confirmAcademyGeminiImport).toHaveBeenCalledWith({
+    expectedFingerprints: { 'skill-pending': 'fp-pending' }
+  }))
+
+  // Imported skills list with provenance tag and undo
+  const importedRegion = within(region).getByRole('region', { name: 'Skills importadas no Gemini' })
+  expect(within(importedRegion).getByText('imported-skill')).toBeTruthy()
+  expect(within(importedRegion).getByText('Importação assumida após download')).toBeTruthy()
+  fireEvent.click(within(importedRegion).getByRole('button', { name: 'Desfazer' }))
+  await waitFor(() => expect(window.codeAwareness.revokeAcademyGeminiImport).toHaveBeenCalledWith({ skillIds: ['skill-imported'] }))
+
+  // Manual action acknowledge
+  const manualRegion = within(region).getByRole('region', { name: 'Ações manuais no Gemini' })
+  expect(within(manualRegion).getByText('old-skill')).toBeTruthy()
+  fireEvent.click(within(manualRegion).getByRole('button', { name: 'Já removi no Gemini' }))
+  await waitFor(() => expect(window.codeAwareness.acknowledgeAcademyGeminiManualAction).toHaveBeenCalledWith('skill-removed'))
+
+  // Baseline establish button when no imported skills yet and no prepared batch
+  vi.mocked(window.codeAwareness.getAcademyGeminiExportState).mockResolvedValueOnce({
+    ...incrementalState,
+    importedSkills: [],
+    latestExport: null,
+    artifactAvailable: false,
+    drifted: true
+  })
+  fireEvent.click(await screen.findByRole('button', { name: 'Configurar modo' }))
+  const mcpDialog = await screen.findByRole('dialog', { name: 'Modo de exportação Gemini' })
+  expect(within(mcpDialog).getByText('Requer MCP no Gemini Web')).toBeTruthy()
+  vi.mocked(window.codeAwareness.setAcademyGeminiExportMode).mockResolvedValueOnce({
+    ...incrementalState,
+    mode: 'MCP_TRIGGERS',
+    requiresMcp: true,
+    importedSkills: [],
+    latestExport: null,
+    artifactAvailable: false,
+    drifted: true
+  })
+  fireEvent.click(within(mcpDialog).getByLabelText(/Gatilhos MCP/))
+  fireEvent.click(within(mcpDialog).getByRole('button', { name: 'Aplicar modo' }))
+  await waitFor(() => expect(window.codeAwareness.setAcademyGeminiExportMode).toHaveBeenCalledWith('MCP_TRIGGERS'))
+  const baselineBtn = await screen.findByRole('button', { name: 'Já importei antes (estabelecer base)' })
+  fireEvent.click(baselineBtn)
+  await waitFor(() => expect(window.codeAwareness.establishAcademyGeminiBaseline).toHaveBeenCalled())
+})
+
+it('renders Plugin ChatGPT download, provenance, undo confirmation, and Downloads preference in Configurações', async () => {
+  const uploadedAssumedRelease = {
+    ...openAiRelease,
+    status: 'UPLOADED_UNVERIFIED' as const,
+    uploadConfirmation: {
+      releaseId: openAiRelease.id,
+      pluginVersion: openAiRelease.pluginVersion,
+      artifactHash: openAiRelease.artifactHash,
+      confirmedAt: detail.updatedAt,
+      method: 'ASSUMED_ON_DOWNLOAD' as const,
+      origin: 'ASSUMED_ON_DOWNLOAD' as const
+    }
+  }
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({
+    profile: {
+      name: 'academy-skills',
+      displayName: 'Academy Skills',
+      description: 'Skills',
+      author: {},
+      openAiInterface: {},
+      logoPath: null,
+      publishedVersion: '0.1.4',
+      deletionSemantics: 'UNKNOWN',
+      deletionSemanticsEvidence: null,
+      createdAt: detail.createdAt,
+      updatedAt: detail.updatedAt
+    },
+    latestPrepared: uploadedAssumedRelease,
+    latestUploaded: uploadedAssumedRelease,
+    selectedRelease: uploadedAssumedRelease,
+    publicSkillCount: 1,
+    artifactAvailable: true,
+    coverage: { catalog: 1, eligible: 1, includedInLastZip: 1, awaitingZip: 0, notApplicable: 0, excluded: [], preference: defaultPreference },
+    canonicalSnapshotHash: 'snapshot',
+    drifted: false,
+    currentPackageRevision: null,
+    importConfirmationPreference: { mode: 'AUTOMATIC', updatedAt: detail.updatedAt },
+    hostedStatus: 'CURRENT'
+  })
+  vi.mocked(window.codeAwareness.listAcademyOpenAiReleases).mockResolvedValue([uploadedAssumedRelease])
+  vi.mocked(window.codeAwareness.downloadAcademyOpenAiPackage).mockResolvedValue(uploadedAssumedRelease)
+  vi.mocked(window.codeAwareness.revokeAcademyOpenAiUpload).mockResolvedValue({ ...openAiRelease, status: 'READY_TO_UPLOAD', uploadConfirmation: null })
+
+  render(<AcademyView />)
+  const region = await screen.findByRole('region', { name: 'Plugin ChatGPT' })
+  expect(within(region).getByTestId('openai-upload-provenance').textContent).toBe('Importação assumida após download')
+
+  fireEvent.click(within(region).getByRole('button', { name: 'Baixar ZIP' }))
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyOpenAiPackage).toHaveBeenCalledWith(openAiRelease.id))
+
+  fireEvent.click(within(region).getByRole('button', { name: 'Desfazer confirmação' }))
+  await waitFor(() => expect(window.codeAwareness.revokeAcademyOpenAiUpload).toHaveBeenCalledWith(openAiRelease.id))
+
+  // Verify shared Downloads import confirmation mode control in AcademySettingsDrawer
+  const drawer = await openSettingsDrawer()
+  const select = within(drawer).getByLabelText('Confirmação de importação') as HTMLSelectElement
+  fireEvent.change(select, { target: { value: 'AUTOMATIC' } })
+  await waitFor(() => expect(window.codeAwareness.setAcademyImportConfirmationPreference).toHaveBeenCalledWith('AUTOMATIC'))
 })

@@ -45,4 +45,20 @@ describe('SettingsService', () => {
     vi.mocked(fs.readFileSync).mockReturnValue(saved)
     expect(new SettingsService().loadSettings().ngrokDomain).toBe('stable.ngrok.app')
   })
+
+  it('defaults Downloads importConfirmationMode to MANUAL, persists AUTOMATIC, and normalizes invalid values', () => {
+    vi.mocked(fs.existsSync).mockReturnValue(false)
+    const service = new SettingsService()
+    expect(service.loadSettings().downloads).toEqual({ importConfirmationMode: 'MANUAL' })
+
+    const updated = { ...service.loadSettings(), downloads: { importConfirmationMode: 'AUTOMATIC' as const } }
+    service.saveSettings(updated)
+    const saved = vi.mocked(fs.writeFileSync).mock.calls.at(-1)![1] as string
+    vi.mocked(fs.existsSync).mockReturnValue(true)
+    vi.mocked(fs.readFileSync).mockReturnValue(saved)
+    expect(new SettingsService().loadSettings().downloads).toEqual({ importConfirmationMode: 'AUTOMATIC' })
+
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify({ downloads: { importConfirmationMode: 'UNKNOWN' } }))
+    expect(new SettingsService().loadSettings().downloads).toEqual({ importConfirmationMode: 'MANUAL' })
+  })
 })

@@ -671,4 +671,84 @@ describe('Academy OpenAI plugin publication', () => {
       })
     } finally { await service.close() }
   })
+
+  it('honors shared importConfirmationPreference on downloadOpenAiRelease and supports revokeUploadConfirmation without mutating canonical skills', async () => {
+    const f = await fixture()
+    try {
+      const { service, global } = f
+      expect(service.getImportConfirmationPreference().mode).toBe('MANUAL')
+      expect(service.getOpenAiPublicationState().importConfirmationPreference?.mode).toBe('MANUAL')
+
+      // Shared preference updates both OpenAI and Gemini states
+      service.setImportConfirmationPreference('AUTOMATIC')
+      expect(service.getOpenAiPublicationState().importConfirmationPreference?.mode).toBe('AUTOMATIC')
+      expect(service.getGeminiExportState().importConfirmationPreference?.mode).toBe('AUTOMATIC')
+
+      // Advance global skill so prepareOpenAiRelease builds 0.1.4 READY_TO_UPLOAD
+      const v2 = service.store.update({
+        skillId: global.id,
+        expectedVersion: global.currentVersion,
+        package: { skillMd: skillMd('global-skill', 'v2 body'), artifacts: { 'references/guide.md': 'updated guide' } },
+        origin: 'UI'
+      })
+
+      // Even under AUTOMATIC mode, prepareOpenAiRelease must NEVER auto-confirm upload
+      const prepared = await service.prepareOpenAiRelease()
+      expect(prepared.status).toBe('READY_TO_UPLOAD')
+      expect(prepared.uploadConfirmation).toBeNull()
+      expect(service.getOpenAiPublicationState().profile?.publishedVersion).toBe('0.1.3')
+
+      // Under MANUAL mode, downloadOpenAiRelease verifies/copies ZIP without auto-confirming
+      service.setImportConfirmationPreference('MANUAL')
+      const afterManualDownload = service.downloadOpenAiRelease(prepared.id)
+      expect(afterManualDownload.status).toBe('READY_TO_UPLOAD')
+      expect(afterManualDownload.uploadConfirmation).toBeNull()
+      const downloadedZipPath = join(f.root, 'Downloads', `academy-skills-${prepared.pluginVersion}.zip`)
+      expect(existsSync(downloadedZipPath)).toBe(true)
+      expect(sha256(readFileSync(downloadedZipPath))).toBe(prepared.artifactHash)
+
+      // Under AUTOMATIC mode, successful verified download records ASSUMED_ON_DOWNLOAD
+      service.setImportConfirmationPreference('AUTOMATIC')
+      const afterAutoDownload = service.downloadOpenAiRelease(prepared.id)
+      expect(afterAutoDownload.status).toBe('UPLOADED_UNVERIFIED')
+      expect(afterAutoDownload.uploadConfirmation).toMatchObject({
+        releaseId: prepared.id,
+        pluginVersion: prepared.pluginVersion,
+        artifactHash: prepared.artifactHash,
+        method: 'ASSUMED_ON_DOWNLOAD',
+        origin: 'ASSUMED_ON_DOWNLOAD'
+      })
+      expect(service.getOpenAiPublicationState().profile?.publishedVersion).toBe(prepared.pluginVersion)
+
+      const releasesAfterConfirm = service.listOpenAiReleases()
+      const baselineDuringPublish = releasesAfterConfirm.find((r) => r.baseline)
+      expect(baselineDuringPublish?.status).toBe('SUPERSEDED')
+
+      // Revoke confirmation restores READY_TO_UPLOAD + baseline status without creating new canonical skill versions
+      const versionBeforeRevoke = service.get(global.id).currentVersion
+      const hashBeforeRevoke = service.get(global.id).current.packageHash
+      const revoked = service.revokeOpenAiUpload(prepared.id)
+      expect(revoked.status).toBe('READY_TO_UPLOAD')
+      expect(revoked.uploadConfirmation).toBeNull()
+      expect(service.getOpenAiPublicationState().profile?.publishedVersion).toBe('0.1.3')
+      expect(service.listOpenAiReleases().find((r) => r.baseline)?.status).toBe('UPLOADED_UNVERIFIED')
+      expect(service.get(global.id).currentVersion).toBe(versionBeforeRevoke)
+      expect(service.get(global.id).current.packageHash).toBe(hashBeforeRevoke)
+
+      // Re-download under AUTOMATIC, drift canonical catalog, then revoke -> becomes STALE instead of READY_TO_UPLOAD
+      const reConfirmed = service.downloadOpenAiRelease(prepared.id)
+      expect(reConfirmed.status).toBe('UPLOADED_UNVERIFIED')
+      const v3 = service.store.update({
+        skillId: global.id,
+        expectedVersion: v2.currentVersion,
+        package: { skillMd: skillMd('global-skill', 'v3 drifted'), artifacts: { 'references/guide.md': 'v3 guide' } },
+        origin: 'UI'
+      })
+      expect(v3.currentVersion).toBe(3)
+      const revokedDrifted = service.revokeOpenAiUpload(prepared.id)
+      expect(revokedDrifted.status).toBe('STALE')
+      expect(revokedDrifted.uploadConfirmation).toBeNull()
+      expect(service.getOpenAiPublicationState().profile?.publishedVersion).toBe('0.1.3')
+    } finally { await f.service.close() }
+  })
 })

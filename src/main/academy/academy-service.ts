@@ -17,7 +17,14 @@ import { AcademyGeminiExportService } from './export/academy-gemini-export-servi
 import { canonicalJson } from './publication/openai-plugin-model'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
 import type { AcademyGitBuildRequest } from '../../shared/types/academy-git-source-types'
-import type { AcademyOpenAiRelease, AcademyGeminiExportReceipt, AcademyGeminiExportState } from '../../shared/types/academy-types'
+import type {
+  AcademyOpenAiRelease,
+  AcademyGeminiExportMode,
+  AcademyGeminiExportReceipt,
+  AcademyGeminiExportState,
+  AcademyImportConfirmationMode,
+  AcademyImportConfirmationPreference
+} from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
 import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
@@ -799,8 +806,32 @@ export class AcademyService {
     return this.openAiPublication.prepareRelease()
   }
   confirmOpenAiUpload(releaseId: string, artifactHash: string) { return this.openAiPublication.confirmUpload(releaseId, artifactHash) }
+  downloadOpenAiRelease(releaseId: string) {
+    const release = this.openAiPublication.downloadRelease(releaseId)
+    this.emitDistributionChange('publication')
+    return release
+  }
+  revokeOpenAiUpload(releaseId: string) {
+    const release = this.openAiPublication.revokeUploadConfirmation(releaseId)
+    this.emitDistributionChange('publication')
+    return release
+  }
+  getImportConfirmationPreference(): AcademyImportConfirmationPreference {
+    return this.geminiExport.getImportConfirmationPreference()
+  }
+  setImportConfirmationPreference(mode: AcademyImportConfirmationMode): AcademyImportConfirmationPreference {
+    this.geminiExport.setImportConfirmationPreference(mode)
+    this.emitDistributionChange('publication')
+    return this.geminiExport.getImportConfirmationPreference()
+  }
   getGeminiExportState(): AcademyGeminiExportState { return this.geminiExport.getState() }
+  setGeminiExportMode(mode: AcademyGeminiExportMode): AcademyGeminiExportState { return this.geminiExport.setMode(mode) }
   prepareGeminiExport(): Promise<AcademyGeminiExportReceipt> { return this.geminiExport.prepareExport() }
+  downloadGeminiExport(): Promise<AcademyGeminiExportState> { return this.geminiExport.downloadExport() }
+  confirmGeminiImport(input?: { skillIds?: string[]; expectedFingerprints?: Record<string, string> }): AcademyGeminiExportState { return this.geminiExport.confirmImport(input) }
+  revokeGeminiImport(input?: { skillIds?: string[] }): AcademyGeminiExportState { return this.geminiExport.revokeImportConfirmation(input) }
+  establishGeminiBaseline(input?: { skillIds?: string[] }): AcademyGeminiExportState { return this.geminiExport.establishBaseline(input) }
+  acknowledgeGeminiManualAction(skillId: string): AcademyGeminiExportState { return this.geminiExport.acknowledgeManualAction(skillId) }
   getGeminiExportArtifactPath(): Promise<string | null> { return Promise.resolve(this.geminiExport.getArtifactPath()) }
   start(): void {
     this.assertNotClosed()
