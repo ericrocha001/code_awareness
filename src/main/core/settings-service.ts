@@ -4,9 +4,13 @@
 
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
-import { AppSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
+import { AppSettings, DownloadsSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
 import { DEFAULT_COMPRESSION_SETTINGS, normalizeCompressionProfile } from './compression-profile'
 import { desktopProfilePaths } from '../desktop-profile'
+
+export const DEFAULT_DOWNLOADS_SETTINGS: DownloadsSettings = {
+  importConfirmationMode: 'MANUAL'
+}
 
 const DEFAULT_SETTINGS = {
   rootFolders: [],
@@ -20,6 +24,7 @@ const DEFAULT_SETTINGS = {
   fileTags: {},
   projectPreferences: {},
   compressionSettings: DEFAULT_COMPRESSION_SETTINGS,
+  downloads: { ...DEFAULT_DOWNLOADS_SETTINGS }
 } as AppSettings
 const repositoryPreference = (value: unknown): string | undefined =>
   typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value) ? value : undefined
@@ -87,6 +92,11 @@ export class SettingsService {
       merged.projectPreferences = (typeof rest.projectPreferences !== 'object' || Array.isArray(rest.projectPreferences))
         ? {}
         : rest.projectPreferences
+
+      const rawDownloads = rest.downloads as Partial<DownloadsSettings> | undefined
+      merged.downloads = {
+        importConfirmationMode: rawDownloads?.importConfirmationMode === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL'
+      }
 
       // CompressionSettings: ausente/corrompido → default; presente → normaliza o perfil defensivamente
       if (rest.compressionSettings && typeof rest.compressionSettings === 'object') {

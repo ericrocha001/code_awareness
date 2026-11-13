@@ -32,7 +32,7 @@ import type { ConnectionResult, ConnectionState } from '../shared/types/connecti
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { LocalMcpClientApi } from '../shared/types/local-mcp-client-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem, AcademyGeminiExportReceipt, AcademyGeminiExportState } from '../shared/types/academy-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem, AcademyGeminiExportMode, AcademyGeminiExportReceipt, AcademyGeminiExportState, AcademyImportConfirmationMode, AcademyImportConfirmationPreference } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
@@ -145,9 +145,19 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   previewAcademyManifestVersion: (kind?: 'PATCH' | 'MINOR' | 'MAJOR'): Promise<import('../shared/types/academy-publication-types').AcademyManifestPreview> => ipcRenderer.invoke('academy:manifest-version-preview', kind),
   saveAcademyManifestVersion: (input: { preview: import('../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:manifest-version-save', input),
   confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
+  downloadAcademyOpenAiPackage: (releaseId: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-download', releaseId),
+  revokeAcademyOpenAiUpload: (releaseId: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-revoke-upload', releaseId),
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
+  getAcademyImportConfirmationPreference: (): Promise<AcademyImportConfirmationPreference> => ipcRenderer.invoke('academy:import-confirmation-preference'),
+  setAcademyImportConfirmationPreference: (mode: AcademyImportConfirmationMode): Promise<AcademyImportConfirmationPreference> => ipcRenderer.invoke('academy:import-confirmation-preference-set', mode),
   getAcademyGeminiExportState: (): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-state'),
+  setAcademyGeminiExportMode: (mode: AcademyGeminiExportMode): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-set-mode', mode),
   prepareAcademyGeminiExport: (): Promise<AcademyGeminiExportReceipt> => ipcRenderer.invoke('academy:gemini-export-prepare'),
+  downloadAcademyGeminiExport: (): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-download'),
+  confirmAcademyGeminiImport: (input?: { skillIds?: string[]; expectedFingerprints?: Record<string, string> }): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-confirm-import', input),
+  revokeAcademyGeminiImport: (input?: { skillIds?: string[] }): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-revoke-import', input),
+  establishAcademyGeminiBaseline: (input?: { skillIds?: string[] }): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-establish-baseline', input),
+  acknowledgeAcademyGeminiManualAction: (skillId: string): Promise<AcademyGeminiExportState> => ipcRenderer.invoke('academy:gemini-export-acknowledge-manual', skillId),
   revealAcademyGeminiExport: (): Promise<string> => ipcRenderer.invoke('academy:gemini-export-reveal'),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),
   syncAcademyGitNow: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-sync-now'),

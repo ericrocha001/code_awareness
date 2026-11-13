@@ -20,8 +20,13 @@ import type {
   AcademySkillSummary,
   AcademySkillVersion,
   AcademyGeminiExcludedSkill,
+  AcademyGeminiExportMode,
   AcademyGeminiExportReceipt,
-  AcademyGeminiExportState
+  AcademyGeminiExportState,
+  AcademyGeminiPendingReason,
+  AcademyImportConfirmationMode,
+  AcademyImportConfirmationOrigin,
+  AcademyImportConfirmationPreference
 } from '../../../../shared/types/academy-types'
 import type { AcademyPersistedPublication } from '../../../../shared/types/academy-bootstrap-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
@@ -160,7 +165,9 @@ interface PluginOverviewSurfaceProps {
   pluginError: string | null
   onPrepareRelease: () => void
   onRevealRelease: (release: AcademyOpenAiRelease) => void
+  onDownloadRelease: (release: AcademyOpenAiRelease) => void
   onConfirmUpload: (release: AcademyOpenAiRelease) => void
+  onRevokeUpload: (release: AcademyOpenAiRelease) => void
   onOpenReview: () => void
   onOpenSettings: () => void
   onOpenSkills: () => void
@@ -175,7 +182,9 @@ export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
   pluginError,
   onPrepareRelease,
   onRevealRelease,
+  onDownloadRelease,
   onConfirmUpload,
+  onRevokeUpload,
   onOpenReview,
   onOpenSettings,
   onOpenSkills
@@ -303,15 +312,33 @@ export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
                     ? 'Arquivo ZIP gerado no computador e pronto para envio manual.'
                     : 'Arquivo ZIP não encontrado no disco. Clique para gerar novamente.'}
               </p>
+              {release.status === 'UPLOADED_UNVERIFIED' && release.uploadConfirmation && (
+                <p className="academy-provenance-note" data-testid="openai-upload-provenance">
+                  {release.uploadConfirmation.origin === 'ASSUMED_ON_DOWNLOAD' ||
+                  release.uploadConfirmation.method === 'ASSUMED_ON_DOWNLOAD'
+                    ? 'Importação assumida após download'
+                    : 'Importação declarada manualmente'}
+                </p>
+              )}
               <div className="academy-plugin-result-actions">
                 {openAiPublication?.artifactAvailable && (
-                  <Button variant="outline" intent="neutral" size="compact" onClick={() => onRevealRelease(release)}>
-                    Mostrar ZIP
-                  </Button>
+                  <>
+                    <Button variant="outline" intent="neutral" size="compact" onClick={() => onRevealRelease(release)}>
+                      Mostrar ZIP
+                    </Button>
+                    <Button variant="outline" intent="neutral" size="compact" onClick={() => onDownloadRelease(release)}>
+                      Baixar ZIP
+                    </Button>
+                  </>
                 )}
                 {release.status === 'READY_TO_UPLOAD' && release.artifactHash && (
                   <Button variant="subtle" intent="neutral" size="compact" onClick={() => onConfirmUpload(release)}>
                     Confirmar envio ao ChatGPT
+                  </Button>
+                )}
+                {release.status === 'UPLOADED_UNVERIFIED' && !release.baseline && (
+                  <Button variant="outline" intent="neutral" size="compact" onClick={() => onRevokeUpload(release)}>
+                    Desfazer confirmação
                   </Button>
                 )}
               </div>
@@ -355,13 +382,48 @@ function formatDate(iso: string): string {
   }
 }
 
+function geminiModeLabel(mode: AcademyGeminiExportMode): string {
+  if (mode === 'INCREMENTAL') return 'Incremental'
+  if (mode === 'MCP_TRIGGERS') return 'Gatilhos MCP'
+  return 'Completo'
+}
+
+function importOriginLabel(origin: AcademyImportConfirmationOrigin): string {
+  return origin === 'ASSUMED_ON_DOWNLOAD'
+    ? 'Importação assumida após download'
+    : 'Importação declarada manualmente'
+}
+
+function pendingReasonLabel(reason: AcademyGeminiPendingReason): string {
+  switch (reason) {
+    case 'NEW_SKILL':
+      return 'Nova'
+    case 'VERSION_CHANGED':
+    case 'CONTENT_CHANGED':
+      return 'Alterada'
+    case 'RENAMED':
+      return 'Renomeada'
+    case 'METADATA_CHANGED':
+      return 'Metadados alterados'
+    case 'PROFILE_CHANGED':
+      return 'Perfil atualizado'
+  }
+}
+
 interface GeminiOverviewSurfaceProps {
   hydration: 'LOADING' | 'READY' | 'ERROR'
   geminiExport: AcademyGeminiExportState | null
   preparing: boolean
+  busy?: boolean
   geminiError: string | null
   onPrepareExport: () => void
   onRevealExport: () => void
+  onDownloadExport: () => void
+  onConfirmImport: (skillIds?: string[]) => void
+  onRevokeImport: (skillIds?: string[]) => void
+  onEstablishBaseline: () => void
+  onAcknowledgeManualAction: (skillId: string) => void
+  onOpenModeModal: () => void
   onOpenReview: () => void
   onOpenSkills: () => void
 }
@@ -370,12 +432,21 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
   hydration,
   geminiExport,
   preparing,
+  busy = false,
   geminiError,
   onPrepareExport,
   onRevealExport,
+  onDownloadExport,
+  onConfirmImport,
+  onRevokeImport,
+  onEstablishBaseline,
+  onAcknowledgeManualAction,
+  onOpenModeModal,
   onOpenReview,
   onOpenSkills
 }) => {
+  const mode: AcademyGeminiExportMode = geminiExport?.mode ?? 'FULL'
+  const isDifferential = mode !== 'FULL'
   const coverage = geminiExport?.coverage
   const eligibleCount = coverage?.eligible ?? 0
   const catalogCount = coverage?.catalog ?? 0
@@ -386,12 +457,28 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
   const latest = geminiExport?.latestExport ?? null
   const artifactAvailable = Boolean(geminiExport?.artifactAvailable)
   const drifted = Boolean(geminiExport?.drifted)
+  const pendingSkills = geminiExport?.pendingSkills ?? []
+  const importedSkills = geminiExport?.importedSkills ?? []
+  const manualActions = geminiExport?.manualActions ?? []
+  const fullImportConfirmation = geminiExport?.fullImportConfirmation ?? null
+  const importPref = geminiExport?.importConfirmationPreference ?? null
 
-  const headline = !latest
-    ? 'Exporte suas Skills para o Gemini Web com um clique'
-    : drifted
-      ? 'Alterações recentes aguardam novo pacote Gemini'
-      : 'Pacote Gemini pronto para importação'
+  const hasDifferentialLists =
+    isDifferential && (pendingSkills.length > 0 || importedSkills.length > 0 || manualActions.length > 0)
+
+  const headline = isDifferential
+    ? mode === 'MCP_TRIGGERS'
+      ? pendingSkills.length === 0 && importedSkills.length > 0
+        ? 'Gatilhos MCP atualizados para o Gemini Web'
+        : 'Exporte stubs leves de acionamento via MCP'
+      : pendingSkills.length === 0 && importedSkills.length > 0
+        ? 'Skills incrementais em dia com o Gemini Web'
+        : 'Exporte apenas Skills novas ou alteradas'
+    : !latest
+      ? 'Exporte suas Skills para o Gemini Web com um clique'
+      : drifted
+        ? 'Alterações recentes aguardam novo pacote Gemini'
+        : 'Pacote Gemini pronto para importação'
 
   const exclusionCounts = {
     PRIVATE: excluded.filter((item) => item.reason === 'PRIVATE').length,
@@ -415,26 +502,54 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
     exclusionParts.push(`${exclusionCounts.REMOVED} ${exclusionCounts.REMOVED === 1 ? 'removida' : 'removidas'}`)
   }
 
-  const exportSignal = !latest
-    ? { tone: 'draft' as const, label: 'Aguardando geração' }
-    : drifted
-      ? { tone: 'stale' as const, label: 'Desatualizado' }
-      : { tone: 'published' as const, label: 'Pronto' }
+  const exportSignal = isDifferential
+    ? pendingSkills.length === 0
+      ? { tone: 'published' as const, label: 'Em dia' }
+      : artifactAvailable && !drifted
+        ? { tone: 'published' as const, label: 'Lote pronto' }
+        : { tone: 'stale' as const, label: `${pendingSkills.length} pendentes` }
+    : !latest
+      ? { tone: 'draft' as const, label: 'Aguardando geração' }
+      : drifted
+        ? { tone: 'stale' as const, label: 'Desatualizado' }
+        : { tone: 'published' as const, label: 'Pronto' }
 
-  const nextStepText = artifactAvailable
-    ? 'Extraia o arquivo academy-gemini.zip para obter os ZIPs individuais e importe-os no Gemini Apps Web.'
-    : awaitingCount > 0
-      ? 'Gere o pacote mestre atualizado para incluir todas as Skills compatíveis.'
-      : 'Gere o pacote Gemini a qualquer momento; edição de Skills continua na aba secundária.'
+  const nextStepText =
+    mode === 'MCP_TRIGGERS'
+      ? 'Cada Skill vira um ZIP stub mínimo. Configure o MCP do Code Awareness no Gemini Web para carregar instruções completas sob demanda.'
+      : mode === 'INCREMENTAL'
+        ? 'Importe os ZIPs individuais da pasta incremental no Gemini Web e confirme a importação para atualizar a base local.'
+        : artifactAvailable
+          ? 'Extraia o arquivo academy-gemini.zip para obter os ZIPs individuais e importe-os no Gemini Apps Web.'
+          : awaitingCount > 0
+            ? 'Gere o pacote mestre atualizado para incluir todas as Skills compatíveis.'
+            : 'Gere o pacote Gemini a qualquer momento; edição de Skills continua na aba secundária.'
+
+  const fullConfirmedForLatest = Boolean(
+    latest && fullImportConfirmation && fullImportConfirmation.artifactHash === latest.artifactHash
+  )
+  const preparedSkillIds = new Set((latest?.skills ?? []).map((s) => s.skillId).filter(Boolean))
 
   return (
-    <section className="academy-plugin-shell" aria-label="Exportação Gemini">
+    <section
+      className={`academy-plugin-shell${hasDifferentialLists ? ' has-lists' : ''}`}
+      aria-label="Exportação Gemini"
+    >
       <div className="academy-plugin-stage">
         <div className="academy-plugin-action">
           <div className="academy-plugin-eyebrow-row">
             <span className="academy-plugin-eyebrow">Gemini Apps Web</span>
-            <ContextHelp label="Como funciona a exportação Gemini" hint="ZIP mestre com Skills individuais compatíveis">
-              O Gemini Apps Web aceita Skills empacotadas em arquivos ZIP individuais, com o arquivo SKILL.md na raiz de cada pasta. Esta exportação cria um arquivo mestre academy-gemini.zip contendo os ZIPs prontos para importação.
+            <span className="academy-badge scope" data-testid="gemini-active-mode">
+              {geminiModeLabel(mode)}
+            </span>
+            {mode === 'MCP_TRIGGERS' && (
+              <span className="academy-badge warning">Requer MCP no Gemini Web</span>
+            )}
+            <Button variant="outline" intent="neutral" size="compact" onClick={onOpenModeModal}>
+              Configurar modo
+            </Button>
+            <ContextHelp label="Como funciona a exportação Gemini" hint="Três modos de distribuição para Gemini Web">
+              Escolha entre pacote Completo (academy-gemini.zip), Incremental (apenas novas e alteradas) ou Gatilhos MCP (stubs mínimos com consulta ao vivo via MCP).
             </ContextHelp>
           </div>
           <h3 className="academy-plugin-title">{headline}</h3>
@@ -442,12 +557,18 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
             <strong>
               {hydration === 'LOADING'
                 ? 'Carregando catálogo…'
-                : `${eligibleCount} ${eligibleCount === 1 ? 'Skill compatível' : 'Skills compatíveis'} para Gemini`}
+                : isDifferential
+                  ? `${eligibleCount} ${eligibleCount === 1 ? 'Skill elegível' : 'Skills elegíveis'} · ${pendingSkills.length} ${pendingSkills.length === 1 ? 'pendente' : 'pendentes'} · ${importedSkills.length} importadas em dia`
+                  : `${eligibleCount} ${eligibleCount === 1 ? 'Skill compatível' : 'Skills compatíveis'} para Gemini`}
             </strong>
             {hydration !== 'LOADING' && (
               <span>
-                {' '}· {catalogCount} no catálogo{notApplicableCount > 0 ? ` · ${notApplicableCount} de projeto (não aplicável)` : ''}
-                {adaptedCount > 0 ? ` · ${adaptedCount} com scripts adaptados` : ''}
+                {' '}· {catalogCount} no catálogo
+                {notApplicableCount > 0 ? ` · ${notApplicableCount} de projeto (não aplicável)` : ''}
+                {!isDifferential && adaptedCount > 0 ? ` · ${adaptedCount} com scripts adaptados` : ''}
+                {isDifferential && manualActions.length > 0
+                  ? ` · ${manualActions.length} ${manualActions.length === 1 ? 'ação manual' : 'ações manuais'}`
+                  : ''}
               </span>
             )}
           </p>
@@ -467,7 +588,14 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
           )}
 
           <p className="academy-policy-caption">
-            Requisitos do Gemini Web: identificador kebab-case, tamanho até 100MB e extensões suportadas. Scripts incompatíveis são convertidos em referências textuais não executáveis.
+            {mode === 'MCP_TRIGGERS'
+              ? 'Modo Gatilhos MCP: envia apenas frontmatter (name/description) e chamada MCP, aceitando Skills com scripts ou mais de 100MB.'
+              : 'Requisitos do Gemini Web: identificador kebab-case, tamanho até 100MB e extensões suportadas. Scripts incompatíveis são convertidos em referências textuais não executáveis.'}
+            {importPref && (
+              <span>
+                {' '}· Confirmação de importação: <strong>{importPref.mode === 'AUTOMATIC' ? 'Automática ao baixar' : 'Manual'}</strong>.
+              </span>
+            )}
           </p>
 
           <div className="academy-plugin-cta-row">
@@ -475,10 +603,50 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
               <Button variant="solid" intent="primary" size="comfortable" disabled>
                 Gerando pacote Gemini…
               </Button>
+            ) : isDifferential ? (
+              pendingSkills.length === 0 ? (
+                <Button variant="solid" intent="primary" size="comfortable" disabled>
+                  Nenhuma Skill pendente
+                </Button>
+              ) : artifactAvailable && !drifted && latest ? (
+                <>
+                  <Button variant="solid" intent="primary" size="comfortable" onClick={onRevealExport}>
+                    Abrir pasta
+                  </Button>
+                  <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                    Baixar pacote
+                  </Button>
+                  <Button variant="subtle" intent="neutral" size="compact" disabled={busy} onClick={() => onConfirmImport()}>
+                    Confirmar importação
+                  </Button>
+                  <Button variant="ghost" intent="neutral" size="compact" onClick={onPrepareExport}>
+                    Regerar pacote
+                  </Button>
+                </>
+              ) : (
+                <>
+                  <Button variant="solid" intent="primary" size="comfortable" onClick={onPrepareExport}>
+                    {mode === 'MCP_TRIGGERS' ? 'Gerar gatilhos MCP' : 'Gerar pacote incremental'}
+                  </Button>
+                  {artifactAvailable && latest && (
+                    <Button variant="ghost" intent="neutral" size="compact" onClick={onRevealExport}>
+                      Abrir pasta anterior
+                    </Button>
+                  )}
+                  {importedSkills.length === 0 && (
+                    <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onEstablishBaseline}>
+                      Já importei antes (estabelecer base)
+                    </Button>
+                  )}
+                </>
+              )
             ) : artifactAvailable && !drifted && latest ? (
               <>
                 <Button variant="solid" intent="primary" size="comfortable" onClick={onRevealExport}>
                   Abrir ZIP
+                </Button>
+                <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                  Baixar pacote
                 </Button>
                 <Button variant="ghost" intent="neutral" size="compact" onClick={onPrepareExport}>
                   Regerar ZIP
@@ -509,13 +677,15 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
 
         <aside className="academy-plugin-result" aria-label="Resultado do pacote Gemini">
           <div className="academy-plugin-result-header">
-            <span>Pacote Gemini</span>
+            <span>{isDifferential ? `Pasta ${geminiModeLabel(mode)}` : 'Pacote Gemini'}</span>
             <span className={`academy-signal ${exportSignal.tone}`}>{exportSignal.label}</span>
           </div>
           {latest ? (
             <div className="academy-plugin-result-body">
               <div className="academy-plugin-version-row">
-                <strong className="academy-plugin-version">academy-gemini.zip</strong>
+                <strong className="academy-plugin-version">
+                  {isDifferential ? (mode === 'MCP_TRIGGERS' ? 'mcp-triggers/' : 'incremental/') : 'academy-gemini.zip'}
+                </strong>
                 <span>
                   {latest.skillCount} {latest.skillCount === 1 ? 'Skill individual' : 'Skills individuais'}
                   {latest.convertedCount && latest.convertedCount > 0 ? ` (${latest.convertedCount} com scripts adaptados)` : ''}
@@ -523,27 +693,166 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
               </div>
               <p className="academy-plugin-freshness">
                 {drifted
-                  ? `${awaitingCount} ${awaitingCount === 1 ? 'alteração aguarda' : 'alterações aguardam'} novo pacote.`
+                  ? isDifferential
+                    ? `${pendingSkills.length} ${pendingSkills.length === 1 ? 'Skill aguarda' : 'Skills aguardam'} nova geração neste modo.`
+                    : `${awaitingCount} ${awaitingCount === 1 ? 'alteração aguarda' : 'alterações aguardam'} novo pacote.`
                   : artifactAvailable
                     ? `Gerado em ${formatDate(latest.exportedAt)} (${formatBytes(latest.totalBytes)}). Pronto para importação.`
-                    : 'Arquivo ZIP não encontrado no disco. Clique para gerar novamente.'}
+                    : 'Pacote não encontrado no disco. Clique para gerar novamente.'}
               </p>
+              {!isDifferential && fullConfirmedForLatest && fullImportConfirmation && (
+                <p className="academy-provenance-note" data-testid="gemini-full-provenance">
+                  {importOriginLabel(fullImportConfirmation.origin)}
+                </p>
+              )}
               <div className="academy-plugin-result-actions">
                 {artifactAvailable && (
-                  <Button variant="outline" intent="neutral" size="compact" onClick={onRevealExport}>
-                    Mostrar ZIP
+                  <>
+                    <Button variant="outline" intent="neutral" size="compact" onClick={onRevealExport}>
+                      {isDifferential ? 'Mostrar pasta' : 'Mostrar ZIP'}
+                    </Button>
+                    <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                      Baixar pacote
+                    </Button>
+                  </>
+                )}
+                {!isDifferential && artifactAvailable && !fullConfirmedForLatest && (
+                  <Button variant="subtle" intent="neutral" size="compact" disabled={busy} onClick={() => onConfirmImport()}>
+                    Confirmar importação
+                  </Button>
+                )}
+                {!isDifferential && fullImportConfirmation && (
+                  <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={() => onRevokeImport()}>
+                    Desfazer confirmação
+                  </Button>
+                )}
+                {isDifferential && importedSkills.length > 0 && (
+                  <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={() => onRevokeImport()}>
+                    Desfazer confirmação
                   </Button>
                 )}
               </div>
             </div>
           ) : (
             <div className="academy-plugin-empty">
-              <strong>Nenhum pacote Gemini gerado ainda</strong>
-              <p>Gere um arquivo mestre com todas as Skills globais e compatíveis para o Gemini Web.</p>
+              <strong>
+                {isDifferential && pendingSkills.length === 0
+                  ? 'Tudo importado e atualizado'
+                  : 'Nenhum pacote Gemini gerado ainda'}
+              </strong>
+              <p>
+                {isDifferential
+                  ? pendingSkills.length === 0
+                    ? 'Nenhuma Skill pendente neste modo. Novas ou editadas aparecerão aqui automaticamente.'
+                    : `Existem ${pendingSkills.length} Skills pendentes neste modo para gerar em lote.`
+                  : 'Gere um arquivo mestre com todas as Skills globais e compatíveis para o Gemini Web.'}
+              </p>
+              {isDifferential && importedSkills.length > 0 && (
+                <div className="academy-plugin-result-actions">
+                  <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={() => onRevokeImport()}>
+                    Desfazer confirmação
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </aside>
       </div>
+
+      {hasDifferentialLists && (
+        <div className="academy-gemini-differential-grid">
+          {pendingSkills.length > 0 && (
+            <section className="academy-gemini-list-card" aria-label="Skills pendentes para Gemini">
+              <div className="academy-settings-row-header">
+                <h4>Pendentes de envio ({pendingSkills.length})</h4>
+              </div>
+              <div className="academy-gemini-list-items">
+                {pendingSkills.map((item) => {
+                  const isPreparedInCurrentBatch = Boolean(
+                    artifactAvailable && !drifted && preparedSkillIds.has(item.skillId)
+                  )
+                  return (
+                    <div key={item.skillId} className="academy-gemini-list-row">
+                      <div className="academy-gemini-list-meta">
+                        <strong>{item.name}</strong>
+                        <span className="academy-badge scope">{pendingReasonLabel(item.reason)}</span>
+                        <span>v{item.academyVersion}</span>
+                        {item.previousName && <span>(antes: {item.previousName})</span>}
+                      </div>
+                      {isPreparedInCurrentBatch && (
+                        <Button
+                          variant="outline"
+                          intent="neutral"
+                          size="compact"
+                          disabled={busy}
+                          onClick={() => onConfirmImport([item.skillId])}
+                        >
+                          Confirmar
+                        </Button>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
+          )}
+
+          {importedSkills.length > 0 && (
+            <section className="academy-gemini-list-card" aria-label="Skills importadas no Gemini">
+              <div className="academy-settings-row-header">
+                <h4>Importadas em dia ({importedSkills.length})</h4>
+              </div>
+              <div className="academy-gemini-list-items">
+                {importedSkills.map((item) => (
+                  <div key={item.skillId} className="academy-gemini-list-row">
+                    <div className="academy-gemini-list-meta">
+                      <strong>{item.name}</strong>
+                      <span>v{item.academyVersion}</span>
+                      <span className="academy-provenance-tag">{importOriginLabel(item.origin)}</span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      intent="neutral"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onRevokeImport([item.skillId])}
+                    >
+                      Desfazer
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {manualActions.length > 0 && (
+            <section className="academy-gemini-list-card warning" aria-label="Ações manuais no Gemini">
+              <div className="academy-settings-row-header">
+                <h4>Ações manuais no Gemini ({manualActions.length})</h4>
+              </div>
+              <div className="academy-gemini-list-items">
+                {manualActions.map((item) => (
+                  <div key={item.skillId} className="academy-gemini-list-row">
+                    <div className="academy-gemini-list-meta">
+                      <strong>{item.currentName ?? item.previousName}</strong>
+                      <span className="academy-gemini-action-details">{item.reason}</span>
+                    </div>
+                    <Button
+                      variant="outline"
+                      intent="neutral"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onAcknowledgeManualAction(item.skillId)}
+                    >
+                      Já removi no Gemini
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+        </div>
+      )}
 
       <footer className="academy-plugin-footer">
         <span>{nextStepText}</span>
@@ -554,6 +863,108 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
         </div>
       </footer>
     </section>
+  )
+}
+
+interface GeminiModeModalProps {
+  currentMode: AcademyGeminiExportMode
+  busy: boolean
+  onSelectMode: (mode: AcademyGeminiExportMode) => void
+  onClose: () => void
+}
+
+export const GeminiModeModal: React.FC<GeminiModeModalProps> = ({
+  currentMode,
+  busy,
+  onSelectMode,
+  onClose
+}) => {
+  const [selected, setSelected] = React.useState<AcademyGeminiExportMode>(currentMode)
+
+  const options: Array<{
+    mode: AcademyGeminiExportMode
+    title: string
+    badge?: string
+    description: string
+    consequence: string
+  }> = [
+    {
+      mode: 'FULL',
+      title: 'Completo',
+      description: 'Gera um único arquivo academy-gemini.zip contendo um ZIP individual por Skill ativa compatível.',
+      consequence: 'Indicado para backup total ou primeira importação em massa.'
+    },
+    {
+      mode: 'INCREMENTAL',
+      title: 'Incremental',
+      description: 'Exporta uma pasta contendo apenas as Skills novas ou alteradas desde a última importação confirmada.',
+      consequence: 'Preserva o histórico local de cada Skill e evita reenviar Skills já em dia.'
+    },
+    {
+      mode: 'MCP_TRIGGERS',
+      title: 'Gatilhos MCP',
+      badge: 'Requer MCP no Gemini Web',
+      description: 'Exporta stubs leves contendo apenas name, description e acionamento via MCP em tempo real.',
+      consequence: 'Requer servidor MCP conectado no Gemini Web; aceita Skills com binários ou acima de 100MB.'
+    }
+  ]
+
+  return (
+    <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Modo de exportação Gemini">
+      <div className="academy-modal academy-modal-wide">
+        <div className="academy-drawer-header">
+          <div>
+            <h3>Modo de exportação Gemini</h3>
+            <p className="academy-modal-subcopy">
+              Alternar o modo preserva os checkpoints salvos nos demais modos e recalcula imediatamente as Skills pendentes.
+            </p>
+          </div>
+          <Button variant="ghost" intent="neutral" size="compact" onClick={onClose}>
+            Fechar
+          </Button>
+        </div>
+
+        <div className="academy-mode-options" role="radiogroup" aria-label="Escolha o modo de exportação Gemini">
+          {options.map((option) => (
+            <label
+              key={option.mode}
+              className={`academy-mode-option${selected === option.mode ? ' selected' : ''}`}
+            >
+              <input
+                type="radio"
+                name="gemini-export-mode"
+                value={option.mode}
+                checked={selected === option.mode}
+                onChange={() => setSelected(option.mode)}
+              />
+              <div className="academy-mode-option-copy">
+                <div className="academy-mode-option-header">
+                  <strong>{option.title}</strong>
+                  {option.badge && <span className="academy-badge warning">{option.badge}</span>}
+                </div>
+                <p>{option.description}</p>
+                <span className="academy-mode-consequence">{option.consequence}</span>
+              </div>
+            </label>
+          ))}
+        </div>
+
+        <div className="academy-modal-actions">
+          <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onClose}>
+            Cancelar
+          </Button>
+          <Button
+            variant="solid"
+            intent="primary"
+            size="compact"
+            disabled={busy || selected === currentMode}
+            onClick={() => onSelectMode(selected)}
+          >
+            Aplicar modo
+          </Button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -1233,6 +1644,7 @@ interface AcademySettingsDrawerProps {
   openAiPublication: AcademyOpenAiPublicationState | null
   openAiReleases: AcademyOpenAiRelease[]
   preference: AcademyPublicationPreference | null
+  importConfirmationPreference?: AcademyImportConfirmationPreference | null
   packageDistribution: AcademyPackageDistributionState | null
   gitStatus: AcademyGitStatusProjection | null
   eligibleRepos: RepositoryRecord[]
@@ -1244,6 +1656,7 @@ interface AcademySettingsDrawerProps {
   busy: boolean
   onSelectedRepoChange: (id: string) => void
   onRequestToggleAutoInclude: (nextEnabled: boolean) => void
+  onSetImportConfirmationMode?: (mode: AcademyImportConfirmationMode) => void
   onBootstrapPlugin: () => void
   onConfirmUpload: (release: AcademyOpenAiRelease) => void
   onRebuildRelease: (release: AcademyOpenAiRelease) => void
@@ -1268,6 +1681,7 @@ export const AcademySettingsDrawer: React.FC<AcademySettingsDrawerProps> = ({
   openAiPublication,
   openAiReleases,
   preference,
+  importConfirmationPreference,
   packageDistribution,
   gitStatus,
   eligibleRepos,
@@ -1279,6 +1693,7 @@ export const AcademySettingsDrawer: React.FC<AcademySettingsDrawerProps> = ({
   busy,
   onSelectedRepoChange,
   onRequestToggleAutoInclude,
+  onSetImportConfirmationMode,
   onBootstrapPlugin,
   onConfirmUpload,
   onRebuildRelease,
@@ -1532,6 +1947,33 @@ export const AcademySettingsDrawer: React.FC<AcademySettingsDrawerProps> = ({
               <Button variant="ghost" intent="neutral" size="compact" onClick={onReconcile}>
                 Reconciliar destinos
               </Button>
+            </div>
+          </section>
+
+          <section className="academy-settings-section" aria-label="Downloads">
+            <div className="academy-settings-row-header">
+              <h4>Downloads</h4>
+            </div>
+            <div className="academy-preference-card">
+              <div className="academy-preference-copy">
+                <strong>Confirmação de importação (Gemini e Plugin ChatGPT)</strong>
+                <p>
+                  No modo Automático, a versão é marcada como presumidamente importada somente após download bem-sucedido do pacote, nunca pela geração ou abertura da pasta.
+                </p>
+              </div>
+              <select
+                aria-label="Confirmação de importação"
+                value={importConfirmationPreference?.mode ?? 'MANUAL'}
+                disabled={busy || !onSetImportConfirmationMode}
+                onChange={(event) =>
+                  onSetImportConfirmationMode?.(
+                    event.target.value === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL'
+                  )
+                }
+              >
+                <option value="MANUAL">Manual</option>
+                <option value="AUTOMATIC">Automática</option>
+              </select>
             </div>
           </section>
         </div>

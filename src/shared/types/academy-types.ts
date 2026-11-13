@@ -81,6 +81,83 @@ export interface AcademyPluginCoverage {
   preference: AcademyPublicationPreference
 }
 
+export type AcademyGeminiExportMode = 'FULL' | 'INCREMENTAL' | 'MCP_TRIGGERS'
+
+export type AcademyImportConfirmationMode = 'MANUAL' | 'AUTOMATIC'
+
+export type AcademyImportConfirmationOrigin = 'MANUAL' | 'ASSUMED_ON_DOWNLOAD'
+
+export interface AcademyImportConfirmationPreference {
+  mode: AcademyImportConfirmationMode
+  updatedAt: string | null
+}
+
+export interface AcademyGeminiSkillCheckpoint {
+  skillId: string
+  skillName: string
+  academyVersion: number
+  packageHash: string
+  profileVersion: string
+  fingerprint: string
+  confirmedAt: string
+  origin: AcademyImportConfirmationOrigin
+  description?: string
+}
+
+export type AcademyGeminiPendingReason =
+  | 'NEW_SKILL'
+  | 'VERSION_CHANGED'
+  | 'CONTENT_CHANGED'
+  | 'RENAMED'
+  | 'METADATA_CHANGED'
+  | 'PROFILE_CHANGED'
+
+export interface AcademyGeminiPendingSkill {
+  skillId: string
+  name: string
+  previousName?: string
+  academyVersion: number
+  packageHash: string
+  profileVersion: string
+  fingerprint: string
+  reason: AcademyGeminiPendingReason
+  zipFileName: string
+  zipPath: string | null
+  zipHash: string | null
+  zipSizeBytes: number | null
+  awaitingImport: boolean
+}
+
+export interface AcademyGeminiImportedSkillStatus {
+  skillId: string
+  name: string
+  academyVersion: number
+  packageHash: string
+  profileVersion: string
+  fingerprint: string
+  confirmedAt: string
+  origin: AcademyImportConfirmationOrigin
+  upToDate: boolean
+}
+
+export type AcademyGeminiManualActionType = 'REMOVE_IN_GEMINI' | 'RENAME_IN_GEMINI'
+
+export interface AcademyGeminiManualAction {
+  skillId: string
+  previousName: string
+  currentName?: string
+  action: AcademyGeminiManualActionType
+  reason: string
+  checkpointedAt: string
+}
+
+export interface AcademyGeminiFullImportConfirmation {
+  artifactHash: string
+  confirmedAt: string
+  origin: AcademyImportConfirmationOrigin
+  skillCount: number
+}
+
 export type AcademyGeminiExclusionReason = 'PRIVATE' | 'DISABLED' | 'INCOMPATIBLE' | 'REMOVED'
 
 export interface AcademyGeminiExcludedSkill {
@@ -100,14 +177,27 @@ export interface AcademyGeminiCoverage {
   notApplicable: number
   adaptedCount?: number
   excluded: AcademyGeminiExcludedSkill[]
+  imported?: number
+  pendingExport?: number
+  newSkills?: number
+  updatedSkills?: number
+  awaitingImport?: number
+  upToDate?: number
+  manualActionsCount?: number
 }
 
 export interface AcademyGeminiSkillExportEntry {
+  skillId?: string
   name: string
+  academyVersion?: number
   packageHash?: string
+  zipFileName?: string
   zipSha256: string
   entryCount: number
   byteLength: number
+  fingerprint?: string
+  reason?: AcademyGeminiPendingReason
+  previousName?: string
   adaptedFiles?: Array<{ originalPath: string; adaptedPath: string; language?: string }>
 }
 
@@ -121,12 +211,15 @@ export interface AcademyGeminiReceiptExcludedSkill {
 }
 
 export interface AcademyGeminiExportReceipt {
+  mode?: AcademyGeminiExportMode
   exportId: string
   exportedAt: string
   snapshotHash: string
   profileVersion?: string
   artifactPath: string
   artifactHash: string
+  targetDirectoryPath?: string
+  downloadsPath?: string | null
   skillCount: number
   convertedCount?: number
   totalBytes: number
@@ -135,9 +228,17 @@ export interface AcademyGeminiExportReceipt {
 }
 
 export interface AcademyGeminiExportState {
+  mode: AcademyGeminiExportMode
+  requiresMcp: boolean
+  baselineEstablished: boolean
+  importConfirmationPreference: AcademyImportConfirmationPreference
+  fullImportConfirmation: AcademyGeminiFullImportConfirmation | null
   latestExport: AcademyGeminiExportReceipt | null
   coverage: AcademyGeminiCoverage
   canonicalSnapshotHash: string
+  pendingSkills: AcademyGeminiPendingSkill[]
+  importedSkills: AcademyGeminiImportedSkillStatus[]
+  manualActions: AcademyGeminiManualAction[]
   drifted: boolean
   artifactAvailable: boolean
   lastError: string | null
@@ -414,7 +515,8 @@ export interface AcademyOpenAiUploadConfirmation {
   pluginVersion: string
   artifactHash: string
   confirmedAt: string
-  method: 'MANUAL_UPLOAD'
+  method: 'MANUAL_UPLOAD' | 'ASSUMED_ON_DOWNLOAD'
+  origin?: AcademyImportConfirmationOrigin
 }
 
 export interface AcademyOpenAiRelease {
@@ -452,6 +554,7 @@ export interface AcademyOpenAiPublicationState {
   drifted: boolean
   currentPackageRevision: AcademyPluginPackageRevision | null
   hostedStatus: AcademyHostedPluginStatus
+  importConfirmationPreference?: AcademyImportConfirmationPreference
 }
 
 export interface AcademyPackageDistributionState {

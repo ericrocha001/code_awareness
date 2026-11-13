@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildSync } from 'esbuild'
@@ -18,7 +18,13 @@ import {
   generateMarkdownFence,
   formatAdaptedReferenceMarkdown,
   GEMINI_ADAPTATION_PROFILE_VERSION,
-  GEMINI_MAX_SKILL_BYTES
+  GEMINI_MCP_STUB_PROFILE_VERSION,
+  GEMINI_MAX_SKILL_BYTES,
+  computeGeminiIncrementalFingerprint,
+  computeGeminiMcpTriggerFingerprint,
+  evaluateGeminiMcpTriggerCatalog,
+  formatGeminiMcpTriggerStub,
+  createGeminiMcpTriggerZip
 } from './gemini-export-model'
 import { readZipEntries } from '../publication/deterministic-zip'
 import { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
@@ -1167,5 +1173,629 @@ console.log(template);
       expect(recoveredService.getState().lastError).toBeNull()
       expect(recoveredService.getState().drifted).toBe(false)
     })
+  })
+
+  describe('Three Gemini Export Modes & Shared Import Confirmation Preference', () => {
+    function snapshotCanonicalSkills(targetStore: AcademyStore, skillIds: string[]) {
+      return skillIds.map((id) => {
+        const d = targetStore.get(id)
+        return {
+          id: d.id,
+          name: d.name,
+          description: d.description,
+          status: d.status,
+          scope: d.scope,
+          currentVersion: d.currentVersion,
+          packageHash: d.current.packageHash,
+          skillMd: d.current.package.skillMd,
+          artifacts: d.current.package.artifacts,
+          publicationEligibility: d.publicationEligibility
+        }
+      })
+    }
+
+    it('supports U1 Incremental mode lifecycle: differential detection, checkpoints across restart, baseline, strict CAS, manual actions, rollback, and immutability', async () => {
+      const alpha = store.create({
+        package: makePackage('inc-alpha', 'Alpha incremental skill', { 'guides/steps.md': '# Steps v1' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const beta = store.create({
+        package: makePackage('inc-beta', 'Beta incremental skill', { 'scripts/helper.py': 'print("v1")' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(alpha.id, alpha.currentVersion)
+      store.approvePublicSkill(beta.id, beta.currentVersion)
+
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      expect(service.getState().mode).toBe('FULL')
+
+      // Cannot establish baseline in FULL mode
+      expect(() => service.establishBaseline()).toThrow(/Estabelecimento de base aplica-se apenas/)
+      try {
+        service.establishBaseline()
+        expect.unreachable()
+      } catch (err) {
+        expect((err as { code?: string }).code).toBe('GEMINI_BASELINE_DIFFERENTIAL_ONLY')
+      }
+
+      // Switch to INCREMENTAL mode
+      const incInitial = service.setMode('INCREMENTAL')
+      expect(incInitial.mode).toBe('INCREMENTAL')
+      expect(incInitial.baselineEstablished).toBe(false)
+      expect(incInitial.pendingSkills.map((s) => s.name)).toEqual(['inc-alpha', 'inc-beta'])
+      expect(incInitial.pendingSkills.every((s) => s.reason === 'NEW_SKILL' && s.awaitingImport === false)).toBe(true)
+
+      // Establish baseline for alpha only (simulates user having already imported alpha earlier)
+      const afterBaseline = service.establishBaseline({ skillIds: [alpha.id] })
+      expect(afterBaseline.baselineEstablished).toBe(true)
+      expect(afterBaseline.importedSkills.map((s) => s.name)).toEqual(['inc-alpha'])
+      expect(afterBaseline.importedSkills[0]).toMatchObject({ origin: 'MANUAL', upToDate: true })
+      expect(afterBaseline.pendingSkills.map((s) => s.name)).toEqual(['inc-beta'])
+
+      // Prepare incremental export: only beta should be packaged (not alpha)
+      const firstReceipt = await service.prepareExport()
+      expect(firstReceipt.mode).toBe('INCREMENTAL')
+      expect(firstReceipt.skillCount).toBe(1)
+      expect(firstReceipt.skills.map((s) => s.name)).toEqual(['inc-beta'])
+      expect(existsSync(join(service.incrementalDirectory, 'inc-beta.zip'))).toBe(true)
+      expect(existsSync(join(service.incrementalDirectory, 'inc-alpha.zip'))).toBe(false)
+
+      // Strict CAS conflict: advance beta after ZIP preparation before confirming import
+      const preparedState = service.getState()
+      const betaExpectedFp = preparedState.pendingSkills.find((p) => p.skillId === beta.id)!.fingerprint
+      const betaV2 = store.update({
+        skillId: beta.id,
+        expectedVersion: beta.currentVersion,
+        package: makePackage('inc-beta', 'Beta incremental skill v2', { 'scripts/helper.py': 'print("v2")' }),
+        origin: 'UI'
+      })
+      expect(() => service.confirmImport({ skillIds: [beta.id], expectedFingerprints: { [beta.id]: betaExpectedFp } }))
+        .toThrow(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(service.getState().importedSkills.map((s) => s.name)).toEqual(['inc-alpha'])
+
+      // Regenerate incremental batch with v2 and check worker failure preserves existing batch if rollback needed
+      await expect(service.prepareExport({ _failStage: 'promote' })).rejects.toThrow(/SIMULATED_PROMOTE_FAILURE/)
+      expect(existsSync(join(service.incrementalDirectory, 'inc-beta.zip'))).toBe(true)
+
+      const secondReceipt = await service.prepareExport()
+      expect(secondReceipt.skills[0].academyVersion).toBe(betaV2.currentVersion)
+
+      // Manual confirm import records checkpoint cleanly
+      const afterConfirm = service.confirmImport({ skillIds: [beta.id] })
+      expect(afterConfirm.pendingSkills).toHaveLength(0)
+      expect(afterConfirm.importedSkills.map((s) => s.name)).toEqual(['inc-alpha', 'inc-beta'])
+      expect(existsSync(service.incrementalDirectory)).toBe(false)
+
+      // Empty prepareExport refuses with GEMINI_NO_PENDING_SKILLS
+      await expect(service.prepareExport()).rejects.toMatchObject({ code: 'GEMINI_NO_PENDING_SKILLS' })
+
+      // Verify persistence across service restart
+      const restartedStore = new AcademyStore(dbPath)
+      try {
+        const restartedService = new AcademyGeminiExportService(restartedStore, dbPath, downloadsDir, executor)
+        const restartedState = restartedService.getState()
+        expect(restartedState.mode).toBe('INCREMENTAL')
+        expect(restartedState.importedSkills.map((s) => s.name)).toEqual(['inc-alpha', 'inc-beta'])
+        expect(restartedState.pendingSkills).toHaveLength(0)
+      } finally {
+        restartedStore.close()
+      }
+
+      // Rename beta -> emits RENAMED pending + RENAME_IN_GEMINI manual action; disable alpha -> REMOVE_IN_GEMINI
+      store.update({
+        skillId: beta.id,
+        expectedVersion: betaV2.currentVersion,
+        package: makePackage('inc-beta-renamed', 'Beta renamed skill', { 'scripts/helper.py': 'print("v2")' }),
+        origin: 'UI'
+      })
+      store.setEnabled(alpha.id, false, alpha.currentVersion)
+
+      const driftedState = service.getState()
+      expect(driftedState.pendingSkills).toHaveLength(1)
+      expect(driftedState.pendingSkills[0]).toMatchObject({
+        skillId: beta.id,
+        name: 'inc-beta-renamed',
+        previousName: 'inc-beta',
+        reason: 'RENAMED'
+      })
+      expect(driftedState.manualActions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ skillId: alpha.id, previousName: 'inc-alpha', action: 'REMOVE_IN_GEMINI' }),
+          expect.objectContaining({
+            skillId: beta.id,
+            previousName: 'inc-beta',
+            currentName: 'inc-beta-renamed',
+            action: 'RENAME_IN_GEMINI'
+          })
+        ])
+      )
+
+      // Acknowledge manual removal of alpha -> clears checkpoint & action
+      const afterAck = service.acknowledgeManualAction(alpha.id)
+      expect(afterAck.manualActions.some((a) => a.skillId === alpha.id)).toBe(false)
+
+      // Assert canonical skills were never mutated by export operations (only explicit test store.update/approve mutated them)
+      const canonicalAfterPrepare = snapshotCanonicalSkills(store, [alpha.id, beta.id])
+      await service.prepareExport()
+      service.confirmImport({ skillIds: [beta.id] })
+      expect(snapshotCanonicalSkills(store, [alpha.id, beta.id])).toEqual(canonicalAfterPrepare)
+    }, 30000)
+
+    it('supports U2 MCP Triggers mode: single-line YAML escaping, stub fingerprint isolation, large/binary tolerance, and isolated directory export', async () => {
+      const multilineDesc = 'Line one: handles "quotes"\nLine two with MCP instructions'
+      const singleLineDesc = 'MCP trigger skill description stays stable'
+      const skill = store.create({
+        package: makePackage('mcp-heavy-skill', singleLineDesc, {
+          'assets/video.mp4': 'binary-video-bytes-rejected-in-full',
+          'scripts/runner.py': 'print("heavy python runtime")'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      // Validate multiline + quote escaping in YAML stub helper
+      const stubMd = formatGeminiMcpTriggerStub({ id: skill.id, name: skill.name, description: multilineDesc })
+      expect(stubMd).toContain('name: mcp-heavy-skill')
+      expect(stubMd).toContain(`description: ${JSON.stringify('Line one: handles "quotes" Line two with MCP instructions')}`)
+      expect(stubMd).toContain('get_academy_skill')
+      expect(stubMd).toContain(`{ "skillId": "${skill.id}" }`)
+      expect(stubMd).toContain('**NUNCA** chame `list_academy_skills`')
+
+      const canonicalStubMd = formatGeminiMcpTriggerStub({ id: skill.id, name: skill.name, description: skill.description })
+      const stubZip = createGeminiMcpTriggerZip({ id: skill.id, name: skill.name, description: skill.description })
+      const entries = readZipEntries(stubZip.zipBuffer)
+      expect(entries.map((e) => e.path)).toEqual(['SKILL.md'])
+
+      // Fingerprint isolation: body/scripts/artifact changes do NOT change MCP trigger fingerprint
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      const mcpState1 = service.setMode('MCP_TRIGGERS')
+      expect(mcpState1.requiresMcp).toBe(true)
+      expect(mcpState1.coverage.excluded).toHaveLength(0) // .mp4 was NOT rejected in MCP_TRIGGERS
+      expect(mcpState1.pendingSkills.map((p) => p.name)).toEqual(['mcp-heavy-skill'])
+
+      const initialFingerprint = mcpState1.pendingSkills[0].fingerprint
+      expect(initialFingerprint).toBe(computeGeminiMcpTriggerFingerprint({ id: skill.id, name: skill.name, description: skill.description }))
+
+      const mcpReceipt = await service.prepareExport()
+      expect(mcpReceipt.mode).toBe('MCP_TRIGGERS')
+      expect(mcpReceipt.profileVersion).toBe(GEMINI_MCP_STUB_PROFILE_VERSION)
+      expect(existsSync(join(service.mcpTriggersDirectory, 'mcp-heavy-skill.zip'))).toBe(true)
+
+      const exportedEntries = readZipEntries(readFileSync(join(service.mcpTriggersDirectory, 'mcp-heavy-skill.zip')))
+      expect(exportedEntries.map((e) => e.path)).toEqual(['SKILL.md'])
+      expect(exportedEntries.find((e) => e.path === 'SKILL.md')!.data.toString('utf8')).toBe(canonicalStubMd)
+
+      service.confirmImport({ skillIds: [skill.id] })
+      expect(service.getState().pendingSkills).toHaveLength(0)
+      expect(service.getState().importedSkills[0]).toMatchObject({ skillId: skill.id, upToDate: true })
+
+      // Updating ONLY scripts and SKILL.md body (same name & description) keeps MCP checkpoint up to date
+      const v2 = store.update({
+        skillId: skill.id,
+        expectedVersion: skill.currentVersion,
+        package: makePackage('mcp-heavy-skill', singleLineDesc, {
+          'scripts/runner.py': 'print("v2 changed")'
+        }),
+        origin: 'UI'
+      })
+      const afterBodyChange = service.getState()
+      expect(afterBodyChange.pendingSkills).toHaveLength(0)
+      expect(afterBodyChange.importedSkills[0].upToDate).toBe(true)
+
+      // Changing description invalidates MCP trigger fingerprint -> pending METADATA_CHANGED
+      store.update({
+        skillId: skill.id,
+        expectedVersion: v2.currentVersion,
+        package: makePackage('mcp-heavy-skill', 'Updated trigger description for Gemini'),
+        origin: 'UI'
+      })
+      const afterDescChange = service.getState()
+      expect(afterDescChange.pendingSkills).toHaveLength(1)
+      expect(afterDescChange.pendingSkills[0]).toMatchObject({
+        name: 'mcp-heavy-skill',
+        reason: 'METADATA_CHANGED'
+      })
+      expect(afterDescChange.importedSkills).toHaveLength(0)
+    }, 30000)
+
+    it('honors shared Import Confirmation Preference (MANUAL vs AUTOMATIC) strictly on verified download and supports undo confirmation across all modes', async () => {
+      const skill = store.create({
+        package: makePackage('pref-skill', 'Preference test skill', { 'notes/readme.md': '# Hello' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      expect(service.getImportConfirmationPreference().mode).toBe('MANUAL')
+
+      // Enable AUTOMATIC confirmation preference
+      service.setImportConfirmationPreference('AUTOMATIC')
+      expect(service.getState().importConfirmationPreference.mode).toBe('AUTOMATIC')
+
+      // 1. FULL mode: prepareExport & revealArtifact must NEVER auto-confirm
+      const fullReceipt = await service.prepareExport()
+      expect(service.getState().fullImportConfirmation).toBeNull()
+      await service.revealArtifact()
+      expect(service.getState().fullImportConfirmation).toBeNull()
+
+      // Failed downloadExport must NOT auto-confirm
+      await expect(service.downloadExport(join(tempDir, 'nul\0invalid'))).rejects.toThrow()
+      expect(service.getState().fullImportConfirmation).toBeNull()
+
+      // Successful verified download in AUTOMATIC marks fullImportConfirmation with ASSUMED_ON_DOWNLOAD
+      const afterFullDownload = await service.downloadExport()
+      expect(afterFullDownload.fullImportConfirmation).toMatchObject({
+        artifactHash: fullReceipt.artifactHash,
+        origin: 'ASSUMED_ON_DOWNLOAD',
+        skillCount: 1
+      })
+      expect(existsSync(join(downloadsDir, 'academy-gemini.zip'))).toBe(true)
+
+      // Revoke confirmation in FULL mode without creating new canonical skill version
+      const beforeRevokeVersion = store.get(skill.id).currentVersion
+      const afterFullRevoke = service.revokeImportConfirmation()
+      expect(afterFullRevoke.fullImportConfirmation).toBeNull()
+      expect(afterFullRevoke.baselineEstablished).toBe(false)
+      expect(store.get(skill.id).currentVersion).toBe(beforeRevokeVersion)
+
+      // 2. INCREMENTAL mode: prepare & reveal do NOT confirm; download in MANUAL leaves pending; AUTOMATIC download marks ASSUMED_ON_DOWNLOAD
+      service.setImportConfirmationPreference('MANUAL')
+      service.setMode('INCREMENTAL')
+      await service.prepareExport()
+      await service.revealArtifact()
+      const afterManualIncDownload = await service.downloadExport()
+      expect(afterManualIncDownload.pendingSkills).toHaveLength(1)
+      expect(afterManualIncDownload.importedSkills).toHaveLength(0)
+
+      service.setImportConfirmationPreference('AUTOMATIC')
+      const afterAutoIncDownload = await service.downloadExport()
+      expect(afterAutoIncDownload.pendingSkills).toHaveLength(0)
+      expect(afterAutoIncDownload.importedSkills).toHaveLength(1)
+      expect(afterAutoIncDownload.importedSkills[0]).toMatchObject({
+        skillId: skill.id,
+        origin: 'ASSUMED_ON_DOWNLOAD',
+        upToDate: true
+      })
+      expect(existsSync(join(downloadsDir, 'academy-gemini-incremental', 'pref-skill.zip'))).toBe(true)
+
+      // Selective revoke returns skill to pending without modifying canonical Skill
+      const afterIncRevoke = service.revokeImportConfirmation({ skillIds: [skill.id] })
+      expect(afterIncRevoke.importedSkills).toHaveLength(0)
+      expect(afterIncRevoke.pendingSkills.map((s) => s.skillId)).toEqual([skill.id])
+      expect(store.get(skill.id).currentVersion).toBe(beforeRevokeVersion)
+
+      // 3. MCP_TRIGGERS mode: prepare does NOT confirm; AUTOMATIC download marks ASSUMED_ON_DOWNLOAD; revoke restores pending
+      service.setMode('MCP_TRIGGERS')
+      await service.prepareExport()
+      expect(service.getState().importedSkills).toHaveLength(0)
+      const afterAutoMcpDownload = await service.downloadExport()
+      expect(afterAutoMcpDownload.pendingSkills).toHaveLength(0)
+      expect(afterAutoMcpDownload.importedSkills).toHaveLength(1)
+      expect(afterAutoMcpDownload.importedSkills[0].origin).toBe('ASSUMED_ON_DOWNLOAD')
+      expect(existsSync(join(downloadsDir, 'academy-gemini-mcp-triggers', 'pref-skill.zip'))).toBe(true)
+
+      const afterMcpRevoke = service.revokeImportConfirmation()
+      expect(afterMcpRevoke.importedSkills).toHaveLength(0)
+      expect(afterMcpRevoke.pendingSkills).toHaveLength(1)
+      expect(store.get(skill.id).currentVersion).toBe(beforeRevokeVersion)
+    }, 30000)
+
+    it('rejects automatic and manual batch confirmation atomically when a Skill changes during download (INCREMENTAL, MCP_TRIGGERS, FULL)', async () => {
+      const preconfirmed = store.create({
+        package: makePackage('race-preconfirmed', 'Already imported earlier'),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const alpha = store.create({
+        package: makePackage('race-alpha', 'Alpha v1 content', { 'docs/a.md': '# A v1' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const beta = store.create({
+        package: makePackage('race-beta', 'Beta v1 content', { 'docs/b.md': '# B v1' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(preconfirmed.id, preconfirmed.currentVersion)
+      store.approvePublicSkill(alpha.id, alpha.currentVersion)
+      store.approvePublicSkill(beta.id, beta.currentVersion)
+
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      service.setImportConfirmationPreference('AUTOMATIC')
+      service.setMode('INCREMENTAL')
+
+      // Establish baseline ONLY for preconfirmed
+      service.establishBaseline({ skillIds: [preconfirmed.id] })
+      expect(service.getState().importedSkills.map((s) => s.skillId)).toEqual([preconfirmed.id])
+
+      // Prepare batch [alpha v1, beta v1]
+      const incReceipt = await service.prepareExport()
+      expect(incReceipt.skills.map((s) => s.name)).toEqual(['race-alpha', 'race-beta'])
+      const alphaReceiptEntry = incReceipt.skills.find((s) => s.skillId === alpha.id)!
+      const betaReceiptEntry = incReceipt.skills.find((s) => s.skillId === beta.id)!
+
+      // 1. Concurrent modification during async downloadExport (interleaving): update beta v1 -> v2 while download runs
+      const downloadPromise = service.downloadExport()
+      const betaV2 = store.update({
+        skillId: beta.id,
+        expectedVersion: beta.currentVersion,
+        package: makePackage('race-beta', 'Beta v2 updated mid-download', { 'docs/b.md': '# B v2' }),
+        origin: 'UI'
+      })
+      const stateAfterRace = await downloadPromise
+
+      // Batch must be 100% atomic: preconfirmed stays intact, neither alpha v1 nor beta v1/v2 is confirmed
+      expect(stateAfterRace.importedSkills.map((s) => s.skillId)).toEqual([preconfirmed.id])
+      expect(stateAfterRace.lastError).toMatch(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(stateAfterRace.lastError).toMatch(/atualização pendente/i)
+      expect(stateAfterRace.drifted).toBe(true)
+      expect(stateAfterRace.coverage.pendingExport).toBe(1)
+
+      const pendingBeta = stateAfterRace.pendingSkills.find((p) => p.skillId === beta.id)!
+      expect(pendingBeta.academyVersion).toBe(betaV2.currentVersion)
+      expect(pendingBeta.awaitingImport).toBe(false)
+      expect(pendingBeta.fingerprint).not.toBe(betaReceiptEntry.fingerprint)
+      expect(existsSync(join(service.incrementalDirectory, 'race-alpha.zip'))).toBe(true)
+
+      // Manual confirmImport across [alpha, beta] must ALSO remain atomic (not confirm alpha alone)
+      expect(() => service.confirmImport({ skillIds: [alpha.id, beta.id] })).toThrow(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(service.getState().importedSkills.map((s) => s.skillId)).toEqual([preconfirmed.id])
+      expect(service.getState().lastError).toMatch(/atualização pendente/i)
+
+      // Regenerate batch and test _onBeforeConfirm deterministic race (updating alpha AND disabling eligibility)
+      await service.prepareExport()
+      let eligibilityDisabledMidDownload = false
+      const stateAfterDisableRace = await service.downloadExport(undefined, {
+        _onBeforeConfirm: () => {
+          eligibilityDisabledMidDownload = true
+          store.setEnabled(alpha.id, false, store.get(alpha.id).stateRevision)
+        }
+      })
+      expect(eligibilityDisabledMidDownload).toBe(true)
+      expect(stateAfterDisableRace.importedSkills.map((s) => s.skillId)).toEqual([preconfirmed.id])
+      expect(stateAfterDisableRace.lastError).toMatch(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(stateAfterDisableRace.lastError).toMatch(/atualização pendente/i)
+      store.setEnabled(alpha.id, true, store.get(alpha.id).stateRevision)
+
+      const incReceipt2 = await service.prepareExport()
+      const betaV2ReceiptEntry = incReceipt2.skills.find((s) => s.skillId === beta.id)!
+      let alphaUpdatedBeforeConfirm = false
+      const stateAfterHookRace = await service.downloadExport(undefined, {
+        _onBeforeConfirm: () => {
+          alphaUpdatedBeforeConfirm = true
+          store.update({
+            skillId: alpha.id,
+            expectedVersion: store.get(alpha.id).currentVersion,
+            package: makePackage('race-alpha', 'Alpha v2 modified right before auto-confirm', { 'docs/a.md': '# A v2' }),
+            origin: 'UI'
+          })
+        }
+      })
+      expect(alphaUpdatedBeforeConfirm).toBe(true)
+      expect(stateAfterHookRace.importedSkills.map((s) => s.skillId)).toEqual([preconfirmed.id])
+      expect(stateAfterHookRace.lastError).toMatch(/atualização pendente/i)
+      expect(stateAfterHookRace.pendingSkills.find((p) => p.skillId === alpha.id)?.academyVersion).toBe(2)
+
+      // Regenerate cleanly and download without concurrent modification -> confirms exact receipt fingerprints/versions
+      const finalReceipt = await service.prepareExport()
+      const cleanState = await service.downloadExport()
+      expect(cleanState.lastError).toBeNull()
+      expect(cleanState.pendingSkills).toHaveLength(0)
+      expect(cleanState.importedSkills).toHaveLength(3)
+      const confirmedBeta = cleanState.importedSkills.find((s) => s.skillId === beta.id)!
+      expect(confirmedBeta.fingerprint).toBe(betaV2ReceiptEntry.fingerprint)
+      expect(confirmedBeta.academyVersion).toBe(betaV2.currentVersion)
+      const confirmedAlpha = cleanState.importedSkills.find((s) => s.skillId === alpha.id)!
+      expect(confirmedAlpha.fingerprint).toBe(finalReceipt.skills.find((s) => s.skillId === alpha.id)!.fingerprint)
+      expect(confirmedAlpha.fingerprint).not.toBe(alphaReceiptEntry.fingerprint)
+
+      // 2. Same race protection in MCP_TRIGGERS mode
+      service.setMode('MCP_TRIGGERS')
+      await service.prepareExport()
+      const mcpRaceState = await service.downloadExport(undefined, {
+        _onBeforeConfirm: () => {
+          store.update({
+            skillId: beta.id,
+            expectedVersion: store.get(beta.id).currentVersion,
+            package: makePackage('race-beta', 'Beta v3 description changed during MCP download'),
+            origin: 'UI'
+          })
+        }
+      })
+      expect(mcpRaceState.importedSkills).toHaveLength(0)
+      expect(mcpRaceState.lastError).toMatch(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(mcpRaceState.lastError).toMatch(/atualização pendente/i)
+      expect(mcpRaceState.drifted).toBe(true)
+
+      // 3. Same race protection in FULL mode
+      service.setMode('FULL')
+      const fullPrepared = await service.prepareExport()
+      const fullRaceState = await service.downloadExport(undefined, {
+        _onBeforeConfirm: () => {
+          store.update({
+            skillId: beta.id,
+            expectedVersion: store.get(beta.id).currentVersion,
+            package: makePackage('race-beta', 'Beta v4 changed during FULL download'),
+            origin: 'UI'
+          })
+        }
+      })
+      expect(fullRaceState.fullImportConfirmation).toBeNull()
+      expect(fullRaceState.baselineEstablished).toBe(false)
+      expect(fullRaceState.lastError).toMatch(/GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT/)
+      expect(fullRaceState.lastError).toMatch(/atualização pendente/i)
+      expect(fullRaceState.latestExport?.exportId).toBe(fullPrepared.exportId)
+      expect(fullRaceState.drifted).toBe(true)
+    }, 30000)
+
+    it('preserves previous Downloads folder, receipts, checkpoints, and canonical skills on rename/promotion failure', async () => {
+      const alpha = store.create({
+        package: makePackage('dl-alpha', 'Downloads alpha v1', { 'docs/a.md': '# Alpha v1' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const beta = store.create({
+        package: makePackage('dl-beta', 'Downloads beta v1', { 'docs/b.md': '# Beta v1' }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(alpha.id, alpha.currentVersion)
+      store.approvePublicSkill(beta.id, beta.currentVersion)
+
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      service.setImportConfirmationPreference('AUTOMATIC')
+
+      // 1. FULL mode initial valid download to fullTargetDir, then promotion failure on v2
+      const fullTargetDir = join(tempDir, 'full-downloads')
+      await service.prepareExport()
+      await service.downloadExport(fullTargetDir)
+      const fullDestPath = join(fullTargetDir, 'academy-gemini.zip')
+      const initialFullZipBytes = readFileSync(fullDestPath)
+      const initialFullConfirm = service.getState().fullImportConfirmation
+      expect(initialFullConfirm).not.toBeNull()
+
+      store.update({
+        skillId: alpha.id,
+        expectedVersion: alpha.currentVersion,
+        package: makePackage('dl-alpha', 'Downloads alpha v2', { 'docs/a.md': '# Alpha v2' }),
+        origin: 'UI'
+      })
+      await service.prepareExport()
+      const preparedV2ReceiptBytes = readFileSync(service.receiptPath)
+
+      await expect(
+        service.downloadExport(fullTargetDir, {
+          renameFile: async () => {
+            const err = new Error('EACCES: simulated ZIP rename failure') as NodeJS.ErrnoException
+            err.code = 'EACCES'
+            throw err
+          }
+        })
+      ).rejects.toThrow(/EACCES: simulated ZIP rename failure/)
+
+      expect(readFileSync(fullDestPath)).toEqual(initialFullZipBytes)
+      expect(readFileSync(service.receiptPath)).toEqual(preparedV2ReceiptBytes)
+      expect(readdirSync(fullTargetDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+      expect(service.getState().lastError).toContain('EACCES: simulated ZIP rename failure')
+      expect(service.getState().fullImportConfirmation).toBeNull()
+      expect(JSON.parse(readFileSync(service.statePath, 'utf8')).fullImportConfirmation).toEqual(initialFullConfirm)
+
+      // Complete v2 FULL download
+      await service.downloadExport(fullTargetDir)
+      expect(readFileSync(fullDestPath)).not.toEqual(initialFullZipBytes)
+      expect(readdirSync(fullTargetDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+
+      // 2. INCREMENTAL mode: verify Downloads folder, receipt, checkpoints, and canonical Skills rollback
+      service.setMode('INCREMENTAL')
+      await service.prepareExport()
+      const incAfterFirstDownload = await service.downloadExport()
+      expect(incAfterFirstDownload.importedSkills.map((s) => s.skillId)).toHaveLength(2)
+
+      // Deliver v3 under MANUAL so Downloads/academy-gemini-incremental contains v3 ZIP
+      service.setImportConfirmationPreference('MANUAL')
+      const alphaV3 = store.update({
+        skillId: alpha.id,
+        expectedVersion: store.get(alpha.id).currentVersion,
+        package: makePackage('dl-alpha', 'Downloads alpha v3', { 'docs/a.md': '# Alpha v3' }),
+        origin: 'UI'
+      })
+      await service.prepareExport()
+      await service.downloadExport()
+
+      const incDestDir = join(downloadsDir, 'academy-gemini-incremental')
+      const alphaV3DownloadBytes = readFileSync(join(incDestDir, 'dl-alpha.zip'))
+      const stateV3Bytes = readFileSync(service.statePath)
+
+      // Advance beta too and regenerate v4 batch ([alpha v3, beta v2])
+      store.update({
+        skillId: beta.id,
+        expectedVersion: store.get(beta.id).currentVersion,
+        package: makePackage('dl-beta', 'Downloads beta v2', { 'docs/b.md': '# Beta v2' }),
+        origin: 'UI'
+      })
+      await service.prepareExport()
+      const incReceiptPreparedV4Bytes = readFileSync(service.incrementalReceiptPath)
+
+      const canonicalBeforeFailure = snapshotCanonicalSkills(store, [alpha.id, beta.id])
+
+      // Simulate rename failure via _failStage and custom renameDirectory (EACCES)
+      service.setImportConfirmationPreference('AUTOMATIC')
+      await expect(service.downloadExport(undefined, { _failStage: 'promote' })).rejects.toThrow(
+        /SIMULATED_DOWNLOAD_PROMOTE_FAILURE/
+      )
+      await expect(
+        service.downloadExport(undefined, {
+          renameDirectory: async () => {
+            const err = new Error('EXDEV: simulated folder rename failure') as NodeJS.ErrnoException
+            err.code = 'EXDEV'
+            throw err
+          }
+        })
+      ).rejects.toThrow(/EXDEV: simulated folder rename failure/)
+
+      // Verify Downloads folder, receipt, checkpoints, and canonical Academy skills are 100% preserved
+      expect(readdirSync(incDestDir)).toEqual(['dl-alpha.zip'])
+      expect(readFileSync(join(incDestDir, 'dl-alpha.zip'))).toEqual(alphaV3DownloadBytes)
+      expect(readFileSync(service.incrementalReceiptPath)).toEqual(incReceiptPreparedV4Bytes)
+      expect(readFileSync(service.statePath)).toEqual(stateV3Bytes)
+      expect(readdirSync(downloadsDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+      expect(snapshotCanonicalSkills(store, [alpha.id, beta.id])).toEqual(canonicalBeforeFailure)
+
+      // Recovery: download without failure promotes v4 files, cleans backups, and updates checkpoints cleanly
+      const recoveredIncState = await service.downloadExport()
+      expect(recoveredIncState.lastError).toBeNull()
+      expect(readdirSync(incDestDir).sort()).toEqual(['dl-alpha.zip', 'dl-beta.zip'])
+      expect(readdirSync(downloadsDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+      expect(recoveredIncState.importedSkills).toHaveLength(2)
+      expect(recoveredIncState.importedSkills.find((s) => s.skillId === alpha.id)?.academyVersion).toBe(alphaV3.currentVersion)
+      expect(snapshotCanonicalSkills(store, [alpha.id, beta.id])).toEqual(canonicalBeforeFailure)
+
+      // 3. MCP_TRIGGERS mode: preserve Downloads/academy-gemini-mcp-triggers on rename failure and recover
+      service.setImportConfirmationPreference('MANUAL')
+      service.setMode('MCP_TRIGGERS')
+      await service.prepareExport()
+      await service.downloadExport()
+
+      const mcpDestDir = join(downloadsDir, 'academy-gemini-mcp-triggers')
+      const mcpAlphaBytes = readFileSync(join(mcpDestDir, 'dl-alpha.zip'))
+      const mcpStateBytes = readFileSync(service.statePath)
+
+      store.update({
+        skillId: alpha.id,
+        expectedVersion: store.get(alpha.id).currentVersion,
+        package: makePackage('dl-alpha', 'Downloads alpha v4 MCP description'),
+        origin: 'UI'
+      })
+      await service.prepareExport()
+      const mcpReceiptPreparedBytes = readFileSync(service.mcpTriggersReceiptPath)
+      const canonicalBeforeMcpFail = snapshotCanonicalSkills(store, [alpha.id, beta.id])
+
+      await expect(
+        service.downloadExport(undefined, {
+          renameDirectory: async () => {
+            const err = new Error('EACCES: simulated MCP triggers rename failure') as NodeJS.ErrnoException
+            err.code = 'EACCES'
+            throw err
+          }
+        })
+      ).rejects.toThrow(/EACCES: simulated MCP triggers rename failure/)
+
+      expect(readdirSync(mcpDestDir).sort()).toEqual(['dl-alpha.zip', 'dl-beta.zip'])
+      expect(readFileSync(join(mcpDestDir, 'dl-alpha.zip'))).toEqual(mcpAlphaBytes)
+      expect(readFileSync(service.mcpTriggersReceiptPath)).toEqual(mcpReceiptPreparedBytes)
+      expect(readFileSync(service.statePath)).toEqual(mcpStateBytes)
+      expect(readdirSync(downloadsDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+      expect(snapshotCanonicalSkills(store, [alpha.id, beta.id])).toEqual(canonicalBeforeMcpFail)
+
+      const recoveredMcpState = await service.downloadExport()
+      expect(recoveredMcpState.lastError).toBeNull()
+      expect(readFileSync(join(mcpDestDir, 'dl-alpha.zip'))).not.toEqual(mcpAlphaBytes)
+      expect(readdirSync(downloadsDir).filter((name) => name.includes('.stage') || name.includes('.bak'))).toEqual([])
+      expect(snapshotCanonicalSkills(store, [alpha.id, beta.id])).toEqual(canonicalBeforeMcpFail)
+    }, 30000)
   })
 })

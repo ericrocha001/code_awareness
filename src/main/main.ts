@@ -379,8 +379,24 @@ app.whenReady().then(async () => {
     { packageRevisions: academyService.packageRevisions, publicationRoot: join(app.getPath('userData'), 'academy', 'github-publication') }
   )
   academyService.initializeGitSync(academyGitSyncService)
+  let syncingImportConfirmationPreference = false
+  const configuredImportMode = settingsService.loadSettings().downloads?.importConfirmationMode ?? 'MANUAL'
+  if (academyService.getImportConfirmationPreference().mode !== configuredImportMode) {
+    academyService.setImportConfirmationPreference(configuredImportMode)
+  }
   app.on('browser-window-focus', () => { void academyGitSyncService.refreshAutomatically().catch(error => console.warn('[Academy] Remote observation pending:', error.message)) })
-  registerAcademyHandlers(academyService)
+  registerAcademyHandlers(academyService, (mode) => {
+    if (syncingImportConfirmationPreference) return
+    syncingImportConfirmationPreference = true
+    try {
+      const current = settingsService.loadSettings()
+      if (current.downloads?.importConfirmationMode !== mode) {
+        settingsService.saveSettings({ ...current, downloads: { importConfirmationMode: mode } })
+      }
+    } finally {
+      syncingImportConfirmationPreference = false
+    }
+  })
   registerContinuumHandlers(continuumSession)
   const expectedProfile = canonicalDesktopProfile(app.getPath('appData')).userData
   const normalizeProfile = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
@@ -843,8 +859,18 @@ app.whenReady().then(async () => {
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
   settingsService.onChanged(() => {
-    activeCliExecution?.setEnabled(settingsService.loadSettings().cliExecutionEnabled ?? false)
+    const latest = settingsService.loadSettings()
+    activeCliExecution?.setEnabled(latest.cliExecutionEnabled ?? false)
     activeCliExecution?.refreshPolicy()
+    const nextImportMode = latest.downloads?.importConfirmationMode ?? 'MANUAL'
+    if (!syncingImportConfirmationPreference && academyService.getImportConfirmationPreference().mode !== nextImportMode) {
+      syncingImportConfirmationPreference = true
+      try {
+        academyService.setImportConfirmationPreference(nextImportMode)
+      } finally {
+        syncingImportConfirmationPreference = false
+      }
+    }
   })
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
   registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime, target => activeProjects!.assertContextSelection(target))

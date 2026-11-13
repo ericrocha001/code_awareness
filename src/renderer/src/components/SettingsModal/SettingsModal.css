@@ -18,6 +18,7 @@
 .settings-icon { display: flex; padding: 10px; border-radius: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .settings-header h2 { margin: 0; font-size: 20px; }
 .settings-modal button { color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; cursor: pointer; font: inherit; font-size: 12px; }
+.settings-select { color: var(--text-primary); background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 12px; }
 .settings-modal button:hover { background: var(--hover-bg); }
 .settings-modal button:disabled { opacity: .5; cursor: default; }
 .settings-modal :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }

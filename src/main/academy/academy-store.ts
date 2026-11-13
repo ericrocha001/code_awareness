@@ -915,6 +915,38 @@ export class AcademyStore {
     return this.getOpenAiRelease(id)
   }
 
+  revokeOpenAiReleaseUpload(id: string): AcademyOpenAiRelease {
+    return this.db.transaction(() => {
+      const release = this.getOpenAiRelease(id)
+      if (release.status === 'READY_TO_UPLOAD' || release.status === 'STALE') return release
+      if (release.status !== 'UPLOADED_UNVERIFIED' || release.baseline) {
+        throw new AcademyError('OPENAI_RELEASE_INVALID_STATE', `${release.status} cannot revoke upload confirmation`)
+      }
+      this.db.prepare("UPDATE academy_openai_plugin_releases SET status='READY_TO_UPLOAD', upload_confirmation_json=NULL WHERE id=?").run(id)
+      const prior = this.db.prepare(`
+        SELECT * FROM academy_openai_plugin_releases
+        WHERE id<>? AND (status IN ('UPLOADED_UNVERIFIED','VERIFIED','SUPERSEDED') OR baseline=1)
+        ORDER BY created_at DESC, rowid DESC
+        LIMIT 1
+      `).get(id) as Row | undefined
+      if (prior) {
+        if (prior.status === 'SUPERSEDED') {
+          const restoredStatus: AcademyOpenAiReleaseStatus = prior.baseline
+            ? 'UPLOADED_UNVERIFIED'
+            : prior.verification_evidence
+              ? 'VERIFIED'
+              : 'UPLOADED_UNVERIFIED'
+          this.db.prepare('UPDATE academy_openai_plugin_releases SET status=? WHERE id=?').run(restoredStatus, prior.id)
+        }
+        if (this.getOpenAiPluginProfile()) {
+          this.db.prepare('UPDATE academy_openai_plugin_profile SET published_version=?, updated_at=? WHERE id=?')
+            .run(prior.plugin_version, new Date().toISOString(), 'academy-skills')
+        }
+      }
+      return this.getOpenAiRelease(id)
+    }).immediate()
+  }
+
   materializeBlockedOpenAiRelease(id: string, values: {
     manifest: Record<string, unknown>
     artifactPath: string

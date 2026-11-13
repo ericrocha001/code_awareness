@@ -20,9 +20,16 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
   const [automaticFetch, setAutomaticFetch] = useState<boolean | null>(null)
   const [gitSaving, setGitSaving] = useState(false)
   const [gitError, setGitError] = useState('')
+  const [importConfirmationMode, setImportConfirmationMode] = useState<'MANUAL' | 'AUTOMATIC' | null>(null)
+  const [downloadsSaving, setDownloadsSaving] = useState(false)
+  const [downloadsError, setDownloadsError] = useState('')
   useEffect(() => {
     let current = true
-    window.codeAwareness.loadSettings().then(settings => { if (current) setAutomaticFetch(settings.gitManagement?.automaticFetch !== false) })
+    window.codeAwareness.loadSettings().then(settings => {
+      if (!current) return
+      setAutomaticFetch(settings.gitManagement?.automaticFetch !== false)
+      setImportConfirmationMode(settings.downloads?.importConfirmationMode === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL')
+    })
       .catch(() => { if (current) setGitError('Não foi possível ler a configuração Git.') })
     return () => { current = false }
   }, [])
@@ -33,6 +40,15 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       setAutomaticFetch(enabled)
     } catch { setGitError('Não foi possível salvar a configuração Git.') }
     finally { setGitSaving(false) }
+  }
+  const changeImportConfirmationMode = async (mode: 'MANUAL' | 'AUTOMATIC') => {
+    setDownloadsSaving(true); setDownloadsError('')
+    try {
+      await updateSettings(settings => ({ ...settings, downloads: { ...settings.downloads, importConfirmationMode: mode } }))
+      await window.codeAwareness.setAcademyImportConfirmationPreference?.(mode)
+      setImportConfirmationMode(mode)
+    } catch { setDownloadsError('Não foi possível salvar a configuração de Downloads.') }
+    finally { setDownloadsSaving(false) }
   }
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
@@ -68,6 +84,27 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       <span className="settings-row-label">Fetch automático condicionado ao remoto</span>
       <ToggleSwitch aria-label="Fetch automático condicionado ao remoto" checked={automaticFetch === true} disabled={automaticFetch === null || gitSaving} onChange={value => void changeAutomaticFetch(value)} />
     </div>{gitError && <p role="alert">{gitError}</p>}</div>
+    <div className="settings-intro">
+      <h3>Downloads</h3>
+      <p>Aplicável ao Gemini e ao Plugin ChatGPT. No modo automático, a versão é marcada como presumidamente importada apenas após download bem-sucedido do pacote.</p>
+    </div>
+    <div className="settings-list">
+      <div className="settings-row">
+        <label className="settings-row-label" htmlFor="settings-import-confirmation-mode">Confirmação de importação</label>
+        <select
+          id="settings-import-confirmation-mode"
+          aria-label="Confirmação de importação"
+          className="settings-select"
+          value={importConfirmationMode ?? 'MANUAL'}
+          disabled={importConfirmationMode === null || downloadsSaving}
+          onChange={event => void changeImportConfirmationMode(event.target.value === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL')}
+        >
+          <option value="MANUAL">Manual</option>
+          <option value="AUTOMATIC">Automática</option>
+        </select>
+      </div>
+      {downloadsError && <p role="alert">{downloadsError}</p>}
+    </div>
     </div>
     <footer className="settings-footer">
       <p>Home e Configurações ficam sempre disponíveis.</p>

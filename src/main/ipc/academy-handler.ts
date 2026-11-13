@@ -1,10 +1,19 @@
 import { BrowserWindow, ipcMain, shell } from 'electron'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AcademyCreateInput, AcademyPackage, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type {
+  AcademyCreateInput,
+  AcademyGeminiExportMode,
+  AcademyImportConfirmationMode,
+  AcademyPackage,
+  AcademyUpdateInput
+} from '../../shared/types/academy-types'
 import type { AcademyService } from '../academy/academy-service'
 
-export function registerAcademyHandlers(service: AcademyService): void {
+export function registerAcademyHandlers(
+  service: AcademyService,
+  onImportConfirmationPreferenceChanged?: (mode: AcademyImportConfirmationMode) => void
+): void {
   const changed = (kind: 'catalog' | 'distribution' | 'git' | 'publication') => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed', { kind }) }
   service.onCanonicalChange?.(() => changed('catalog'))
   service.onDistributionChange?.(changed)
@@ -72,14 +81,50 @@ export function registerAcademyHandlers(service: AcademyService): void {
     return service.prepareOpenAiRelease(request)
   })
   ipcMain.handle('academy:openai-confirm-upload', (_event, releaseId: string, artifactHash: string) => service.confirmOpenAiUpload(releaseId, artifactHash))
+  ipcMain.handle('academy:openai-download', (_event, releaseId: string) => {
+    if (typeof releaseId !== 'string' || !releaseId.trim()) throw new Error('INVALID_ARGUMENT')
+    return service.downloadOpenAiRelease(releaseId)
+  })
+  ipcMain.handle('academy:openai-revoke-upload', (_event, releaseId: string) => {
+    if (typeof releaseId !== 'string' || !releaseId.trim()) throw new Error('INVALID_ARGUMENT')
+    return service.revokeOpenAiUpload(releaseId)
+  })
   ipcMain.handle('academy:openai-reveal', (_event, releaseId: string) => {
     const release = service.getOpenAiRelease(releaseId)
     if (!release.artifactPath) throw new Error('OPENAI_RELEASE_ARTIFACT_MISSING')
     shell.showItemInFolder(release.artifactPath)
     return true
   })
+  ipcMain.handle('academy:import-confirmation-preference', () => service.getImportConfirmationPreference())
+  ipcMain.handle('academy:import-confirmation-preference-set', (_event, mode: AcademyImportConfirmationMode) => {
+    if (mode !== 'MANUAL' && mode !== 'AUTOMATIC') throw new Error('INVALID_ARGUMENT')
+    const updated = service.setImportConfirmationPreference(mode)
+    onImportConfirmationPreferenceChanged?.(updated.mode)
+    return updated
+  })
   ipcMain.handle('academy:gemini-export-state', () => service.getGeminiExportState())
+  ipcMain.handle('academy:gemini-export-set-mode', (_event, mode: AcademyGeminiExportMode) => {
+    if (mode !== 'FULL' && mode !== 'INCREMENTAL' && mode !== 'MCP_TRIGGERS') throw new Error('INVALID_ARGUMENT')
+    return service.setGeminiExportMode(mode)
+  })
   ipcMain.handle('academy:gemini-export-prepare', () => service.prepareGeminiExport())
+  ipcMain.handle('academy:gemini-export-download', () => service.downloadGeminiExport())
+  ipcMain.handle('academy:gemini-export-confirm-import', (_event, input?: { skillIds?: string[]; expectedFingerprints?: Record<string, string> }) => {
+    if (input !== undefined && (typeof input !== 'object' || input === null || Array.isArray(input))) throw new Error('INVALID_ARGUMENT')
+    return service.confirmGeminiImport(input)
+  })
+  ipcMain.handle('academy:gemini-export-revoke-import', (_event, input?: { skillIds?: string[] }) => {
+    if (input !== undefined && (typeof input !== 'object' || input === null || Array.isArray(input))) throw new Error('INVALID_ARGUMENT')
+    return service.revokeGeminiImport(input)
+  })
+  ipcMain.handle('academy:gemini-export-establish-baseline', (_event, input?: { skillIds?: string[] }) => {
+    if (input !== undefined && (typeof input !== 'object' || input === null || Array.isArray(input))) throw new Error('INVALID_ARGUMENT')
+    return service.establishGeminiBaseline(input)
+  })
+  ipcMain.handle('academy:gemini-export-acknowledge-manual', (_event, skillId: string) => {
+    if (typeof skillId !== 'string' || !skillId.trim()) throw new Error('INVALID_ARGUMENT')
+    return service.acknowledgeGeminiManualAction(skillId)
+  })
   ipcMain.handle('academy:gemini-export-reveal', async () => {
     const path = await service.getGeminiExportArtifactPath()
     if (!path || !existsSync(path)) throw new Error('GEMINI_EXPORT_ARTIFACT_MISSING')

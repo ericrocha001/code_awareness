@@ -19,8 +19,13 @@ export interface ProjectPreferences {
   >
 }
 
+export interface DownloadsSettings {
+  importConfirmationMode: 'MANUAL' | 'AUTOMATIC'
+}
+
 export interface AppSettings {
   gitManagement?: { automaticFetch?: boolean }
+  downloads?: DownloadsSettings
   lastActiveRepositoryId?: string
   hiddenNavigationItems?: string[]
   ngrokDomain?: string

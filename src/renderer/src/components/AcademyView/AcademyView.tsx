@@ -17,7 +17,10 @@ import type {
   AcademySkillScope,
   AcademySkillVersion,
   AcademySnapshot,
-  AcademyGeminiExportState
+  AcademyGeminiExportMode,
+  AcademyGeminiExportState,
+  AcademyImportConfirmationMode,
+  AcademyImportConfirmationPreference
 } from '../../../../shared/types/academy-types'
 import type { AcademyManifestPreview } from '../../../../shared/types/academy-publication-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
@@ -31,6 +34,7 @@ import {
   DestinationManager,
   PluginOverviewSurface,
   PluginReviewModal,
+  GeminiModeModal,
   GeminiOverviewSurface,
   GeminiReviewModal,
   SkillCatalog,
@@ -116,9 +120,12 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([])
   const [geminiExport, setGeminiExport] = useState<AcademyGeminiExportState | null>(null)
   const [geminiPreparing, setGeminiPreparing] = useState(false)
+  const [geminiBusy, setGeminiBusy] = useState(false)
   const [geminiError, setGeminiError] = useState<string | null>(null)
   const [geminiReviewOpen, setGeminiReviewOpen] = useState(false)
+  const [geminiModeModalOpen, setGeminiModeModalOpen] = useState(false)
   const [geminiSelectedReviewIds, setGeminiSelectedReviewIds] = useState<string[]>([])
+  const [importConfirmationPreference, setImportConfirmationPreference] = useState<AcademyImportConfirmationPreference | null>(null)
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
   const [conflictReview, setConflictReview] = useState<AcademyConflictReview | null>(null)
@@ -156,13 +163,17 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
             ? 'git'
             : conflictReview || conflictBatch
               ? 'conflict'
-              : reviewOpen
-                ? 'review'
-                : settingsOpen
-                  ? 'settings'
-                  : catalogOpen
-                    ? 'catalog'
-                    : ''
+              : geminiModeModalOpen
+                ? 'gemini-mode'
+                : geminiReviewOpen
+                  ? 'gemini-review'
+                  : reviewOpen
+                    ? 'review'
+                    : settingsOpen
+                      ? 'settings'
+                      : catalogOpen
+                        ? 'catalog'
+                        : ''
 
   useAcademyFocus(modalKey, 'input, textarea, select, button', () => {
     if (confirmation) { setConfirmation(null); return }
@@ -171,6 +182,8 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     if (manifestPreview) { setManifestPreview(null); return }
     if (gitReview) { setGitReview(null); return }
     if (conflictReview || conflictBatch) { setConflictReview(null); setConflictBatch(null); return }
+    if (geminiModeModalOpen) { setGeminiModeModalOpen(false); return }
+    if (geminiReviewOpen) { setGeminiReviewOpen(false); return }
     if (reviewOpen) { setReviewOpen(false); return }
     if (settingsOpen) { setSettingsOpen(false); return }
     if (catalogOpen) setCatalogOpen(false)
@@ -249,6 +262,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     }
     if (window.codeAwareness.getAcademyGeminiExportState) {
       void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
+    }
+    if (window.codeAwareness.getAcademyImportConfirmationPreference) {
+      void readProjection('importPref', () => window.codeAwareness.getAcademyImportConfirmationPreference(), setImportConfirmationPreference)
     }
     if (loadReleases || settingsOpen) {
       void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
@@ -362,6 +378,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
         if (window.codeAwareness.getAcademyGeminiExportState) {
           void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
         }
+        if (window.codeAwareness.getAcademyImportConfirmationPreference) {
+          void readProjection('importPref', () => window.codeAwareness.getAcademyImportConfirmationPreference(), setImportConfirmationPreference)
+        }
       }
       if (!event || event.kind === 'distribution') {
         void readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution)
@@ -380,6 +399,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
         void readProjection('openAi', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication)
         if (window.codeAwareness.getAcademyGeminiExportState) {
           void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
+        }
+        if (window.codeAwareness.getAcademyImportConfirmationPreference) {
+          void readProjection('importPref', () => window.codeAwareness.getAcademyImportConfirmationPreference(), setImportConfirmationPreference)
         }
       }
     })
@@ -722,6 +744,44 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     } catch (error) { reportError(error) }
   })()
 
+  const downloadPluginRelease = (release: AcademyOpenAiRelease) => void runPluginAction(async () => {
+    const updated = await window.codeAwareness.downloadAcademyOpenAiPackage(release.id)
+    readSecondaryProjections(true)
+    if (
+      updated.status === 'UPLOADED_UNVERIFIED' &&
+      (updated.uploadConfirmation?.origin === 'ASSUMED_ON_DOWNLOAD' ||
+        updated.uploadConfirmation?.method === 'ASSUMED_ON_DOWNLOAD')
+    ) {
+      showMessage(`ZIP v${updated.pluginVersion} baixado e importação assumida automaticamente.`)
+    } else {
+      showMessage(`ZIP v${updated.pluginVersion} salvo em Downloads.`)
+    }
+  })
+
+  const revokePluginUpload = (release: AcademyOpenAiRelease) => void runPluginAction(async () => {
+    const updated = await window.codeAwareness.revokeAcademyOpenAiUpload(release.id)
+    readSecondaryProjections(true)
+    showMessage(`Confirmação de envio desfeita para v${updated.pluginVersion}.`)
+  })
+
+  const setImportConfirmationMode = (mode: AcademyImportConfirmationMode) => void (async () => {
+    setGeminiBusy(true)
+    try {
+      const updated = await window.codeAwareness.setAcademyImportConfirmationPreference(mode)
+      setImportConfirmationPreference(updated)
+      readSecondaryProjections(true)
+      showMessage(
+        mode === 'AUTOMATIC'
+          ? 'Confirmação automática após download ativada para Gemini e Plugin ChatGPT.'
+          : 'Confirmação manual ativada para Gemini e Plugin ChatGPT.'
+      )
+    } catch (error) {
+      reportError(error)
+    } finally {
+      setGeminiBusy(false)
+    }
+  })()
+
   const confirmPluginUpload = (release: AcademyOpenAiRelease) => {
     if (!release.artifactHash) return
     setConfirmation({
@@ -779,6 +839,90 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     }
   })()
 
+  const runGeminiAction = async (action: () => Promise<void>) => {
+    setGeminiBusy(true)
+    setGeminiError(null)
+    try {
+      await action()
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setGeminiError(msg)
+      reportError(err)
+    } finally {
+      setGeminiBusy(false)
+    }
+  }
+
+  const selectGeminiExportMode = (mode: AcademyGeminiExportMode) => void runGeminiAction(async () => {
+    const nextState = await window.codeAwareness.setAcademyGeminiExportMode(mode)
+    setGeminiExport(nextState)
+    setGeminiModeModalOpen(false)
+    showMessage(`Modo Gemini alterado para ${mode === 'FULL' ? 'Completo' : mode === 'INCREMENTAL' ? 'Incremental' : 'Gatilhos MCP'}.`)
+  })
+
+  const downloadGeminiExport = () => void runGeminiAction(async () => {
+    const nextState = await window.codeAwareness.downloadAcademyGeminiExport()
+    setGeminiExport(nextState)
+    if (nextState.lastError) {
+      setGeminiError(nextState.lastError)
+      return
+    }
+    showMessage(
+      nextState.importConfirmationPreference?.mode === 'AUTOMATIC'
+        ? 'Pacote Gemini baixado e importação assumida automaticamente.'
+        : 'Pacote Gemini salvo em Downloads.'
+    )
+  })
+
+  const confirmGeminiImport = (skillIds?: string[]) => void runGeminiAction(async () => {
+    const mode = geminiExport?.mode ?? 'FULL'
+    let payload: { skillIds?: string[]; expectedFingerprints?: Record<string, string> } | undefined
+    if (mode !== 'FULL') {
+      const pendingById = new Map((geminiExport?.pendingSkills ?? []).map((item) => [item.skillId, item]))
+      const preparedIds = (geminiExport?.latestExport?.skills ?? [])
+        .map((item) => item.skillId)
+        .filter((id): id is string => Boolean(id))
+      const targetIds = skillIds ?? preparedIds
+      const expectedFingerprints: Record<string, string> = {}
+      for (const id of targetIds) {
+        const pending = pendingById.get(id)
+        if (pending) expectedFingerprints[id] = pending.fingerprint
+      }
+      payload = {
+        ...(skillIds ? { skillIds } : {}),
+        ...(Object.keys(expectedFingerprints).length > 0 ? { expectedFingerprints } : {})
+      }
+    }
+    const nextState = await window.codeAwareness.confirmAcademyGeminiImport(payload)
+    setGeminiExport(nextState)
+    showMessage('Importação no Gemini confirmada.')
+  })
+
+  const revokeGeminiImport = (skillIds?: string[]) => void runGeminiAction(async () => {
+    const nextState = await window.codeAwareness.revokeAcademyGeminiImport(skillIds ? { skillIds } : undefined)
+    setGeminiExport(nextState)
+    showMessage('Confirmação de importação no Gemini desfeita.')
+  })
+
+  const establishGeminiBaseline = () => void runGeminiAction(async () => {
+    const nextState = await window.codeAwareness.establishAcademyGeminiBaseline()
+    setGeminiExport(nextState)
+    showMessage('Base inicial de importação estabelecida para este modo.')
+  })
+
+  const acknowledgeGeminiManualAction = (skillId: string) => void runGeminiAction(async () => {
+    const nextState = await window.codeAwareness.acknowledgeAcademyGeminiManualAction(skillId)
+    setGeminiExport(nextState)
+    showMessage('Remoção manual no Gemini registrada.')
+  })
+
+  const openModalExclusive = (target: 'settings' | 'review' | 'gemini-review' | 'gemini-mode') => {
+    setSettingsOpen(target === 'settings')
+    setReviewOpen(target === 'review')
+    setGeminiReviewOpen(target === 'gemini-review')
+    setGeminiModeModalOpen(target === 'gemini-mode')
+  }
+
   const approveBatchFromGeminiReview = () => {
     const excluded = geminiExport?.coverage?.excluded ?? []
     const items = excluded
@@ -820,7 +964,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           guardDraft(() => setSurface(next))
         }}
         gitHasAlert={gitHasAlert}
-        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenSettings={() => openModalExclusive('settings')}
         onOpenCatalog={() => setCatalogOpen(true)}
       />
 
@@ -836,9 +980,11 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           pluginError={pluginError}
           onPrepareRelease={preparePluginRelease}
           onRevealRelease={revealPluginRelease}
+          onDownloadRelease={downloadPluginRelease}
           onConfirmUpload={confirmPluginUpload}
-          onOpenReview={() => setReviewOpen(true)}
-          onOpenSettings={() => setSettingsOpen(true)}
+          onRevokeUpload={revokePluginUpload}
+          onOpenReview={() => openModalExclusive('review')}
+          onOpenSettings={() => openModalExclusive('settings')}
           onOpenSkills={() => setSurface('SKILLS')}
         />
       ) : surface === 'GEMINI' ? (
@@ -846,10 +992,17 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           hydration={hydration}
           geminiExport={geminiExport}
           preparing={geminiPreparing}
+          busy={geminiBusy}
           geminiError={geminiError}
           onPrepareExport={prepareGeminiExport}
           onRevealExport={revealGeminiExport}
-          onOpenReview={() => setGeminiReviewOpen(true)}
+          onDownloadExport={downloadGeminiExport}
+          onConfirmImport={confirmGeminiImport}
+          onRevokeImport={revokeGeminiImport}
+          onEstablishBaseline={establishGeminiBaseline}
+          onAcknowledgeManualAction={acknowledgeGeminiManualAction}
+          onOpenModeModal={() => openModalExclusive('gemini-mode')}
+          onOpenReview={() => openModalExclusive('gemini-review')}
           onOpenSkills={() => guardDraft(() => setSurface('SKILLS'))}
         />
       ) : (
@@ -954,12 +1107,27 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
         />
       )}
 
+      {geminiModeModalOpen && (
+        <GeminiModeModal
+          currentMode={geminiExport?.mode ?? 'FULL'}
+          busy={geminiBusy}
+          onSelectMode={selectGeminiExportMode}
+          onClose={() => setGeminiModeModalOpen(false)}
+        />
+      )}
+
       {settingsOpen && (
         <AcademySettingsDrawer
           hydration={hydration}
           openAiPublication={openAiPublication}
           openAiReleases={openAiReleases}
           preference={publicationPreference}
+          importConfirmationPreference={
+            importConfirmationPreference ??
+            geminiExport?.importConfirmationPreference ??
+            openAiPublication?.importConfirmationPreference ??
+            null
+          }
           packageDistribution={packageDistribution}
           gitStatus={gitStatus}
           eligibleRepos={eligibleRepos}
@@ -968,9 +1136,10 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           conflicts={snapshot.conflicts}
           distribution={distribution}
           knownPublication={knownPublication}
-          busy={packagePending || reviewBusy}
+          busy={packagePending || reviewBusy || geminiBusy}
           onSelectedRepoChange={setSelectedRepoId}
           onRequestToggleAutoInclude={requestToggleAutoInclude}
+          onSetImportConfirmationMode={setImportConfirmationMode}
           onBootstrapPlugin={() => void (async () => {
             try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); readSecondaryProjections(true); showMessage('Manifesto OpenAI inicializado.') }
             catch (error) { reportError(error) }
