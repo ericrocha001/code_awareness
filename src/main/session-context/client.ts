@@ -164,7 +164,14 @@ export class SessionContextClient implements SessionContextPort {
           let target
           let liveTargets
           let nativeTargets
-          if (options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+          let indexOnlyNativeDelivery = false
+          if (name === 'list_agent_sessions') {
+            try {
+              const query = parseSessionList(args)
+              indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
+            } catch { throw new Error('INVALID_ARGUMENT') }
+          }
+          if (!indexOnlyNativeDelivery && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
             request.phase = 'native-target-resolution'
             const available = (await this.resolveTarget.discover()).filter(target => existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')))
             const start = this.nativeOffset % Math.max(1, available.length)
@@ -179,9 +186,6 @@ export class SessionContextClient implements SessionContextPort {
             } else if (this.resolveTarget?.current) target = await this.resolveTarget.current()
             if (!target) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
             request.validate = target.validate
-          }
-          if (name === 'list_agent_sessions') {
-            try { parseSessionList(args) } catch { throw new Error('INVALID_ARGUMENT') }
           }
           if (isLiveSessionTool(name)) {
             const q = parseLiveSessionQuery(name, args)
