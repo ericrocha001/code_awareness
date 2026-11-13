@@ -863,6 +863,10 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const downloadGeminiExport = () => void runGeminiAction(async () => {
     const nextState = await window.codeAwareness.downloadAcademyGeminiExport()
     setGeminiExport(nextState)
+    if (nextState.lastError) {
+      setGeminiError(nextState.lastError)
+      return
+    }
     showMessage(
       nextState.importConfirmationPreference?.mode === 'AUTOMATIC'
         ? 'Pacote Gemini baixado e importação assumida automaticamente.'

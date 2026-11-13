@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
-import { cp, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, cp, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type {
   AcademyGeminiCoverage,
@@ -13,6 +13,7 @@ import type {
   AcademyGeminiPendingReason,
   AcademyGeminiPendingSkill,
   AcademyGeminiSkillCheckpoint,
+  AcademyGeminiSkillExportEntry,
   AcademyImportConfirmationMode,
   AcademyImportConfirmationOrigin,
   AcademyImportConfirmationPreference,
@@ -62,6 +63,31 @@ function defaultDistributionState(): PersistedGeminiDistributionState {
     mcpTriggerCheckpoints: {},
     fullImportConfirmation: null,
     workerExclusions: []
+  }
+}
+
+export interface AcademyGeminiDownloadOptions {
+  _failStage?: 'stage-copy' | 'promote'
+  _onBeforeConfirm?: () => void | Promise<void>
+  renameDirectory?: (source: string, destination: string) => Promise<void>
+  renameFile?: (source: string, destination: string) => Promise<void>
+}
+
+async function moveFileWithFallback(source: string, destination: string): Promise<void> {
+  try {
+    await rename(source, destination)
+  } catch {
+    await copyFile(source, destination)
+    await unlink(source).catch(() => {})
+  }
+}
+
+async function moveDirectoryWithFallback(source: string, destination: string): Promise<void> {
+  try {
+    await rename(source, destination)
+  } catch {
+    await cp(source, destination, { recursive: true })
+    await rm(source, { recursive: true, force: true }).catch(() => {})
   }
 }
 
@@ -167,11 +193,11 @@ export class AcademyGeminiExportService {
     return null
   }
 
-  private writeReceiptFileAtomic(filePath: string, receipt: AcademyGeminiExportReceipt): void {
+  private writeRawFileAtomic(filePath: string, content: Buffer | string): void {
     mkdirSync(dirname(filePath), { recursive: true })
     const tmpPath = `${filePath}.${randomUUID()}.tmp`
     try {
-      writeFileSync(tmpPath, JSON.stringify(receipt, null, 2), 'utf8')
+      writeFileSync(tmpPath, content)
       renameSync(tmpPath, filePath)
     } catch (error) {
       try {
@@ -181,6 +207,18 @@ export class AcademyGeminiExportService {
       }
       throw error
     }
+  }
+
+  private writeReceiptFileAtomic(filePath: string, receipt: AcademyGeminiExportReceipt): void {
+    this.writeRawFileAtomic(filePath, Buffer.from(JSON.stringify(receipt, null, 2), 'utf8'))
+  }
+
+  private restoreRawReceiptFile(filePath: string, content: Buffer | null): void {
+    if (!content) {
+      if (existsSync(filePath)) unlinkSync(filePath)
+      return
+    }
+    this.writeRawFileAtomic(filePath, content)
   }
 
   private loadDistributionState(): PersistedGeminiDistributionState {
@@ -773,13 +811,20 @@ export class AcademyGeminiExportService {
     this.persistDistributionState()
   }
 
-  async downloadExport(targetDirectory?: string): Promise<AcademyGeminiExportState> {
+  async downloadExport(
+    targetDirectory?: string,
+    options?: AcademyGeminiDownloadOptions
+  ): Promise<AcademyGeminiExportState> {
+    this.lastError = null
     const destinationRoot = targetDirectory ?? this.downloadsPath
     if (!destinationRoot) {
-      throw new AcademyError(
+      const error = new AcademyError(
         'GEMINI_DOWNLOAD_DIRECTORY_UNAVAILABLE',
         'Pasta Downloads não configurada para entrega do pacote Gemini.'
       )
+      this.lastError = error.message
+      this.emitChange()
+      throw error
     }
 
     const state = this.getState()
@@ -787,18 +832,54 @@ export class AcademyGeminiExportService {
     const receipt = this.receipts[mode]
 
     if (!receipt || state.drifted || !state.artifactAvailable) {
-      throw new AcademyError(
+      const error = new AcademyError(
         'GEMINI_EXPORT_NOT_READY',
         'GEMINI_EXPORT_NOT_READY: Gere ou atualize o pacote Gemini antes de baixar.'
       )
+      this.lastError = error.message
+      this.emitChange()
+      throw error
     }
 
     if (mode === 'FULL') {
-      if (!existsSync(receipt.artifactPath)) {
-        throw new AcademyError('GEMINI_EXPORT_ARTIFACT_MISSING', 'Arquivo academy-gemini.zip não encontrado no disco.')
-      }
+      return this.downloadFullExport(destinationRoot, receipt, options)
+    }
+
+    return this.downloadDifferentialExport(mode, destinationRoot, state, receipt, options)
+  }
+
+  private async downloadFullExport(
+    destinationRoot: string,
+    receipt: AcademyGeminiExportReceipt,
+    options?: AcademyGeminiDownloadOptions
+  ): Promise<AcademyGeminiExportState> {
+    if (!existsSync(receipt.artifactPath)) {
+      const error = new AcademyError(
+        'GEMINI_EXPORT_ARTIFACT_MISSING',
+        'Arquivo academy-gemini.zip não encontrado no disco.'
+      )
+      this.lastError = error.message
+      this.emitChange()
+      throw error
+    }
+
+    const deliveredSnapshotHash = receipt.snapshotHash
+    const deliveredArtifactHash = receipt.artifactHash
+    const deliveredProfileVersion = receipt.profileVersion
+    const deliveredEntries = receipt.skills.map((e) => ({ ...e }))
+    const previousReceiptSnapshot: AcademyGeminiExportReceipt = {
+      ...receipt,
+      skills: receipt.skills.map((s) => ({ ...s }))
+    }
+    const previousReceiptFileBytes = existsSync(this.receiptPath) ? readFileSync(this.receiptPath) : null
+
+    const destZipPath = join(destinationRoot, 'academy-gemini.zip')
+    const stagedDestPath = `${destZipPath}.${randomUUID()}.stage`
+    const promoteFile = options?.renameFile ?? rename
+
+    try {
       const sourceBytes = await readFile(receipt.artifactPath)
-      if (sha256(sourceBytes) !== receipt.artifactHash) {
+      if (sha256(sourceBytes) !== deliveredArtifactHash) {
         throw new AcademyError(
           'GEMINI_EXPORT_ARTIFACT_CORRUPT',
           'O pacote academy-gemini.zip preparado não corresponde ao hash do recibo.'
@@ -806,80 +887,207 @@ export class AcademyGeminiExportService {
       }
 
       await mkdir(destinationRoot, { recursive: true })
-      const destZipPath = join(destinationRoot, 'academy-gemini.zip')
-      const stagedDestPath = `${destZipPath}.${randomUUID()}.stage`
+      if (options?._failStage === 'stage-copy') {
+        throw new Error('SIMULATED_DOWNLOAD_STAGE_COPY_FAILURE')
+      }
+      await writeFile(stagedDestPath, sourceBytes)
+      const writtenHash = sha256(await readFile(stagedDestPath))
+      if (writtenHash !== deliveredArtifactHash) {
+        throw new AcademyError(
+          'GEMINI_DOWNLOAD_COPY_MISMATCH',
+          'Falha na verificação de integridade após cópia para Downloads.'
+        )
+      }
+
+      let backupZipPath: string | null = null
       try {
-        await writeFile(stagedDestPath, sourceBytes)
-        const writtenHash = sha256(await readFile(stagedDestPath))
-        if (writtenHash !== receipt.artifactHash) {
-          throw new AcademyError('GEMINI_DOWNLOAD_COPY_MISMATCH', 'Falha na verificação de integridade após cópia para Downloads.')
+        if (existsSync(destZipPath)) {
+          backupZipPath = `${destZipPath}.${randomUUID()}.bak`
+          await rename(destZipPath, backupZipPath)
         }
-        await rename(stagedDestPath, destZipPath)
-      } finally {
-        await unlink(stagedDestPath).catch(() => {})
-      }
-
-      receipt.downloadsPath = destZipPath
-      this.writeReceiptFileAtomic(this.receiptPath, receipt)
-      this.receipts.FULL = receipt
-
-      const evalAfter = evaluateGeminiCatalog(this.store, receipt, GEMINI_ADAPTATION_PROFILE_VERSION)
-      if (
-        this.getImportConfirmationPreference().mode === 'AUTOMATIC' &&
-        evalAfter.canonicalSnapshotHash === receipt.snapshotHash
-      ) {
-        this.distributionState.fullImportConfirmation = {
-          artifactHash: receipt.artifactHash,
-          confirmedAt: new Date().toISOString(),
-          origin: 'ASSUMED_ON_DOWNLOAD',
-          skillCount: receipt.skillCount
+        if (options?._failStage === 'promote') {
+          throw new Error('SIMULATED_DOWNLOAD_PROMOTE_FAILURE')
         }
-        this.persistDistributionState()
-      }
+        await promoteFile(stagedDestPath, destZipPath)
+        const promotedHash = sha256(await readFile(destZipPath))
+        if (promotedHash !== deliveredArtifactHash) {
+          throw new AcademyError(
+            'GEMINI_DOWNLOAD_COPY_MISMATCH',
+            'Falha na verificação após promoção de academy-gemini.zip em Downloads.'
+          )
+        }
 
+        const updatedReceipt: AcademyGeminiExportReceipt = {
+          ...previousReceiptSnapshot,
+          downloadsPath: destZipPath
+        }
+        this.writeReceiptFileAtomic(this.receiptPath, updatedReceipt)
+        this.receipts.FULL = updatedReceipt
+
+        if (backupZipPath) {
+          await unlink(backupZipPath).catch(() => {})
+        }
+      } catch (promotionError) {
+        if (existsSync(destZipPath)) {
+          await unlink(destZipPath).catch(() => {})
+        }
+        if (backupZipPath && existsSync(backupZipPath)) {
+          await moveFileWithFallback(backupZipPath, destZipPath).catch(() => {})
+        }
+        this.receipts.FULL = previousReceiptSnapshot
+        this.restoreRawReceiptFile(this.receiptPath, previousReceiptFileBytes)
+        throw promotionError
+      }
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error)
       this.emitChange()
-      return this.getState()
+      throw error
+    } finally {
+      await unlink(stagedDestPath).catch(() => {})
     }
 
-    // INCREMENTAL or MCP_TRIGGERS
-    const sourceDir = this.modeDirectoryPath(mode)
-    const freshState = this.getState()
-    const freshPendingById = new Map(freshState.pendingSkills.map((p) => [p.skillId, p]))
+    await options?._onBeforeConfirm?.()
 
+    if (this.getImportConfirmationPreference().mode === 'AUTOMATIC') {
+      const evalAfter = evaluateGeminiCatalog(this.store, this.receipts.FULL, GEMINI_ADAPTATION_PROFILE_VERSION)
+      const eligibleById = new Map(evalAfter.eligibleSkills.map((s) => [s.id, s]))
+      const deliveredWithIds = deliveredEntries.filter((e): e is AcademyGeminiSkillExportEntry & { skillId: string } =>
+        Boolean(e.skillId)
+      )
+      const allEntriesMatch =
+        deliveredProfileVersion === GEMINI_ADAPTATION_PROFILE_VERSION &&
+        evalAfter.canonicalSnapshotHash === deliveredSnapshotHash &&
+        eligibleById.size === deliveredWithIds.length &&
+        deliveredWithIds.every((entry) => {
+          const current = eligibleById.get(entry.skillId)
+          if (!current || current.name !== entry.name) return false
+          if (entry.academyVersion !== undefined && current.currentVersion !== entry.academyVersion) return false
+          if (
+            entry.packageHash !== undefined &&
+            (evalAfter.eligiblePackageHashes.get(entry.skillId) ?? '') !== entry.packageHash
+          ) {
+            return false
+          }
+          return true
+        })
+
+      if (allEntriesMatch) {
+        this.distributionState.fullImportConfirmation = {
+          artifactHash: deliveredArtifactHash,
+          confirmedAt: new Date().toISOString(),
+          origin: 'ASSUMED_ON_DOWNLOAD',
+          skillCount: previousReceiptSnapshot.skillCount
+        }
+        this.persistDistributionState()
+      } else {
+        this.lastError =
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: Uma ou mais Skills mudaram durante o download. Existe uma atualização pendente na Academy; a confirmação automática não foi aplicada.'
+      }
+    }
+
+    this.emitChange()
+    return this.getState()
+  }
+
+  private async downloadDifferentialExport(
+    mode: 'INCREMENTAL' | 'MCP_TRIGGERS',
+    destinationRoot: string,
+    state: AcademyGeminiExportState,
+    receipt: AcademyGeminiExportReceipt,
+    options?: AcademyGeminiDownloadOptions
+  ): Promise<AcademyGeminiExportState> {
+    const activeProfileVersion =
+      mode === 'MCP_TRIGGERS' ? GEMINI_MCP_STUB_PROFILE_VERSION : GEMINI_ADAPTATION_PROFILE_VERSION
+    if (receipt.profileVersion !== activeProfileVersion) {
+      const error = new AcademyError(
+        'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+        'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: Perfil de exportação divergiu. Existe uma atualização pendente; regere o lote.'
+      )
+      this.lastError = error.message
+      this.emitChange()
+      throw error
+    }
+
+    const sourceDir = this.modeDirectoryPath(mode)
+    const modeReceiptPath = this.modeReceiptPath(mode)
+    const freshPendingById = new Map(state.pendingSkills.map((p) => [p.skillId, p]))
     const filesToCopy: Array<{ fileName: string; sourcePath: string; expectedHash: string; skillId: string }> = []
-    for (const entry of receipt.skills) {
-      if (!entry.skillId) continue
-      const currentPending = freshPendingById.get(entry.skillId)
-      if (!currentPending || currentPending.fingerprint !== entry.fingerprint) {
-        throw new AcademyError(
+    const deliveredEntries: AcademyGeminiSkillExportEntry[] = receipt.skills.map((e) => ({ ...e }))
+    const previousReceiptSnapshot: AcademyGeminiExportReceipt = {
+      ...receipt,
+      skills: receipt.skills.map((s) => ({ ...s }))
+    }
+    const previousReceiptFileBytes = existsSync(modeReceiptPath) ? readFileSync(modeReceiptPath) : null
+
+    for (const entry of deliveredEntries) {
+      if (!entry.skillId || !entry.fingerprint) {
+        const error = new AcademyError(
           'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
-          `A Skill '${entry.name}' avançou na Academy após a geração do lote. Regere antes de baixar.`
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: Recibo de '${entry.name}' incompleto. Existe uma atualização pendente; regere antes de baixar.`
         )
+        this.lastError = error.message
+        this.emitChange()
+        throw error
+      }
+      const currentPending = freshPendingById.get(entry.skillId)
+      if (
+        !currentPending ||
+        !currentPending.awaitingImport ||
+        currentPending.fingerprint !== entry.fingerprint ||
+        currentPending.name !== entry.name ||
+        (entry.academyVersion !== undefined && currentPending.academyVersion !== entry.academyVersion) ||
+        (entry.packageHash !== undefined && currentPending.packageHash !== entry.packageHash)
+      ) {
+        const error = new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A Skill '${entry.name}' avançou na Academy após a geração do lote. Existe uma atualização pendente; regere antes de baixar.`
+        )
+        this.lastError = error.message
+        this.emitChange()
+        throw error
       }
       const fileName = entry.zipFileName ?? `${entry.name}.zip`
       const sourcePath = join(sourceDir, fileName)
       if (!existsSync(sourcePath)) {
-        throw new AcademyError('GEMINI_EXPORT_ARTIFACT_MISSING', `Arquivo '${fileName}' ausente na pasta preparada.`)
-      }
-      const sourceBytes = await readFile(sourcePath)
-      if (sha256(sourceBytes) !== entry.zipSha256) {
-        throw new AcademyError('GEMINI_EXPORT_ARTIFACT_CORRUPT', `Hash de '${fileName}' não confere com o recibo.`)
+        const error = new AcademyError(
+          'GEMINI_EXPORT_ARTIFACT_MISSING',
+          `Arquivo '${fileName}' ausente na pasta preparada.`
+        )
+        this.lastError = error.message
+        this.emitChange()
+        throw error
       }
       filesToCopy.push({ fileName, sourcePath, expectedHash: entry.zipSha256, skillId: entry.skillId })
     }
 
     if (filesToCopy.length === 0) {
-      throw new AcademyError('GEMINI_NO_PENDING_SKILLS', 'Nenhuma Skill pendente para entrega.')
+      const error = new AcademyError('GEMINI_NO_PENDING_SKILLS', 'Nenhuma Skill pendente para entrega.')
+      this.lastError = error.message
+      this.emitChange()
+      throw error
     }
 
     const subfolderName = mode === 'INCREMENTAL' ? 'academy-gemini-incremental' : 'academy-gemini-mcp-triggers'
     const destFolder = join(destinationRoot, subfolderName)
-    await mkdir(destinationRoot, { recursive: true })
     const stagedFolder = `${destFolder}.${randomUUID()}.stage`
+    const promoteDirectory = options?.renameDirectory ?? rename
 
     try {
+      await mkdir(destinationRoot, { recursive: true })
       await mkdir(stagedFolder, { recursive: true })
+
+      if (options?._failStage === 'stage-copy') {
+        throw new Error('SIMULATED_DOWNLOAD_STAGE_COPY_FAILURE')
+      }
+
       for (const item of filesToCopy) {
+        const sourceBytes = await readFile(item.sourcePath)
+        if (sha256(sourceBytes) !== item.expectedHash) {
+          throw new AcademyError(
+            'GEMINI_EXPORT_ARTIFACT_CORRUPT',
+            `Hash de '${item.fileName}' não confere com o recibo.`
+          )
+        }
         const stagedFile = join(stagedFolder, item.fileName)
         await cp(item.sourcePath, stagedFile)
         const copiedHash = sha256(await readFile(stagedFile))
@@ -891,24 +1099,78 @@ export class AcademyGeminiExportService {
         }
       }
 
-      if (existsSync(destFolder)) {
-        await rm(destFolder, { recursive: true, force: true })
+      let backupFolder: string | null = null
+      try {
+        if (existsSync(destFolder)) {
+          backupFolder = `${destFolder}.${randomUUID()}.bak`
+          await rename(destFolder, backupFolder)
+        }
+
+        if (options?._failStage === 'promote') {
+          throw new Error('SIMULATED_DOWNLOAD_PROMOTE_FAILURE')
+        }
+
+        await promoteDirectory(stagedFolder, destFolder)
+
+        for (const item of filesToCopy) {
+          const promotedFile = join(destFolder, item.fileName)
+          if (!existsSync(promotedFile)) {
+            throw new AcademyError(
+              'GEMINI_DOWNLOAD_COPY_MISMATCH',
+              `Arquivo '${item.fileName}' ausente após promoção para Downloads.`
+            )
+          }
+          const promotedHash = sha256(await readFile(promotedFile))
+          if (promotedHash !== item.expectedHash) {
+            throw new AcademyError(
+              'GEMINI_DOWNLOAD_COPY_MISMATCH',
+              `Hash de '${item.fileName}' divergiu após promoção para Downloads.`
+            )
+          }
+        }
+
+        const updatedReceipt: AcademyGeminiExportReceipt = {
+          ...previousReceiptSnapshot,
+          downloadsPath: destFolder
+        }
+        this.writeReceiptFileAtomic(modeReceiptPath, updatedReceipt)
+        this.receipts[mode] = updatedReceipt
+
+        if (backupFolder) {
+          await rm(backupFolder, { recursive: true, force: true }).catch(() => {})
+        }
+      } catch (promotionError) {
+        if (existsSync(destFolder)) {
+          await rm(destFolder, { recursive: true, force: true }).catch(() => {})
+        }
+        if (backupFolder && existsSync(backupFolder)) {
+          await moveDirectoryWithFallback(backupFolder, destFolder).catch(() => {})
+        }
+        this.receipts[mode] = previousReceiptSnapshot
+        this.restoreRawReceiptFile(modeReceiptPath, previousReceiptFileBytes)
+        throw promotionError
       }
-      await rename(stagedFolder, destFolder)
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error)
+      this.emitChange()
+      throw error
     } finally {
       await rm(stagedFolder, { recursive: true, force: true }).catch(() => {})
     }
 
-    receipt.downloadsPath = destFolder
-    this.writeReceiptFileAtomic(this.modeReceiptPath(mode), receipt)
-    this.receipts[mode] = receipt
+    await options?._onBeforeConfirm?.()
 
     if (this.getImportConfirmationPreference().mode === 'AUTOMATIC') {
-      this.applyCheckpointsForEntries(
-        mode,
-        filesToCopy.map((f) => f.skillId),
-        'ASSUMED_ON_DOWNLOAD'
-      )
+      try {
+        this.applyCheckpointsForEntries(
+          mode,
+          deliveredEntries,
+          previousReceiptSnapshot.profileVersion,
+          'ASSUMED_ON_DOWNLOAD'
+        )
+      } catch (confirmError) {
+        this.lastError = confirmError instanceof Error ? confirmError.message : String(confirmError)
+      }
     }
 
     this.emitChange()
@@ -919,147 +1181,205 @@ export class AcademyGeminiExportService {
     skillIds?: string[]
     expectedFingerprints?: Record<string, string>
   }): AcademyGeminiExportState {
-    const state = this.getState()
-    const mode = state.mode
+    this.lastError = null
+    try {
+      const state = this.getState()
+      const mode = state.mode
 
-    if (mode === 'FULL') {
-      const receipt = this.receipts.FULL
-      if (!receipt || state.drifted || !state.artifactAvailable) {
+      if (mode === 'FULL') {
+        const receipt = this.receipts.FULL
+        if (!receipt || state.drifted || !state.artifactAvailable) {
+          throw new AcademyError(
+            'GEMINI_EXPORT_NOT_READY',
+            'Gere o pacote Gemini completo atualizado antes de confirmar a importação.'
+          )
+        }
+        const diskHash = sha256(readFileSync(receipt.artifactPath))
+        if (diskHash !== receipt.artifactHash) {
+          throw new AcademyError('GEMINI_EXPORT_ARTIFACT_CORRUPT', 'O ZIP preparado diverge do recibo registrado.')
+        }
+        this.distributionState.fullImportConfirmation = {
+          artifactHash: receipt.artifactHash,
+          confirmedAt: new Date().toISOString(),
+          origin: 'MANUAL',
+          skillCount: receipt.skillCount
+        }
+        this.persistDistributionState()
+        this.emitChange()
+        return this.getState()
+      }
+
+      const modeReceipt = this.receipts[mode]
+      if (!modeReceipt || modeReceipt.skills.length === 0) {
         throw new AcademyError(
-          'GEMINI_EXPORT_NOT_READY',
-          'Gere o pacote Gemini completo atualizado antes de confirmar a importação.'
+          'GEMINI_IMPORT_NOTHING_PENDING',
+          'Nenhum pacote diferencial preparado encontrado para confirmar importação.'
         )
       }
-      const diskHash = sha256(readFileSync(receipt.artifactPath))
-      if (diskHash !== receipt.artifactHash) {
-        throw new AcademyError('GEMINI_EXPORT_ARTIFACT_CORRUPT', 'O ZIP preparado diverge do recibo registrado.')
+
+      const receiptEntryById = new Map(
+        modeReceipt.skills.filter((e) => Boolean(e.skillId)).map((e) => [e.skillId!, e])
+      )
+      const sourceDir = this.modeDirectoryPath(mode)
+
+      const requestedIds =
+        input?.skillIds && input.skillIds.length > 0
+          ? [...new Set(input.skillIds)]
+          : [...receiptEntryById.keys()]
+
+      if (requestedIds.length === 0) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_NOTHING_PENDING',
+          'Nenhuma Skill preparada selecionada para confirmar importação.'
+        )
       }
-      this.distributionState.fullImportConfirmation = {
-        artifactHash: receipt.artifactHash,
-        confirmedAt: new Date().toISOString(),
-        origin: 'MANUAL',
-        skillCount: receipt.skillCount
+
+      const targetEntries: AcademyGeminiSkillExportEntry[] = []
+      for (const skillId of requestedIds) {
+        const entry = receiptEntryById.get(skillId)
+        if (!entry) {
+          throw new AcademyError(
+            'GEMINI_IMPORT_CONFIRMATION_NOT_PREPARED',
+            `Skill '${skillId}' não faz parte do lote preparado atual.`
+          )
+        }
+
+        const zipFile = join(sourceDir, entry.zipFileName ?? `${entry.name}.zip`)
+        if (!existsSync(zipFile)) {
+          throw new AcademyError(
+            'GEMINI_EXPORT_ARTIFACT_MISSING',
+            `Arquivo '${entry.zipFileName ?? `${entry.name}.zip`}' não encontrado para confirmação.`
+          )
+        }
+        if (sha256(readFileSync(zipFile)) !== entry.zipSha256) {
+          throw new AcademyError(
+            'GEMINI_EXPORT_ARTIFACT_CORRUPT',
+            `Arquivo '${entry.zipFileName ?? `${entry.name}.zip`}' não corresponde ao hash preparado.`
+          )
+        }
+        targetEntries.push(entry)
       }
-      this.persistDistributionState()
+
+      this.applyCheckpointsForEntries(
+        mode,
+        targetEntries,
+        modeReceipt.profileVersion,
+        'MANUAL',
+        input?.expectedFingerprints
+      )
       this.emitChange()
       return this.getState()
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error)
+      this.emitChange()
+      throw error
     }
-
-    const modeReceipt = this.receipts[mode]
-    if (!modeReceipt || modeReceipt.skills.length === 0) {
-      throw new AcademyError(
-        'GEMINI_IMPORT_NOTHING_PENDING',
-        'Nenhum pacote diferencial preparado encontrado para confirmar importação.'
-      )
-    }
-
-    const activeProfileVersion =
-      mode === 'MCP_TRIGGERS' ? GEMINI_MCP_STUB_PROFILE_VERSION : GEMINI_ADAPTATION_PROFILE_VERSION
-    const evalResult = this.evaluateModeCatalog(mode)
-    const eligibleById = new Map(evalResult.eligibleSkills.map((s) => [s.id, s]))
-    const receiptEntryById = new Map(
-      modeReceipt.skills.filter((e) => Boolean(e.skillId)).map((e) => [e.skillId!, e])
-    )
-    const sourceDir = this.modeDirectoryPath(mode)
-
-    const requestedIds =
-      input?.skillIds && input.skillIds.length > 0
-        ? [...new Set(input.skillIds)]
-        : [...receiptEntryById.keys()]
-
-    if (requestedIds.length === 0) {
-      throw new AcademyError(
-        'GEMINI_IMPORT_NOTHING_PENDING',
-        'Nenhuma Skill preparada selecionada para confirmar importação.'
-      )
-    }
-
-    // Precondição CAS rigorosa para todas as Skills alvo antes de persistir qualquer checkpoint
-    for (const skillId of requestedIds) {
-      const entry = receiptEntryById.get(skillId)
-      if (!entry) {
-        throw new AcademyError(
-          'GEMINI_IMPORT_CONFIRMATION_NOT_PREPARED',
-          `Skill '${skillId}' não faz parte do lote preparado atual.`
-        )
-      }
-
-      const zipFile = join(sourceDir, entry.zipFileName ?? `${entry.name}.zip`)
-      if (!existsSync(zipFile)) {
-        throw new AcademyError(
-          'GEMINI_EXPORT_ARTIFACT_MISSING',
-          `Arquivo '${entry.zipFileName ?? `${entry.name}.zip`}' não encontrado para confirmação.`
-        )
-      }
-      if (sha256(readFileSync(zipFile)) !== entry.zipSha256) {
-        throw new AcademyError(
-          'GEMINI_EXPORT_ARTIFACT_CORRUPT',
-          `Arquivo '${entry.zipFileName ?? `${entry.name}.zip`}' não corresponde ao hash preparado.`
-        )
-      }
-
-      const currentSkill = eligibleById.get(skillId)
-      if (!currentSkill) {
-        throw new AcademyError(
-          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
-          `Skill '${entry.name}' não é mais elegível na Academy; regere o lote antes de confirmar.`
-        )
-      }
-
-      const currentFingerprint = this.computeFingerprintForSkill(mode, currentSkill, evalResult.packageHashes)
-      if (
-        modeReceipt.profileVersion !== activeProfileVersion ||
-        entry.fingerprint !== currentFingerprint ||
-        entry.name !== currentSkill.name
-      ) {
-        throw new AcademyError(
-          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
-          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A Skill '${currentSkill.name}' mudou para v${currentSkill.currentVersion} após a geração do ZIP (${entry.academyVersion ?? '?'}). Regere o lote antes de confirmar.`
-        )
-      }
-
-      if (input?.expectedFingerprints?.[skillId] && input.expectedFingerprints[skillId] !== currentFingerprint) {
-        throw new AcademyError(
-          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
-          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A versão esperada para '${currentSkill.name}' está obsoleta.`
-        )
-      }
-    }
-
-    this.applyCheckpointsForEntries(mode, requestedIds, 'MANUAL')
-    this.emitChange()
-    return this.getState()
   }
 
   private applyCheckpointsForEntries(
     mode: 'INCREMENTAL' | 'MCP_TRIGGERS',
-    skillIds: string[],
-    origin: AcademyImportConfirmationOrigin
+    entries: AcademyGeminiSkillExportEntry[],
+    receiptProfileVersion: string | undefined,
+    origin: AcademyImportConfirmationOrigin,
+    expectedFingerprints?: Record<string, string>
   ): void {
     const activeProfileVersion =
       mode === 'MCP_TRIGGERS' ? GEMINI_MCP_STUB_PROFILE_VERSION : GEMINI_ADAPTATION_PROFILE_VERSION
+    if (receiptProfileVersion !== activeProfileVersion) {
+      throw new AcademyError(
+        'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+        'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: O perfil de exportação mudou desde a geração do ZIP. Existe uma atualização pendente; regere o lote antes de confirmar.'
+      )
+    }
+
     const evalResult = this.evaluateModeCatalog(mode)
     const eligibleById = new Map(evalResult.eligibleSkills.map((s) => [s.id, s]))
-    const checkpoints = this.checkpointsForMode(mode)
     const confirmedAt = new Date().toISOString()
+    const stagedCheckpoints: Array<[string, AcademyGeminiSkillCheckpoint]> = []
 
-    const confirmedSet = new Set(skillIds)
-    for (const skillId of skillIds) {
-      const skill = eligibleById.get(skillId)
-      if (!skill) continue
-      const packageHash = evalResult.packageHashes.get(skillId) ?? ''
-      const fingerprint = this.computeFingerprintForSkill(mode, skill, evalResult.packageHashes)
-      checkpoints[skillId] = {
-        skillId,
-        skillName: skill.name,
-        academyVersion: skill.currentVersion,
-        packageHash,
-        profileVersion: activeProfileVersion,
-        fingerprint,
-        confirmedAt,
-        origin,
-        ...(mode === 'MCP_TRIGGERS' ? { description: skill.description } : {})
+    for (const entry of entries) {
+      if (!entry.skillId || !entry.fingerprint) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: O recibo de '${entry.name}' não possui fingerprint válido. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
       }
+
+      const currentSkill = eligibleById.get(entry.skillId)
+      if (!currentSkill) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A Skill '${entry.name}' não é mais elegível na Academy. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      if (currentSkill.name !== entry.name) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A Skill '${entry.name}' foi renomeada para '${currentSkill.name}'. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      if (entry.academyVersion === undefined || currentSkill.currentVersion !== entry.academyVersion) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: A Skill '${currentSkill.name}' mudou para v${currentSkill.currentVersion} após a geração do ZIP (v${entry.academyVersion ?? '?'}). Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      const currentPackageHash = evalResult.packageHashes.get(entry.skillId) ?? ''
+      if (!entry.packageHash || currentPackageHash !== entry.packageHash) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: O conteúdo/hash da Skill '${currentSkill.name}' mudou após a geração do ZIP. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      const currentFingerprint = this.computeFingerprintForSkill(mode, currentSkill, evalResult.packageHashes)
+      if (currentFingerprint !== entry.fingerprint) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: O fingerprint de '${currentSkill.name}' divergiu do recibo entregue. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      if (
+        expectedFingerprints &&
+        Object.hasOwn(expectedFingerprints, entry.skillId) &&
+        (expectedFingerprints[entry.skillId] !== entry.fingerprint ||
+          expectedFingerprints[entry.skillId] !== currentFingerprint)
+      ) {
+        throw new AcademyError(
+          'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT',
+          `GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: O fingerprint esperado para '${currentSkill.name}' está obsoleto. Existe uma atualização pendente; regere o lote antes de confirmar.`
+        )
+      }
+
+      stagedCheckpoints.push([
+        entry.skillId,
+        {
+          skillId: entry.skillId,
+          skillName: entry.name,
+          academyVersion: entry.academyVersion,
+          packageHash: entry.packageHash,
+          profileVersion: activeProfileVersion,
+          fingerprint: entry.fingerprint,
+          confirmedAt,
+          origin,
+          ...(mode === 'MCP_TRIGGERS' ? { description: currentSkill.description } : {})
+        }
+      ])
+    }
+
+    if (stagedCheckpoints.length === 0) {
+      throw new AcademyError('GEMINI_IMPORT_NOTHING_PENDING', 'Nenhuma Skill válida encontrada no lote para confirmar.')
+    }
+
+    const checkpoints = this.checkpointsForMode(mode)
+    const confirmedSet = new Set<string>()
+    for (const [skillId, checkpoint] of stagedCheckpoints) {
+      checkpoints[skillId] = checkpoint
+      confirmedSet.add(skillId)
     }
 
     this.persistDistributionState()

@@ -1040,9 +1040,17 @@ it('supports Gemini mode switching, differential pending/imported/manual-action 
   const region = await screen.findByRole('region', { name: 'Exportação Gemini' })
   expect(within(region).getByTestId('gemini-active-mode').textContent).toBe('Incremental')
 
-  // Batch download & confirm controls
+  // Batch download & confirm controls (plus stale-conflict lastError surfacing on automatic download)
+  vi.mocked(window.codeAwareness.downloadAcademyGeminiExport).mockResolvedValueOnce({
+    ...incrementalState,
+    lastError: 'GEMINI_IMPORT_CONFIRMATION_STALE_CONFLICT: Existe uma atualização pendente na Academy.'
+  })
   fireEvent.click(within(region).getAllByRole('button', { name: 'Baixar pacote' })[0])
-  await waitFor(() => expect(window.codeAwareness.downloadAcademyGeminiExport).toHaveBeenCalled())
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyGeminiExport).toHaveBeenCalledTimes(1))
+  expect((await within(region).findByRole('status')).textContent).toMatch(/atualização pendente/)
+
+  fireEvent.click(within(region).getAllByRole('button', { name: 'Baixar pacote' })[0])
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyGeminiExport).toHaveBeenCalledTimes(2))
   fireEvent.click(within(region).getAllByRole('button', { name: 'Confirmar importação' })[0])
   await waitFor(() => expect(window.codeAwareness.confirmAcademyGeminiImport).toHaveBeenCalledWith({
     expectedFingerprints: { 'skill-pending': 'fp-pending' }
