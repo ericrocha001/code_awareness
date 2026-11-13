@@ -3,18 +3,20 @@ import { existsSync } from 'node:fs'
 import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { extname, join, posix } from 'node:path'
 import type {
+  AcademyPackage,
+  AcademySkillDetail,
+  AcademySkillSummary,
   AcademyGeminiCoverage,
   AcademyGeminiExcludedSkill,
   AcademyGeminiExclusionReason,
-  AcademyGeminiExportReceipt,
-  AcademyGeminiSkillExportEntry,
-  AcademyPackage,
-  AcademySkillDetail,
-  AcademySkillSummary
+  AcademyGeminiExportReceipt
 } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import { createDeterministicZip, type ZipEntry } from '../publication/deterministic-zip'
-import type { AcademyPluginTaskResult } from '../publication/academy-plugin-executor'
+import type {
+  AcademyGeminiWorkerExcludedSkill,
+  AcademyPluginTaskResult
+} from '../publication/academy-plugin-executor'
 
 export const GEMINI_ADAPTATION_PROFILE_VERSION = 'v1-script-markdown-reference'
 export const GEMINI_MAX_SKILL_BYTES = 100 * 1024 * 1024 // 100 MB
@@ -168,6 +170,7 @@ export interface AdaptedFileMapping {
 export interface GeminiPackageAdaptationResult {
   package: AcademyPackage
   adaptedFiles: AdaptedFileMapping[]
+  totalBytes: number
   rejectionReason?: string
 }
 
@@ -175,24 +178,24 @@ export interface GeminiPackagePreflightResult {
   valid: boolean
   rejectionReason?: string
   adaptedFileCount: number
-  totalBytes: number
+  artifactCount: number
 }
 
+/**
+ * Executa pré-validação estrutural e de compatibilidade usando apenas caminhos e
+ * metadados dos artefatos, sem ler conteúdo nem estimar tamanho por heurística.
+ */
 export function preflightGeminiPackage(canonicalPackage: AcademyPackage): GeminiPackagePreflightResult {
-  let totalBytes = Buffer.byteLength(canonicalPackage.skillMd ?? '', 'utf8')
-  let adaptedFileCount = 0
-
-  const originalArtifacts = Object.entries(canonicalPackage.artifacts ?? {})
+  const artifactPaths = Object.keys(canonicalPackage.artifacts ?? {})
   const originalLowerMap = new Map<string, string>()
 
-  // 1. Validar caminhos de artefatos e verificar colisões entre arquivos originais (case-insensitive)
-  for (const [rawPath] of originalArtifacts) {
+  for (const rawPath of artifactPaths) {
     if (rawPath.includes('\\') || rawPath.startsWith('/') || rawPath.split('/').includes('..')) {
       return {
         valid: false,
         rejectionReason: `Caminho de artefato inválido '${rawPath}': caminhos não podem conter barras invertidas, iniciar com barra ou conter '..'.`,
         adaptedFileCount: 0,
-        totalBytes: 0
+        artifactCount: artifactPaths.length
       }
     }
     const normalized = posix.normalize(rawPath)
@@ -203,7 +206,7 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
         valid: false,
         rejectionReason: `Artefato não pode sobrescrever 'SKILL.md'.`,
         adaptedFileCount: 0,
-        totalBytes: 0
+        artifactCount: artifactPaths.length
       }
     }
 
@@ -212,17 +215,17 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
         valid: false,
         rejectionReason: `Colisão de caminho: '${rawPath}' colide (não sensível a maiúsculas) com '${originalLowerMap.get(normalizedLower)}'.`,
         adaptedFileCount: 0,
-        totalBytes: 0
+        artifactCount: artifactPaths.length
       }
     }
     originalLowerMap.set(normalizedLower, rawPath)
   }
 
-  // 2. Validar extensões, conteúdo e verificar colisões de destino no ZIP (case-insensitive)
+  let adaptedFileCount = 0
   const zipDestinationsLower = new Map<string, string>()
   zipDestinationsLower.set('skill.md', 'SKILL.md')
 
-  for (const [rawPath, content] of originalArtifacts) {
+  for (const rawPath of artifactPaths) {
     const normalized = posix.normalize(rawPath)
     const normalizedLower = normalized.toLowerCase()
     const ext = extname(normalized).toLowerCase()
@@ -232,16 +235,16 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
         valid: false,
         rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`,
         adaptedFileCount: 0,
-        totalBytes: 0
+        artifactCount: artifactPaths.length
       }
     }
 
-    if (GEMINI_REJECTED_BINARY_EXTENSIONS.has(ext) || content.includes('\0')) {
+    if (GEMINI_REJECTED_BINARY_EXTENSIONS.has(ext)) {
       return {
         valid: false,
         rejectionReason: `Arquivo '${rawPath}' é binário ou não conversível para referência textual no Gemini Web.`,
         adaptedFileCount: 0,
-        totalBytes: 0
+        artifactCount: artifactPaths.length
       }
     }
 
@@ -251,11 +254,10 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
           valid: false,
           rejectionReason: `Colisão de caminho: '${normalized}' já está registrado no pacote.`,
           adaptedFileCount: 0,
-          totalBytes: 0
+          artifactCount: artifactPaths.length
         }
       }
       zipDestinationsLower.set(normalizedLower, normalized)
-      totalBytes += Buffer.byteLength(content, 'utf8')
       continue
     }
 
@@ -268,7 +270,7 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
           valid: false,
           rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino já ocupado.`,
           adaptedFileCount: 0,
-          totalBytes: 0
+          artifactCount: artifactPaths.length
         }
       }
       if (originalLowerMap.has(adaptedLower)) {
@@ -276,14 +278,12 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
           valid: false,
           rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino colide com arquivo original '${originalLowerMap.get(adaptedLower)}'.`,
           adaptedFileCount: 0,
-          totalBytes: 0
+          artifactCount: artifactPaths.length
         }
       }
 
       zipDestinationsLower.set(adaptedLower, adaptedPath)
       adaptedFileCount++
-      // Estimativa leve de bytes: conteúdo + overhead de disclaimer/fences (~350B)
-      totalBytes += Buffer.byteLength(content, 'utf8') + 350
       continue
     }
 
@@ -291,27 +291,14 @@ export function preflightGeminiPackage(canonicalPackage: AcademyPackage): Gemini
       valid: false,
       rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext || '(sem extensão)'}' não suportada pelo Gemini Web.`,
       adaptedFileCount: 0,
-      totalBytes: 0
-    }
-  }
-
-  if (adaptedFileCount > 0) {
-    totalBytes += adaptedFileCount * 120 + 300
-  }
-
-  if (totalBytes > GEMINI_MAX_SKILL_BYTES) {
-    return {
-      valid: false,
-      rejectionReason: `Tamanho total da Skill (${totalBytes} bytes) excede o limite de 100MB do Gemini Web.`,
-      adaptedFileCount,
-      totalBytes
+      artifactCount: artifactPaths.length
     }
   }
 
   return {
     valid: true,
     adaptedFileCount,
-    totalBytes
+    artifactCount: artifactPaths.length
   }
 }
 
@@ -321,6 +308,7 @@ export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPack
     return {
       package: canonicalPackage,
       adaptedFiles: [],
+      totalBytes: 0,
       rejectionReason: preflight.rejectionReason
     }
   }
@@ -329,6 +317,15 @@ export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPack
   const derivedArtifacts: Record<string, string> = {}
 
   for (const [rawPath, content] of Object.entries(canonicalPackage.artifacts ?? {})) {
+    if (content.includes('\0')) {
+      return {
+        package: canonicalPackage,
+        adaptedFiles: [],
+        totalBytes: 0,
+        rejectionReason: `Arquivo '${rawPath}' é binário ou não conversível para referência textual no Gemini Web.`
+      }
+    }
+
     const normalized = posix.normalize(rawPath)
     const ext = extname(normalized).toLowerCase()
 
@@ -373,12 +370,27 @@ export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPack
     derivedSkillMd = `${derivedSkillMd.trimEnd()}\n${adaptationNotes}`
   }
 
+  let totalBytes = Buffer.byteLength(derivedSkillMd ?? '', 'utf8')
+  for (const derivedContent of Object.values(derivedArtifacts)) {
+    totalBytes += Buffer.byteLength(derivedContent, 'utf8')
+  }
+
+  if (totalBytes > GEMINI_MAX_SKILL_BYTES) {
+    return {
+      package: canonicalPackage,
+      adaptedFiles: [],
+      totalBytes,
+      rejectionReason: `Tamanho total da Skill (${totalBytes} bytes) excede o limite de 100MB do Gemini Web.`
+    }
+  }
+
   return {
     package: {
       skillMd: derivedSkillMd,
       artifacts: derivedArtifacts
     },
-    adaptedFiles
+    adaptedFiles,
+    totalBytes
   }
 }
 
@@ -407,6 +419,175 @@ export function validateGeminiSkill(detail: AcademySkillDetail): GeminiValidatio
   return { valid: true, adaptedFileCount: preflight.adaptedFileCount }
 }
 
+interface CachedGeminiSkillEvaluation {
+  version: number
+  packageHash: string
+  profileVersion: string
+  name: string
+  artifactCount: number
+  validation: GeminiValidationResult
+}
+
+const storeEvaluationCache = new WeakMap<AcademyStore, Map<string, CachedGeminiSkillEvaluation>>()
+
+function getStoreCache(store: AcademyStore): Map<string, CachedGeminiSkillEvaluation> {
+  let cache = storeEvaluationCache.get(store)
+  if (!cache) {
+    cache = new Map<string, CachedGeminiSkillEvaluation>()
+    storeEvaluationCache.set(store, cache)
+  }
+  return cache
+}
+
+function getCurrentVersionPackageHash(store: AcademyStore, skill: AcademySkillSummary): string | null {
+  if (typeof store.history !== 'function') return null
+  const versions = store.history(skill.id, { metadataOnly: true })
+  const currentMeta = versions.find((entry) => entry.version === skill.currentVersion)
+  return currentMeta?.packageHash ?? null
+}
+
+/**
+ * Registra no cache em memória uma exclusão apurada na verificação integral do
+ * worker (ex.: tamanho derivado > 100 MB ou byte nulo). A entrada é invalidada
+ * automaticamente quando version, packageHash ou profileVersion mudam.
+ */
+export function recordGeminiWorkerExclusion(
+  store: AcademyStore,
+  exclusion: AcademyGeminiWorkerExcludedSkill,
+  profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+): void {
+  const cache = getStoreCache(store)
+  cache.set(exclusion.skillId, {
+    version: exclusion.version,
+    packageHash: exclusion.packageHash,
+    profileVersion,
+    name: exclusion.name,
+    artifactCount: 0,
+    validation: {
+      valid: false,
+      details: exclusion.details
+    }
+  })
+}
+
+interface EvaluatedGeminiSkill {
+  skill: AcademySkillSummary
+  inclusion: GeminiInclusionResult
+  packageHash?: string
+  artifactCount?: number
+}
+
+function evaluateSkillWithCache(
+  store: AcademyStore,
+  skill: AcademySkillSummary,
+  profileVersion: string,
+  gitFirst: boolean
+): EvaluatedGeminiSkill {
+  if (skill.scope !== 'GLOBAL') {
+    return { skill, inclusion: { status: 'NOT_APPLICABLE' } }
+  }
+  if (!gitFirst && store.isDeleted(skill.id)) {
+    return {
+      skill,
+      inclusion: {
+        status: 'EXCLUDED',
+        reason: 'REMOVED',
+        details: 'Skill removida do catálogo.',
+        action: 'REINTRODUCE_SKILL'
+      }
+    }
+  }
+  if (skill.status !== 'ACTIVE') {
+    return {
+      skill,
+      inclusion: {
+        status: 'EXCLUDED',
+        reason: 'DISABLED',
+        details: 'Skill desativada no catálogo.',
+        action: 'ENABLE_SKILL'
+      }
+    }
+  }
+  if (!gitFirst && store.publicationEligibility(skill.id) !== 'APPROVED') {
+    return {
+      skill,
+      inclusion: {
+        status: 'EXCLUDED',
+        reason: 'PRIVATE',
+        details: 'Skill privada sem aprovação para publicação.',
+        action: 'APPROVE_PUBLICATION'
+      }
+    }
+  }
+
+  const cache = getStoreCache(store)
+  const cached = cache.get(skill.id)
+  if (cached && cached.version === skill.currentVersion && cached.profileVersion === profileVersion && cached.name === skill.name) {
+    const metadataHash = getCurrentVersionPackageHash(store, skill)
+    if (metadataHash && metadataHash === cached.packageHash) {
+      if (!cached.validation.valid) {
+        return {
+          skill,
+          packageHash: cached.packageHash,
+          artifactCount: cached.artifactCount,
+          inclusion: {
+            status: 'EXCLUDED',
+            reason: 'INCOMPATIBLE',
+            details: cached.validation.details,
+            action: 'VIEW_SKILL'
+          }
+        }
+      }
+      return {
+        skill,
+        packageHash: cached.packageHash,
+        artifactCount: cached.artifactCount,
+        inclusion: {
+          status: 'INCLUDED',
+          adaptedFileCount: cached.validation.adaptedFileCount
+        }
+      }
+    }
+  }
+
+  const detail = store.get(skill.id)
+  const validation = validateGeminiSkill(detail)
+  const artifactCount = Object.keys(detail.current.package.artifacts ?? {}).length
+
+  cache.set(skill.id, {
+    version: skill.currentVersion,
+    packageHash: detail.current.packageHash,
+    profileVersion,
+    name: skill.name,
+    artifactCount,
+    validation
+  })
+
+  if (!validation.valid) {
+    return {
+      skill,
+      packageHash: detail.current.packageHash,
+      artifactCount,
+      inclusion: {
+        status: 'EXCLUDED',
+        reason: 'INCOMPATIBLE',
+        details: validation.details,
+        action: 'VIEW_SKILL'
+      }
+    }
+  }
+
+  return {
+    skill,
+    packageHash: detail.current.packageHash,
+    artifactCount,
+    inclusion: {
+      status: 'INCLUDED',
+      adaptedFileCount: validation.adaptedFileCount
+    }
+  }
+}
+
 export interface GeminiInclusionResult {
   status: 'INCLUDED' | 'NOT_APPLICABLE' | 'EXCLUDED'
   reason?: AcademyGeminiExclusionReason
@@ -416,46 +597,7 @@ export interface GeminiInclusionResult {
 }
 
 export function geminiInclusion(store: AcademyStore, skill: AcademySkillSummary): GeminiInclusionResult {
-  if (skill.scope !== 'GLOBAL') {
-    return { status: 'NOT_APPLICABLE' }
-  }
-  if (!store.usesGitFirst() && store.isDeleted(skill.id)) {
-    return {
-      status: 'EXCLUDED',
-      reason: 'REMOVED',
-      details: 'Skill removida do catálogo.',
-      action: 'REINTRODUCE_SKILL'
-    }
-  }
-  if (skill.status !== 'ACTIVE') {
-    return {
-      status: 'EXCLUDED',
-      reason: 'DISABLED',
-      details: 'Skill desativada no catálogo.',
-      action: 'ENABLE_SKILL'
-    }
-  }
-  if (!store.usesGitFirst() && store.publicationEligibility(skill.id) !== 'APPROVED') {
-    return {
-      status: 'EXCLUDED',
-      reason: 'PRIVATE',
-      details: 'Skill privada sem aprovação para publicação.',
-      action: 'APPROVE_PUBLICATION'
-    }
-  }
-
-  const detail = store.get(skill.id)
-  const validation = validateGeminiSkill(detail)
-  if (!validation.valid) {
-    return {
-      status: 'EXCLUDED',
-      reason: 'INCOMPATIBLE',
-      details: validation.details,
-      action: 'VIEW_SKILL'
-    }
-  }
-
-  return { status: 'INCLUDED', adaptedFileCount: validation.adaptedFileCount }
+  return evaluateSkillWithCache(store, skill, GEMINI_ADAPTATION_PROFILE_VERSION, store.usesGitFirst()).inclusion
 }
 
 export interface CanonicalGeminiSnapshotEntry {
@@ -470,45 +612,41 @@ export interface CanonicalGeminiSnapshot {
   entries: CanonicalGeminiSnapshotEntry[]
 }
 
-export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGeminiSnapshot {
-  const entries: CanonicalGeminiSnapshotEntry[] = []
-  for (const skill of store.list()) {
-    const inclusion = geminiInclusion(store, skill)
-    if (inclusion.status === 'INCLUDED') {
-      const detail = store.get(skill.id)
-      entries.push({
-        skillId: skill.id,
-        name: skill.name,
-        academyVersion: skill.currentVersion,
-        packageHash: detail.current.packageHash
-      })
-    }
-  }
-  entries.sort((a, b) => a.skillId.localeCompare(b.skillId))
-  return {
-    profileVersion: GEMINI_ADAPTATION_PROFILE_VERSION,
-    entries
-  }
+export interface GeminiCatalogEvaluation {
+  coverage: AcademyGeminiCoverage
+  canonicalSnapshot: CanonicalGeminiSnapshot
+  canonicalSnapshotHash: string
+  eligibleSkills: AcademySkillSummary[]
 }
 
-export function hashGeminiSnapshot(snapshot: CanonicalGeminiSnapshot): string {
-  return sha256(canonicalJson(snapshot))
-}
-
-export function buildGeminiCoverage(
+/**
+ * Avalia o catálogo completo da Academy em passagem única, calculando
+ * cobertura, snapshot canônico e lista de skills elegíveis sem validações
+ * duplicadas no processo Main.
+ */
+export function evaluateGeminiCatalog(
   store: AcademyStore,
-  latestExport: AcademyGeminiExportReceipt | null
-): AcademyGeminiCoverage {
+  latestExport: AcademyGeminiExportReceipt | null,
+  profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+): GeminiCatalogEvaluation {
+  const gitFirst = store.usesGitFirst()
+  const skills = store.list()
+
   let catalog = 0
   let notApplicable = 0
-  const includedIds = new Set<string>()
-  const excluded: AcademyGeminiExcludedSkill[] = []
   let adaptedCount = 0
+  const includedIds = new Set<string>()
+  const includedById = new Map<string, EvaluatedGeminiSkill>()
+  const excluded: AcademyGeminiExcludedSkill[] = []
+  const snapshotEntries: CanonicalGeminiSnapshotEntry[] = []
+  const eligibleSkills: AcademySkillSummary[] = []
+  const skillsByName = new Map<string, AcademySkillSummary>()
 
-  const shippedSkills = new Map(latestExport?.skills.map((s) => [s.name, s]))
+  for (const skill of skills) {
+    skillsByName.set(skill.name, skill)
+    const evaluated = evaluateSkillWithCache(store, skill, profileVersion, gitFirst)
+    const { inclusion } = evaluated
 
-  for (const skill of store.list()) {
-    const inclusion = geminiInclusion(store, skill)
     if (inclusion.status !== 'EXCLUDED' || inclusion.reason !== 'REMOVED') {
       catalog++
     }
@@ -517,9 +655,17 @@ export function buildGeminiCoverage(
       notApplicable++
     } else if (inclusion.status === 'INCLUDED') {
       includedIds.add(skill.id)
+      includedById.set(skill.id, evaluated)
+      eligibleSkills.push(skill)
       if ((inclusion.adaptedFileCount ?? 0) > 0) {
         adaptedCount++
       }
+      snapshotEntries.push({
+        skillId: skill.id,
+        name: skill.name,
+        academyVersion: skill.currentVersion,
+        packageHash: evaluated.packageHash!
+      })
     } else if (inclusion.status === 'EXCLUDED' && inclusion.reason) {
       excluded.push({
         skillId: skill.id,
@@ -532,29 +678,38 @@ export function buildGeminiCoverage(
     }
   }
 
+  snapshotEntries.sort((a, b) => a.skillId.localeCompare(b.skillId))
+  const canonicalSnapshot: CanonicalGeminiSnapshot = {
+    profileVersion,
+    entries: snapshotEntries
+  }
+  const canonicalSnapshotHash = hashGeminiSnapshot(canonicalSnapshot)
+
+  const shippedSkills = new Map(latestExport?.skills.map((s) => [s.name, s]))
   let awaitingZip = 0
+
   if (latestExport) {
-    if (latestExport.profileVersion !== GEMINI_ADAPTATION_PROFILE_VERSION) {
+    if (latestExport.profileVersion !== profileVersion) {
       awaitingZip = includedIds.size
     } else {
-      for (const skillId of includedIds) {
-        const skill = store.get(skillId)
-        const shipped = shippedSkills.get(skill.name)
+      for (const [skillId, evaluated] of includedById.entries()) {
+        const shipped = shippedSkills.get(evaluated.skill.name)
         if (!shipped) {
           awaitingZip++
         } else if (shipped.packageHash) {
-          if (shipped.packageHash !== skill.current.packageHash) {
+          if (shipped.packageHash !== evaluated.packageHash) {
             awaitingZip++
           }
         } else {
-          const expectedCount = Object.keys(skill.current.package.artifacts ?? {}).length + 1
+          const expectedCount = (evaluated.artifactCount ?? 0) + 1
           if (shipped.entryCount !== expectedCount) {
             awaitingZip++
           }
         }
+        void skillId
       }
       for (const shippedName of shippedSkills.keys()) {
-        const current = store.list().find((s) => s.name === shippedName)
+        const current = skillsByName.get(shippedName)
         if (!current || !includedIds.has(current.id)) {
           awaitingZip++
         }
@@ -565,14 +720,34 @@ export function buildGeminiCoverage(
   }
 
   return {
-    catalog,
-    eligible: includedIds.size,
-    includedInLastZip: latestExport ? latestExport.skillCount : null,
-    awaitingZip,
-    notApplicable,
-    adaptedCount,
-    excluded
+    coverage: {
+      catalog,
+      eligible: includedIds.size,
+      includedInLastZip: latestExport ? latestExport.skillCount : null,
+      awaitingZip,
+      notApplicable,
+      adaptedCount,
+      excluded
+    },
+    canonicalSnapshot,
+    canonicalSnapshotHash,
+    eligibleSkills
   }
+}
+
+export function buildCanonicalGeminiSnapshot(store: AcademyStore): CanonicalGeminiSnapshot {
+  return evaluateGeminiCatalog(store, null, GEMINI_ADAPTATION_PROFILE_VERSION).canonicalSnapshot
+}
+
+export function hashGeminiSnapshot(snapshot: CanonicalGeminiSnapshot): string {
+  return sha256(canonicalJson(snapshot))
+}
+
+export function buildGeminiCoverage(
+  store: AcademyStore,
+  latestExport: AcademyGeminiExportReceipt | null
+): AcademyGeminiCoverage {
+  return evaluateGeminiCatalog(store, latestExport, GEMINI_ADAPTATION_PROFILE_VERSION).coverage
 }
 
 export interface GeneratedGeminiSkillZip {
@@ -581,6 +756,7 @@ export interface GeneratedGeminiSkillZip {
   zipSha256: string
   entryCount: number
   byteLength: number
+  uncompressedBytes: number
   adaptedFiles: AdaptedFileMapping[]
 }
 
@@ -605,6 +781,13 @@ export function createGeminiSkillZip(detail: { name: string; current: { package:
     })
   }
 
+  const uncompressedBytes = entries.reduce((sum, entry) => sum + entry.data.byteLength, 0)
+  if (uncompressedBytes > GEMINI_MAX_SKILL_BYTES) {
+    throw new Error(
+      `Falha ao adaptar skill '${detail.name}': Tamanho total da Skill (${uncompressedBytes} bytes) excede o limite de 100MB do Gemini Web.`
+    )
+  }
+
   entries.sort((a, b) => a.path.localeCompare(b.path))
   const zipBuffer = createDeterministicZip(entries)
 
@@ -614,6 +797,7 @@ export function createGeminiSkillZip(detail: { name: string; current: { package:
     zipSha256: sha256(zipBuffer),
     entryCount: entries.length,
     byteLength: zipBuffer.length,
+    uncompressedBytes,
     adaptedFiles: adaptation.adaptedFiles
   }
 }
@@ -651,6 +835,7 @@ export interface AcademyGeminiExportTask {
   skills: Array<{
     id: string
     name: string
+    version: number
     packageHash: string
     package: AcademyPackage
   }>
@@ -679,31 +864,59 @@ export async function executeGeminiExport(
     start = performance.now()
   }
 
+  const profileVersion = task.profileVersion ?? GEMINI_ADAPTATION_PROFILE_VERSION
   const skillZips: Array<GeneratedGeminiSkillZip & { packageHash: string }> = []
+  const excludedSkills: AcademyGeminiWorkerExcludedSkill[] = []
+  const includedEntries: CanonicalGeminiSnapshotEntry[] = []
   let convertedCount = 0
+
   for (const skill of task.skills) {
-    const generated = createGeminiSkillZip({
-      name: skill.name,
-      current: { package: skill.package }
-    })
-    if (generated.adaptedFiles.length > 0) {
-      convertedCount++
+    try {
+      const generated = createGeminiSkillZip({
+        name: skill.name,
+        current: { package: skill.package }
+      })
+      if (generated.adaptedFiles.length > 0) {
+        convertedCount++
+      }
+      skillZips.push({
+        ...generated,
+        packageHash: skill.packageHash
+      })
+      includedEntries.push({
+        skillId: skill.id,
+        name: skill.name,
+        academyVersion: skill.version,
+        packageHash: skill.packageHash
+      })
+    } catch (error) {
+      excludedSkills.push({
+        skillId: skill.id,
+        name: skill.name,
+        version: skill.version,
+        packageHash: skill.packageHash,
+        details: error instanceof Error ? error.message : String(error)
+      })
     }
-    skillZips.push({
-      ...generated,
-      packageHash: skill.packageHash
-    })
   }
   recordPhase('skillCompressionMs')
 
   const master = createGeminiMasterZip(skillZips)
   recordPhase('masterCompressionMs')
 
+  const snapshotHash =
+    excludedSkills.length > 0
+      ? hashGeminiSnapshot({
+          profileVersion,
+          entries: includedEntries.sort((a, b) => a.skillId.localeCompare(b.skillId))
+        })
+      : task.snapshotHash
+
   const receipt: AcademyGeminiExportReceipt = {
     exportId: randomUUID(),
     exportedAt: new Date().toISOString(),
-    snapshotHash: task.snapshotHash,
-    profileVersion: task.profileVersion ?? GEMINI_ADAPTATION_PROFILE_VERSION,
+    snapshotHash,
+    profileVersion,
     artifactPath: task.masterZipPath,
     artifactHash: master.masterHash,
     skillCount: skillZips.length,
@@ -806,7 +1019,8 @@ export async function executeGeminiExport(
       artifactPath: task.masterZipPath,
       artifactHash: master.masterHash,
       receipt,
-      phases
+      phases,
+      ...(excludedSkills.length > 0 ? { excludedSkills } : {})
     }
   } finally {
     // Always clean up any leftover staging files

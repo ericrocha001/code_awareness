@@ -6,11 +6,9 @@ import type {
 } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import {
-  buildCanonicalGeminiSnapshot,
-  buildGeminiCoverage,
+  evaluateGeminiCatalog,
   executeGeminiExport,
-  geminiInclusion,
-  hashGeminiSnapshot,
+  recordGeminiWorkerExclusion,
   GEMINI_ADAPTATION_PROFILE_VERSION,
   type AcademyGeminiExportTask
 } from './gemini-export-model'
@@ -77,17 +75,19 @@ export class AcademyGeminiExportService {
   }
 
   getState(): AcademyGeminiExportState {
-    const coverage = buildGeminiCoverage(this.store, this.latestReceipt)
-    const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
-    const canonicalSnapshotHash = hashGeminiSnapshot(canonicalSnapshot)
+    const evaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
     const artifactAvailable = Boolean(this.latestReceipt && existsSync(this.latestReceipt.artifactPath))
     const profileMatch = this.latestReceipt?.profileVersion === GEMINI_ADAPTATION_PROFILE_VERSION
-    const drifted = !this.latestReceipt || !profileMatch || this.latestReceipt.snapshotHash !== canonicalSnapshotHash || !artifactAvailable
+    const drifted =
+      !this.latestReceipt ||
+      !profileMatch ||
+      this.latestReceipt.snapshotHash !== evaluation.canonicalSnapshotHash ||
+      !artifactAvailable
 
     return {
       latestExport: this.latestReceipt,
-      coverage,
-      canonicalSnapshotHash,
+      coverage: evaluation.coverage,
+      canonicalSnapshotHash: evaluation.canonicalSnapshotHash,
       drifted,
       artifactAvailable,
       lastError: this.lastError
@@ -95,8 +95,8 @@ export class AcademyGeminiExportService {
   }
 
   async prepareExport(taskOverrides?: Partial<AcademyGeminiExportTask>): Promise<AcademyGeminiExportReceipt> {
-    const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
-    const snapshotHash = hashGeminiSnapshot(canonicalSnapshot)
+    const initialEvaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
+    const snapshotHash = initialEvaluation.canonicalSnapshotHash
 
     const pending = this.flights.get(snapshotHash)
     if (pending) {
@@ -108,13 +108,11 @@ export class AcademyGeminiExportService {
 
       this.lastError = null
 
-      const currentSnapshot = buildCanonicalGeminiSnapshot(this.store)
-      const currentSnapshotHash = hashGeminiSnapshot(currentSnapshot)
+      const currentEvaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
+      const currentSnapshotHash = currentEvaluation.canonicalSnapshotHash
 
-      const eligible = this.store
-        .list()
-        .filter((skill) => geminiInclusion(this.store, skill).status === 'INCLUDED')
-        .sort((a, b) => a.name.localeCompare(b.name))
+      const eligible = [...currentEvaluation.eligibleSkills].sort((a, b) => a.name.localeCompare(b.name))
+      const profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
 
       const task: AcademyGeminiExportTask = {
         kind: 'gemini-export',
@@ -123,12 +121,13 @@ export class AcademyGeminiExportService {
         receiptPath: this.receiptPath,
         downloadsPath: this.downloadsPath,
         snapshotHash: currentSnapshotHash,
-        profileVersion: GEMINI_ADAPTATION_PROFILE_VERSION,
+        profileVersion,
         skills: eligible.map((skill) => {
           const detail = this.store.get(skill.id)
           return {
             id: skill.id,
             name: skill.name,
+            version: skill.currentVersion,
             packageHash: detail.current.packageHash,
             package: detail.current.package
           }
@@ -137,15 +136,18 @@ export class AcademyGeminiExportService {
       }
 
       try {
-        let receipt: AcademyGeminiExportReceipt
-        if (this.executor && this.executor.hasWorker()) {
-          const result = await this.executor.run(task)
-          receipt = result.receipt!
-        } else {
-          const result = await executeGeminiExport(task)
-          receipt = result.receipt!
+        const result =
+          this.executor && this.executor.hasWorker()
+            ? await this.executor.run(task)
+            : await executeGeminiExport(task)
+
+        if (result.excludedSkills?.length) {
+          for (const exclusion of result.excludedSkills) {
+            recordGeminiWorkerExclusion(this.store, exclusion, task.profileVersion ?? profileVersion)
+          }
         }
 
+        const receipt = result.receipt!
         this.latestReceipt = receipt
         this.emitChange()
         return receipt

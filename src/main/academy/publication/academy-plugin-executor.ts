@@ -6,6 +6,14 @@ import type { AcademyBuildProjection } from '../../../shared/types/academy-publi
 import { AcademyError } from '../academy-package'
 import type { AcademyGeminiExportReceipt } from '../../../shared/types/academy-types'
 
+export interface AcademyGeminiWorkerExcludedSkill {
+  skillId: string
+  name: string
+  version: number
+  packageHash: string
+  details: string
+}
+
 export interface AcademyPluginTaskResult {
   projection?: AcademyBuildProjection
   artifactPath?: string
@@ -13,6 +21,7 @@ export interface AcademyPluginTaskResult {
   reused?: boolean
   phases: Record<string, number>
   receipt?: AcademyGeminiExportReceipt
+  excludedSkills?: AcademyGeminiWorkerExcludedSkill[]
 }
 
 export class AcademyPluginExecutor {
