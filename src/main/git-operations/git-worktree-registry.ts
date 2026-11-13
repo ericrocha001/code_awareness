@@ -54,6 +54,21 @@ export class GitWorktreeRegistry {
     return { repositoryId: this.identity.repositoryId, worktrees }
   }
 
+  async resolveCheckout(root: string): Promise<WorktreeRecord> {
+    const common = await this.commonDirectory()
+    const records = (await this.git.listWorktreeRecords(this.root, true)).split('\0\0')
+    const group = records.find(record => {
+      const path = record.split('\0').find(field => field.startsWith('worktree '))?.slice(9)
+      return path !== undefined && resolve(path) === root
+    })
+    if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+    if (!group) fail('WORKTREE_UNLINKED')
+    const record = await this.readRecord(group, common)
+    if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+    if (record.missing || record.prunable || this.observed.get(record.worktreeId)?.physical !== root) fail('WORKTREE_STALE')
+    return record
+  }
+
   async current(selected?: { head: string | null; branch: string | null }): Promise<WorktreeRecord> {
     const common = await this.commonDirectory()
     const [path, head, branch] = await Promise.all([
