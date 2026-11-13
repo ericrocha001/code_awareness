@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { deliveryContextRequest, type DeliveryContextRequest, type DeliveryAnchor, type ObserveDelivery } from '../../shared/types/delivery-context-types'
 import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-suggestion-types'
@@ -221,6 +222,24 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const artifact = this.store.get(receipt.artifactId)!
     if (artifact.revision !== receipt.revision) throw new Error('STALE_PUBLICATION_RECEIPT')
     return { ...this.receipt(artifact), publicationReceipt: receipt, replayed: true }
+  }
+  async prepareDeliveryContext(authority: AgentAuthority | undefined, request: DeliveryContextRequest, observe: ObserveDelivery): Promise<DeliveryAnchor> {
+    deliveryContextRequest.parse(request)
+    const check = () => {
+      this.assertActive(); assertArtifactAgent(authority, this.repositoryId)
+      const binding = this.get(request.bindingArtifactId), plan = this.get(request.planArtifactId)
+      if (!binding || binding.provenance.executionBranchBinding !== true || binding.metadata.bindingRole !== 'EXECUTION_BRANCH' || binding.metadata.repositoryId !== this.repositoryId ||
+        binding.metadata.sourceArtifactId !== request.planArtifactId || binding.metadata.executionId !== request.executionId || !plan || plan.metadata.kind !== 'EXECUTABLE_PLAN' || plan.metadata.executionId !== request.executionId) throw new Error('DELIVERY_CONTEXT_INVALID')
+      if (binding.revision !== request.bindingRevision || plan.revision !== request.planRevision) throw new Error('DELIVERY_CONTEXT_STALE')
+      return { binding, plan }
+    }
+    const initial = check(), before = await observe(), after = await observe(), current = check()
+    const metadata = current.binding.metadata
+    if (JSON.stringify(before) !== JSON.stringify(after) || before.repositoryId !== this.repositoryId || authority?.worktreeId && authority.worktreeId !== before.worktreeId ||
+      metadata.worktreeId !== before.worktreeId || metadata.worktreeGeneration !== before.worktreeGeneration || metadata.branchRef !== before.branchRef || metadata.branchGeneration !== before.branchGeneration ||
+      initial.binding.contentHash !== current.binding.contentHash || initial.plan.contentHash !== current.plan.contentHash) throw new Error('DELIVERY_CONTEXT_STALE')
+    return { ...request, schemaVersion: 1, repositoryId: this.repositoryId, planDigest: current.plan.contentHash, bindingDigest: current.binding.contentHash,
+      snapshot: before, classification: 'AUTHENTICATED_EXECUTION_CONTEXT' }
   }
   async bindExecutionBranch(executionId: string, sourceArtifactId: string, observe: () => Promise<ExecutionBranchSnapshot>) {
     this.assertActive()

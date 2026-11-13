@@ -1,3 +1,4 @@
+import { deliveryAnchor, type DeliveryAnchor, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
 import { readWorktreeProvenance } from './git-worktree-provenance'
 import { GitAtlasReader } from './git-atlas'
 import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
@@ -164,11 +165,31 @@ export class GitOperationsService {
     if (!this.worktrees || !this.coordinationIdentity) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
   }
+  async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
+    const page = await this.git.operationReceiptPage(this.repoRoot, after)
+    const observations: DeliveryProjectionPage['observations'] = []
+    for (const { receipt, sha } of page.receipts) {
+      const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
+      if (receipt.deliveryVerified !== true || !parsed.success || receipt.status !== 'COMPLETED' || receipt.operation !== 'commit_git_changes' || !receipt.result || receipt.result.isError) continue
+      if (parsed.data.repositoryId !== this.coordinationIdentity?.repositoryId) continue
+      const result = JSON.parse(receipt.result.content[0].text)
+      if (typeof result.sha !== 'string' || !/^[a-f0-9]{40}$/.test(result.sha) || result.parent !== parsed.data.snapshot.head) continue
+      observations.push({ receiptId: sha, operationId: receipt.operationId, operation: 'commit_git_changes', argumentFingerprint: receipt.argumentFingerprint, anchor: parsed.data, commitSha: result.sha })
+    }
+    return { observations, nextCursor: page.nextCursor }
+  }
+  async deliverySnapshot(worktreeId?: string) {
+    if (!this.worktrees) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    const inventory = await this.worktrees.discover()
+    const record = inventory.worktrees.find(tree => worktreeId ? tree.worktreeId === worktreeId : (process.platform === 'win32' ? resolve(tree.path).toLowerCase() === resolve(this.repoRoot).toLowerCase() : resolve(tree.path) === resolve(this.repoRoot)))
+    if (!record) fail('WORKTREE_STALE')
+    return this.branchReader().executionSnapshot(record.worktreeId, record.generation, true)
+  }
   getBranchInventory() { return this.branchReader().inventory() }
   getBranchCommits(query: BranchHistoryQuery) { return this.branchReader().history(query) }
-  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
+  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
-    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
+    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate, prepareDelivery)
     const changesTopology = ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'revert_git_commit', 'integrate_worktree', 'manage_worktree'].includes(name)
       || name === 'sync_git_remote' && args.action !== 'PUSH'
       || name === 'mutate_worktree' && ['COMMIT', 'CREATE_BRANCH'].includes(String(args.action))

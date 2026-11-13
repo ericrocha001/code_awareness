@@ -47,8 +47,8 @@ export class CheckpointRegistry {
   reconciliationBacklog() {
     const sources = this.coverageSources()
     const github = this.source('GITHUB')?.status
-    const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
-    const local = sources.some(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
+    const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
+    const local = sources.some(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
     let discovery: { phase?: string; reasonCode?: string; lastAttemptAt?: string; lastAdvanceAt?: string; page?: number } = {}
     try { discovery = JSON.parse(this.source('GITHUB_DISCOVERY')?.cursor ?? '{}') } catch {}
     const discoveryPending = discovery.phase === 'FULL' || discovery.phase === 'PREFIX'
@@ -140,10 +140,10 @@ export class CheckpointRegistry {
     return this.db.prepare('SELECT * FROM registry_sources ORDER BY observedAt DESC,source LIMIT 20').all() as ReturnType<CheckpointRegistry['sources']>
   }
   coverageSources(): ReturnType<CheckpointRegistry['sources']> {
-    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','GITHUB_DISCOVERY','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
+    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','GITHUB_DISCOVERY','DELIVERY_GIT','DELIVERY_PR','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
   }
   source(source: string): ReturnType<CheckpointRegistry['sources']>[number] | undefined { return this.db.prepare('SELECT * FROM registry_sources WHERE source=?').get(source) as ReturnType<CheckpointRegistry['source']> }
-  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare("SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY CASE WHEN source IN ('CONTINUUM','LEDGER','GITHUB_DISCOVERY','GITHUB_REFRESH','ENTIRE_REFS') THEN 0 ELSE 1 END,observedAt DESC LIMIT 100").all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
+  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare("SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY CASE WHEN source IN ('CONTINUUM','LEDGER','DELIVERY_GIT','DELIVERY_PR','GITHUB_DISCOVERY','GITHUB_REFRESH','ENTIRE_REFS') THEN 0 ELSE 1 END,observedAt DESC LIMIT 100").all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
   applyAll(batches: RegistryBatch[], assertCurrent: () => void): void {
     this.db.transaction(() => {
       const discovery = batches.find(batch => batch.source === 'GITHUB_DISCOVERY')
@@ -299,18 +299,18 @@ export class CheckpointRegistry {
           const selectedVersion = selector.kind === 'ARTIFACT' ? /^(.*):([1-9][0-9]*)$/.exec(selector.id) : null
           if (selectedVersion && value.relation === 'revision' && value.from.kind === 'ARTIFACT' && value.from.id === selectedVersion[1] && value.to.id !== selector.id) continue
           if (depthLimit > 1 && value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by', 'revision', 'references', 'depends-on', 'validates', 'derived-from', 'builds-on'].includes(value.relation)) continue
-          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'CONTINUUM_REFERENCE', 'CONTINUUM_REVISION', 'EXECUTION_MEMBERSHIP', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
+          if (!['CONTINUUM_REVISIONED_RELATION', 'GITHUB_PR_MERGE', 'OPERATION_EXECUTION_CONTEXT', 'BRANCH_CONTEXT_ONLY', 'CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'CONTINUUM_REFERENCE', 'CONTINUUM_REVISION', 'EXECUTION_MEMBERSHIP', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
           const from = add(value.from), to = add(value.to)
           const invalidAuthority = value.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && !nativeAuthority(row.source, value.evidenceRef)
           const projectionStale = continuumUnavailable && row.source.startsWith('CONTINUUM')
-          const state = row.state === 'CONFLICT' || invalidAuthority ? 'UNKNOWN' : projectionStale || row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : ['HANDOFF_DECLARED', 'CONTINUUM_TYPED_RELATION'].includes(value.evidenceKind) ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
+          const state = row.state === 'CONFLICT' || invalidAuthority ? 'UNKNOWN' : projectionStale || row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : ['HANDOFF_DECLARED', 'CONTINUUM_TYPED_RELATION', 'CONTINUUM_REVISIONED_RELATION'].includes(value.evidenceKind) ? 'DECLARED' : ['OPERATION_EXECUTION_CONTEXT','BRANCH_CONTEXT_ONLY','NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
           const source = this.source(row.source)
           edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: invalidAuthority || projectionStale ? 'SOURCE_STALE' : value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, revision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest,
             confidenceClass: provenanceClass(value.evidenceKind, state), coverage: state === 'UNKNOWN' || state === 'STALE' || source?.status === 'PARTIAL' ? 'PARTIAL' : 'OBSERVED_INDEX', revisionScope: value.evidenceKind === 'LEDGER_EVIDENCE_FOR' ? 'ARTIFACT_IDENTITY_ONLY' : 'EXACT_SOURCE' })
           const next = from === key ? value.to : value.from, target = this.key(next)
           if (!visited.has(target)) {
             visited.add(target); const path = [...item.path, row.id]; paths.push({ target, edges: path })
-            if (row.state === 'OBSERVED' && !invalidAuthority) pending.push({ entity: next, path })
+            if (row.state === 'OBSERVED' && !invalidAuthority && value.freshness !== 'SOURCE_STALE') pending.push({ entity: next, path })
           }
         }
       }

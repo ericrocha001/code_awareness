@@ -620,7 +620,7 @@ app.whenReady().then(async () => {
         return authorizeHandoffAssociation(continuumSession.getActiveService(), validationLedger, request)
       }, registrySources({ repositoryId: gitRepositoryId, root: project.path,
         continuum: () => continuumSession.getActiveSession()?.repositoryId === gitRepositoryId ? continuumSession.getActiveService() : null,
-        ledger: validationLedger, github: githubIntegration,
+        ledger: validationLedger, github: githubIntegration, gitDeliveries: cursor => gitOperations.deliveryProjectionPage(cursor),
         networkAllowed: () => settingsService.loadSettings().gitManagement?.automaticFetch !== false,
         assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }), {
         readReceipt: async receiptId => {

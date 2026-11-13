@@ -97,7 +97,7 @@ it('F2 leaves unauthorized PR work pending while converging local sources withou
   expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)).toBeDefined()
   expect(f.store().registry.contextGraph({ kind: 'PR', id: '101' }).edges.some(edge => edge.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
   let allowed = true
-  source.github.getPullRequest.mockImplementation(async () => { allowed = false; return { pullRequest: { head: { sha: 'd'.repeat(40) } } } })
+  source.github.getPullRequest.mockImplementation(async (_root, number) => { allowed = false; return { repositoryId: 'repo', repository: 'owner/repo', pullRequest: { number, head: { sha: 'd'.repeat(40), repository: 'owner/repo' }, base: { repository: 'owner/repo' } } } })
   const revoked = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger,
     github: source.github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
   const batches = await revoked({ selector: { kind: 'PR', id: '101' }, cursors: f.store().registry.cursors() })
@@ -113,7 +113,7 @@ it('F2 drains more than one quota of Artifacts, PRs, commits and proofs across e
     startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: [artifacts[0].artifactId], deduplicationKey: String(index) }))
   const commits = Array.from({ length: 12 }, (_, index) => (index + 1).toString(16).padStart(40, '0'))
   let remoteChanged = false
-  const github = { commitPullRequests: vi.fn(async () => []), getPullRequest: vi.fn(async (_root: string, number: number) => ({ pullRequest: { head: { sha: (remoteChanged && number === 100 ? 'e' : 'd').repeat(40) } } })),
+  const github = { deliveryRepository: async () => 'owner/repo', commitPullRequests: vi.fn(async () => []), getPullRequest: vi.fn(async (_root: string, number: number) => ({ repositoryId: 'repo', repository: 'owner/repo', pullRequest: { number, head: { repository: 'owner/repo', sha: (remoteChanged && number === 100 ? 'e' : 'd').repeat(40) }, base: { repository: 'owner/repo' } } })),
     pullRequestCommits: vi.fn(async (_root: string, number: number) => ({ repositoryId: 'repo', commits: [...commits.slice((number - 100) * 3, (number - 99) * 3), ...(remoteChanged && number === 100 ? ['f'.repeat(40)] : [])].map(sha => ({ sha })), nextPage: null })) }
   const readSource = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger, github: github as any, networkAllowed: () => true, assertCurrent: () => {} })
   let rounds = 0
@@ -285,7 +285,7 @@ function sources(f: ReturnType<typeof fixture>, allowed = true) {
     plan: { artifactId: 'plan', revision: 1, contentHash: digest('plan'), metadata: { kind: 'EXECUTABLE_PLAN' }, updatedAt: now }
   }
   const continuum = { assertRepository: () => {}, get: (id: string) => artifacts[id] ?? null, provenanceSnapshot: (id: string, revision?: number) => artifacts[id] && (revision === undefined || artifacts[id].revision === revision) ? artifacts[id] : null, list: () => ({ artifacts: Object.values(artifacts) }) }
-  const github = { commitPullRequests: vi.fn(async () => [90]), getPullRequest: vi.fn(async () => ({ pullRequest: { head: { sha: 'd'.repeat(40) } } })), pullRequestCommits: vi.fn(async () => ({ repositoryId: 'repo', commits: [{ sha: commit }], nextPage: null })) }
+  const github = { deliveryRepository: async () => 'owner/repo', commitPullRequests: vi.fn(async () => [90]), getPullRequest: vi.fn(async (_root: string, number: number) => ({ repositoryId: 'repo', repository: 'owner/repo', pullRequest: { number, head: { sha: 'd'.repeat(40), repository: 'owner/repo' }, base: { repository: 'owner/repo' } } })), pullRequestCommits: vi.fn(async () => ({ repositoryId: 'repo', commits: [{ sha: commit }], nextPage: null })) }
   const read = registrySources({ repositoryId: 'repo', root: '/fixture', continuum: () => continuum as any, ledger, github: github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
   return { ledger, read, github, artifacts }
 }

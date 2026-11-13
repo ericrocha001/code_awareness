@@ -1,3 +1,4 @@
+import type { DeliveryContextRequest } from './delivery-context-types'
 export interface PullRequestSummary {
   number: number
   url: string
@@ -23,6 +24,7 @@ export interface PullRequestQuery {
 }
 
 export interface CreatePullRequestInput {
+  deliveryContext?: DeliveryContextRequest
   headBranch: string
   baseBranch: string
   expectedHeadSha: string
@@ -44,7 +46,7 @@ export interface PullRequestContext {
   repository: string
 }
 
-export type PullRequestFailureCode = 'INVALID_ARGUMENT' | 'HEAD_DRIFT' | 'WORKTREE_DRIFT' |
+export type PullRequestFailureCode = 'DELIVERY_CONTEXT_INVALID' | 'DELIVERY_CONTEXT_STALE' | 'INVALID_ARGUMENT' | 'HEAD_DRIFT' | 'WORKTREE_DRIFT' |
   'IDEMPOTENCY_CONFLICT' | 'AUTHORIZATION_REQUIRED' | 'AUTHORIZATION_DENIED' |
   'AUTHORIZATION_EXPIRED' | 'PR_IDENTITY_CONFLICT' | 'CLOSED_PR_REQUIRES_DECISION' |
   'OUTCOME_UNKNOWN' | 'RECONCILIATION_LIMIT' | 'RECEIPT_UNAVAILABLE' | 'PROJECT_CHANGED' |

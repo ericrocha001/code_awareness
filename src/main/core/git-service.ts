@@ -355,6 +355,14 @@ export class GitService implements FileListingPort {
     return { receipt, sha }
   }
 
+  async operationReceiptPage(root: string, after = '', limit = 20) {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20 || after && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(after)) throw new Error('INVALID_ARGUMENT')
+    const prefix = 'refs/code-awareness/operation-receipts/'
+    const ids = (await this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)', prefix], root)).trim().split('\n').filter(ref => ref.startsWith(prefix)).map(ref => ref.slice(prefix.length)).filter(id => id > after)
+    const receipts = []
+    for (const id of ids.slice(0, limit)) { const value = await this.readOperationReceipt(root, id); if (value) receipts.push(value) }
+    return { receipts, ...(ids.length > limit ? { nextCursor: ids[limit - 1] } : {}) }
+  }
   async prepareOperationReceipt(root: string, receipt: GitOperationReceipt): Promise<{ created: boolean; receipt: GitOperationReceipt; sha: string }> {
     const gitDir = await this.getCommonDirectory(root)
     const lockPath = join(gitDir, 'code-awareness-operation-receipts.lock')

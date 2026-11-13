@@ -1,6 +1,7 @@
+import type { DeliveryContextRequest } from '../../shared/types/delivery-context-types'
 import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, supportsContinuumAgent } from '../continuum/continuum-agent'
 import { executeAgentUpdateArtifact } from '../continuum/continuum-mcp'
-import { assertArtifactAgent } from '../continuum/agent-authority'
+import { assertArtifactAgent, type AgentAuthority } from '../continuum/agent-authority'
 import { ASSESS_EXECUTION_CLOSURE_TOOL, executeAssessExecutionClosure, type ClosureContext } from './execution-closure'
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
@@ -350,6 +351,10 @@ export class ChannelMcpAdapter {
     return undefined
   }
 
+  private async prepareDelivery(authority: AgentAuthority | undefined, request: DeliveryContextRequest, worktreeId?: string) {
+    if (!this.continuum?.prepareDeliveryContext || !this.gitOperations) throw new Error('DELIVERY_CONTEXT_INVALID')
+    return this.continuum.prepareDeliveryContext(authority, request, () => this.gitOperations!.deliverySnapshot(worktreeId))
+  }
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
     if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) {
@@ -378,6 +383,7 @@ export class ChannelMcpAdapter {
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return this.runtimePreview ? executeRuntimePreviewTool(this.runtimePreview.service, name, args, () => { if (!this.runtimePreview?.isCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : { content: [{ type: 'text', text: JSON.stringify({ success: false, code: 'PREVIEW_UNAVAILABLE' }) }], isError: true }
     if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
       return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
+        prepareDelivery: (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId ?? authority?.worktreeId),
         isActive: this.githubContext.githubPrIsActive ?? (() => false),
         inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined
       })
@@ -395,7 +401,7 @@ export class ChannelMcpAdapter {
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }
     }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
-      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args)
+      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args, request => this.prepareDelivery(authority, request))
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }
     if (name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name && this.githubContext?.githubIntegration) {

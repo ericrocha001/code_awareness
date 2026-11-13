@@ -3,6 +3,8 @@ import { GitOperationsError, type GitOperationsService, type BranchRequest, type
 import { isReceiptedGitMutation } from './git-operation-receipts'
 import { gitGuidance, operationalFailure } from '../mcp/operational-guidance'
 
+import { DELIVERY_CONTEXT_SCHEMA, deliveryContextRequest, type PrepareDelivery } from '../../shared/types/delivery-context-types'
+
 const string = { type: 'string', minLength: 1 }
 const expectedHead = { type: ['string', 'null'], pattern: '^[a-f0-9]{40,64}$' }
 const revision = { type: 'string', pattern: '^[a-f0-9]{64}$' }
@@ -38,7 +40,7 @@ export const GIT_OPERATIONS_TOOLS = [
   tool('analyze_git_hygiene', 'Summarize dirty worktree signal by grouped untracked output, tracked dirt and suggested ignore rules without dumping every path.', {}),
   tool('manage_gitignore', 'Preview or append explicit .gitignore rules. PREVIEW_ADD is read-only and returns the exact effect plus previewId; ADD requires that previewId and expectedWorktreeRevision. Never deletes files or changes tracking.', { action: choice('PREVIEW_ADD', 'ADD'), rules: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, minItems: 1, maxItems: 100, uniqueItems: true }, expectedWorktreeRevision: revision, expectedPreviewId: revision }, ['action', 'rules']),
   tool('stage_git_changes', 'Transactionally stage or unstage explicit literal paths against the observed index and worktree revisions. Failure before publication preserves the index; unstage preserves worktree contents.', { mode: choice('STAGE', 'UNSTAGE'), paths: paths(500), expectedIndexRevision: revision, expectedWorktreeRevision: revision }, ['mode', 'paths', 'expectedIndexRevision', 'expectedWorktreeRevision']),
-  tool('commit_git_changes', 'Commit exactly the inspected staged index. Requires expectedHead and expectedIndexRevision; never stages implicitly.', { message: { ...string, maxLength: 10000 }, expectedHead, expectedIndexRevision: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['message', 'expectedHead', 'expectedIndexRevision']),
+  tool('commit_git_changes', 'Commit exactly the inspected staged index. Requires expectedHead and expectedIndexRevision; never stages implicitly. Optional deliveryContext requires an authenticated, current execution binding.', { deliveryContext: DELIVERY_CONTEXT_SCHEMA, message: { ...string, maxLength: 10000 }, expectedHead, expectedIndexRevision: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['message', 'expectedHead', 'expectedIndexRevision']),
   tool('manage_git_branch', 'List, create, switch, rename or safely delete local branches. CREATE requires expectedHead; RENAME requires newBranch. SET_UPSTREAM requires branch, remote, remoteBranch and expectedHead; binds only the current branch to an existing remote-tracking branch without network I/O. No force operations.', { action: choice('LIST', 'CREATE', 'SWITCH', 'RENAME', 'DELETE', 'SET_UPSTREAM'), branch: string, newBranch: string, startPoint: string, remote: string, remoteBranch: string, expectedHead }, ['action']),
   tool('merge_git_branch', 'Merge with FF_ONLY by default or explicitly MERGE; return conflicts as state. MERGE requires source and expectedHead. ABORT requires an active merge.', { action: choice('MERGE', 'ABORT'), source: string, expectedHead, mode: choice('FF_ONLY', 'MERGE') }, ['action']),
   tool('sync_git_remote', 'Fetch, pull fast-forward only, or push without force. Defaults to origin/current branch. PUSH and PULL_FF_ONLY require expectedHead.', { action: choice('FETCH', 'PULL_FF_ONLY', 'PUSH'), remote: string, branch: string, expectedHead }, ['action']),
@@ -68,7 +70,7 @@ function validate(schema: Record<string, any>, value: unknown): boolean {
   return false
 }
 
-export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown): Promise<McpToolResult> {
+export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareDelivery): Promise<McpToolResult> {
   const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
   if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   const { operationId, ...values } = args as Record<string, unknown>
@@ -96,9 +98,15 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
     return dispatchGitOperationsTool(service, name, values)
   }
   if (typeof operationId !== 'string') return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
-  try { return await service.executeReceipted(operationId, name, values, () => dispatchGitOperationsTool(service, name, values)) }
+  try {
+    const { deliveryContext, ...mutation } = values
+    if (deliveryContext !== undefined && (name !== 'commit_git_changes' || !deliveryContextRequest.safeParse(deliveryContext).success || !prepareDelivery)) return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
+    const mutate = () => dispatchGitOperationsTool(service, name, mutation)
+    return deliveryContext === undefined ? await service.executeReceipted(operationId, name, values, mutate)
+      : await service.executeReceipted(operationId, name, values, mutate, () => prepareDelivery!(deliveryContextRequest.parse(deliveryContext)))
+  }
   catch (caught) {
-    const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
+    const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED', 'DELIVERY_CONTEXT_INVALID', 'DELIVERY_CONTEXT_STALE', 'AGENT_UNAUTHORIZED', 'REPOSITORY_MISMATCH'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
     return operationalFailure({ code, operationId, retryability: 'SAME_OPERATION_ID', retryAfterMs: 2000, recommendedAction: 'RECOVER_SAME_OPERATION' })
   }
 }
