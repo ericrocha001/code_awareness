@@ -1,15 +1,18 @@
-import { afterEach, expect, test } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { afterEach, expect, test, vi } from 'vitest'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
-import { composeNativeHooks, disableNativeHooks, installNativeHooks } from './native-hook-installation'
+import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { publicationRequestDigest, publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import { nativeObservationBatch } from './native-hook-ingestion'
 
+import * as safeConfig from '../local-mcp-clients/safe-config-file'
+import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
+
 const directories: string[] = []
-afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }) })
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'native-hooks-')); directories.push(root)
   mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/test\n')
@@ -192,3 +195,125 @@ test('requires explicit opt-in, preserves Entire handlers and restores exact con
   expect(readFileSync(config, 'utf8')).toBe(before)
   expect(composeNativeHooks(composeNativeHooks(before, 'native-command'), 'native-command')).toBe(composeNativeHooks(before, 'native-command'))
 })
+
+function installationFixture() {
+  const f = fixture(), commandPath = join(f.root, 'command.cjs'); writeFileSync(commandPath, '')
+  const record = { path: f.root, worktreeId: f.binding.worktreeId, generation: f.binding.generation, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }
+  const options = { repositoryId: 'repository', record, commandPath, nodePath: process.execPath, authorized: true }
+  const config = join(f.root, '.codex/hooks.json'), snapshot = join(f.root, '.code-awareness/native-hooks/installation.json'), binding = join(f.root, '.code-awareness/native-hooks/binding.json')
+  return { ...f, options, config, snapshot, binding, install: () => installNativeHooks(options) }
+}
+test('U1 exact reinstall is NO_CHANGE across restart and retains bytes, file identities and trust', () => {
+  const f = installationFixture(); f.install()
+  const paths = [f.config, f.snapshot, f.binding], before = paths.map(path => [readFileSync(path, 'utf8'), statSync(path).ino, statSync(path).mtimeMs])
+  expect(f.install()).toMatchObject({ state: 'NO_CHANGE', trust: 'UNCHANGED' })
+  expect(installNativeHooks(JSON.parse(JSON.stringify(f.options)))).toMatchObject({ state: 'NO_CHANGE' })
+  expect(paths.map(path => [readFileSync(path, 'utf8'), statSync(path).ino, statSync(path).mtimeMs])).toEqual(before)
+}, 30000)
+test('U1 repair and disable preserve third parties added after original snapshot', () => {
+  const f = installationFixture(); f.install(); const original = JSON.parse(readFileSync(f.snapshot, 'utf8')).before
+  const value = JSON.parse(readFileSync(f.config, 'utf8')), third = { matcher: 'third-party', hooks: [{ type: 'command', command: 'third-party', commandWindows: 'third-party-windows', timeout: 20 }] }
+  value.hooks.Stop = [third]; writeFileSync(f.config, JSON.stringify(value))
+  expect(inspectNativeInstallation(f.root, { repositoryId: 'repository', ...f.options.record })).toMatchObject({ repairability: 'REPAIRABLE', installed: 6 })
+  expect(f.install()).toMatchObject({ state: 'CONFIGURED', trust: 'REVIEW_REQUIRED' })
+  expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).before).toBe(original)
+  expect(disableNativeHooks(f.root, true)).toMatchObject({ state: 'DISABLED', restored: false })
+  const disabled = JSON.parse(readFileSync(f.config, 'utf8'))
+  expect(disabled.hooks.Stop).toEqual([third]); expect(JSON.stringify(disabled)).not.toContain(f.options.commandPath.replaceAll('\\', '\\\\'))
+  const bytes = readFileSync(f.config, 'utf8'); disableNativeHooks(f.root, true); expect(readFileSync(f.config, 'utf8')).toBe(bytes)
+}, 30000)
+test('U1 interrupted command upgrade retains previous ownership and repairs without duplicate handlers', () => {
+  const f = installationFixture(); f.install(); const prior = readFileSync(f.config, 'utf8'), original = JSON.parse(readFileSync(f.snapshot, 'utf8')).before
+  const next = join(f.root, 'next.cjs'); writeFileSync(next, ''); const options = { ...f.options, commandPath: next }
+  const write = safeConfig.writeConfig; let injected = false
+  const spy = vi.spyOn(safeConfig, 'writeConfig').mockImplementation((path, profile, revision, content, callback) => {
+    if (path === f.config && !injected) { injected = true; const value = JSON.parse(prior); value.description = 'concurrent third party'; writeFileSync(path, JSON.stringify(value)) }
+    return write(path, profile, revision, content, callback)
+  })
+  expect(() => installNativeHooks(options)).toThrow('CONFIG_REVISION_CONFLICT'); spy.mockRestore()
+  expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).previousOwned).toBeDefined()
+  expect(installNativeHooks(options)).toMatchObject({ state: 'CONFIGURED' })
+  const value = JSON.parse(readFileSync(f.config, 'utf8')); expect(value.description).toBe('concurrent third party')
+  for (const groups of Object.values(value.hooks) as any[]) { expect(groups).toHaveLength(1); expect(groups[0].hooks).toHaveLength(1); expect(groups[0].hooks[0].command).toContain(next) }
+  expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).before).toBe(original)
+  disableNativeHooks(f.root, true); expect(JSON.parse(readFileSync(f.config, 'utf8')).description).toBe('concurrent third party')
+}, 30000)
+test('U1 rejects unsafe ancestors before any spool or snapshot write outside selected checkout', () => {
+  for (const name of ['.code-awareness', '.codex']) {
+    const f = installationFixture(), external = mkdtempSync(join(tmpdir(), 'native-external-')); directories.unshift(external)
+    writeFileSync(join(external, 'sentinel'), 'unchanged'); symlinkSync(external, join(f.root, name), 'junction')
+    expect(() => f.install()).toThrow(/LINK|UNSAFE/)
+    expect(readdirSync(external)).toEqual(['sentinel']); expect(readFileSync(join(external, 'sentinel'), 'utf8')).toBe('unchanged')
+    expect(existsSync(f.snapshot)).toBe(false)
+  }
+})
+test('U1 malformed JSON, stale generation and conflicting owned command remain unchanged', () => {
+  const f = installationFixture(); f.install(); const installed = readFileSync(f.config, 'utf8')
+  expect(() => installNativeHooks({ ...f.options, record: { ...f.options.record, generation: '3'.repeat(64) } })).toThrow('WORKTREE_STALE')
+  writeFileSync(f.config, '{'); expect(() => f.install()).toThrow(); expect(readFileSync(f.config, 'utf8')).toBe('{')
+  const value = JSON.parse(installed); value.hooks.Stop[0].hooks[0].commandWindows = 'changed'; writeFileSync(f.config, JSON.stringify(value)); const before = readFileSync(f.config, 'utf8')
+  expect(() => f.install()).toThrow('NATIVE_HANDLER_CONFLICT'); expect(() => disableNativeHooks(f.root, true)).toThrow('NATIVE_HANDLER_CONFLICT'); expect(readFileSync(f.config, 'utf8')).toBe(before)
+}, 30000)
+test('U3 optional delivery context is structurally strict and fingerprints every actual argument', () => {
+  const f = fixture(), binding = { ...f.binding, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes' }
+  const args = { message: 'private message', expectedHead: 'a'.repeat(40), expectedIndexRevision: 'b'.repeat(64) }
+  const deliveryContext = { bindingArtifactId: 'artifact-execution-branch-' + 'c'.repeat(64), bindingRevision: 1, planArtifactId: 'artifact-11111111-1111-4111-8111-111111111111', planRevision: 2, executionId: 'execution-1' }
+  const event = (input: unknown) => normalizeNativeHook({ ...f.payload, tool_name: binding.gitCommitTool, tool_input: { operationId: 'operation-1', ...input as object } }, binding)
+  expect(event(args).git?.fingerprint).toBe(gitReceiptFingerprint('commit_git_changes', args))
+  const extended = { ...args, deliveryContext }; const observed = event(extended)
+  expect(observed.git?.fingerprint).toBe(gitReceiptFingerprint('commit_git_changes', extended)); expect(observed.git?.fingerprint).not.toBe(event(args).git?.fingerprint)
+  expect(JSON.stringify(observed)).not.toContain('private message'); expect(JSON.stringify(observed)).not.toContain(deliveryContext.bindingArtifactId)
+  for (const context of [{ ...deliveryContext, extra: true }, { ...deliveryContext, planRevision: 0 }, { ...deliveryContext, planArtifactId: 'other' }, { ...deliveryContext, planArtifactId: 'artifact-AAAAAAAA-1111-4111-8111-111111111111' }, { ...deliveryContext, bindingRevision: Number.MAX_SAFE_INTEGER + 1 }]) expect(event({ ...args, deliveryContext: context }).git).toBeUndefined()
+})
+
+test('U1 legacy v1 ownership is reconstructed only from exact composition and keeps original snapshot', () => {
+  const f = installationFixture(); f.install()
+  const current = JSON.parse(readFileSync(f.snapshot, 'utf8')), legacy = { schema: 1, path: current.path, before: current.before, installedDigest: current.installedDigest }
+  writeFileSync(f.snapshot, JSON.stringify(legacy)); const before = readFileSync(f.snapshot, 'utf8')
+  expect(f.install()).toMatchObject({ state: 'NO_CHANGE', trust: 'UNCHANGED' }); expect(readFileSync(f.snapshot, 'utf8')).toBe(before)
+  const value = JSON.parse(readFileSync(f.config, 'utf8')); delete value.hooks.Stop; writeFileSync(f.config, JSON.stringify(value))
+  expect(f.install()).toMatchObject({ state: 'CONFIGURED' }); expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).before).toBe(legacy.before)
+  const unknown = JSON.parse(readFileSync(f.snapshot, 'utf8')); unknown.schema = 1; unknown.installedDigest = '0'.repeat(64); writeFileSync(f.snapshot, JSON.stringify(unknown))
+  expect(() => f.install()).toThrow('INSTALLATION_OWNERSHIP_UNPROVEN')
+}, 30000)
+
+test('U1 rejects oversized config before creating the spool or installation journal', () => {
+  const f = installationFixture(), before = JSON.stringify({ description: 'x'.repeat(65536) })
+  mkdirSync(join(f.root, '.codex')); writeFileSync(f.config, before)
+  expect(() => f.install()).toThrow('HOOK_CONFIG_LIMIT')
+  expect(readFileSync(f.config, 'utf8')).toBe(before)
+  expect(existsSync(join(f.root, '.code-awareness'))).toBe(false)
+})
+
+test('U1 repairs external binding drift from the journal and re-enables a disabled checkout safely', () => {
+  const f = installationFixture(), tool = 'mcp__code_awareness_local__commit_git_changes'
+  installNativeHooks({ ...f.options, gitCommitTool: tool })
+  const binding = JSON.parse(readFileSync(f.binding, 'utf8'))
+  writeFileSync(f.binding, JSON.stringify({ ...binding, gitCommitTool: 'mcp__other__commit_git_changes' }))
+  expect(inspectNativeInstallation(f.root, { repositoryId: 'repository', ...f.options.record })).toMatchObject({ reasonCode: 'HOOK_BINDING_DRIFT', repairability: 'REPAIRABLE', installed: 7 })
+  expect(f.install()).toMatchObject({ state: 'CONFIGURED' })
+  expect(JSON.parse(readFileSync(f.binding, 'utf8'))).toEqual(binding)
+  expect(disableNativeHooks(f.root, true)).toMatchObject({ restored: true }); expect(existsSync(f.config)).toBe(false)
+  expect(f.install()).toMatchObject({ state: 'CONFIGURED' })
+  expect(JSON.parse(readFileSync(f.binding, 'utf8'))).toEqual(binding)
+  expect(f.install()).toMatchObject({ state: 'NO_CHANGE' })
+  expect(disableNativeHooks(f.root, true)).toMatchObject({ restored: true }); expect(existsSync(f.config)).toBe(false)
+}, 30000)
+
+test('U1 publishes a new command only after preflight and detects immutable bundle tampering', () => {
+  const f = installationFixture(), commandContent = 'process.exitCode = 0\n'
+  const commandPath = join(f.root, 'out/session-context', 'native-hook-' + nativeDigest(commandContent) + '.cjs')
+  const options = { ...f.options, commandPath, commandContent }
+  expect(() => installNativeHooks({ ...options, authorized: false })).toThrow('HOOK_AUTHORIZATION_REQUIRED')
+  expect(existsSync(commandPath)).toBe(false)
+  mkdirSync(join(f.root, '.codex')); writeFileSync(f.config, '{')
+  expect(() => installNativeHooks(options)).toThrow(); expect(existsSync(commandPath)).toBe(false)
+  writeFileSync(f.config, '{}')
+  expect(installNativeHooks(options)).toMatchObject({ state: 'CONFIGURED', trust: 'REVIEW_REQUIRED' })
+  const original = statSync(commandPath); expect(readFileSync(commandPath, 'utf8')).toBe(commandContent)
+  expect(installNativeHooks(options)).toMatchObject({ state: 'NO_CHANGE', trust: 'UNCHANGED' })
+  expect(statSync(commandPath).mtimeMs).toBe(original.mtimeMs)
+  writeFileSync(commandPath, 'tampered')
+  expect(() => installNativeHooks(options)).toThrow('HOOK_COMMAND_DIGEST_MISMATCH')
+  expect(inspectNativeInstallation(f.root, { repositoryId: 'repository', ...f.options.record })).toMatchObject({ reasonCode: 'HOOK_COMMAND_DIGEST_MISMATCH' })
+}, 30000)

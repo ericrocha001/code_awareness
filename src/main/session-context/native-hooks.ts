@@ -125,8 +125,15 @@ export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding
   let git: NativeHookEnvelope['git']
   if (toolEvent && binding.gitCommitTool && payload.tool_name === binding.gitCommitTool && object(payload.tool_input)) {
     const { operationId, ...args } = payload.tool_input
+    const context = args.deliveryContext
+    const hasContext = context !== undefined
+    const validContext = object(context) && Object.keys(context).length === 5 &&
+      typeof context.bindingArtifactId === 'string' && /^artifact-execution-branch-[a-f0-9]{64}$/.test(context.bindingArtifactId) &&
+      Number.isSafeInteger(context.bindingRevision) && Number(context.bindingRevision) > 0 && Number.isSafeInteger(context.planRevision) && Number(context.planRevision) > 0 &&
+      typeof context.planArtifactId === 'string' && /^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(context.planArtifactId) &&
+      typeof context.executionId === 'string' && idPattern.test(context.executionId)
     if (typeof operationId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(operationId) &&
-      Object.keys(args).length === 3 && typeof args.message === 'string' && args.message.length <= 10000 &&
+      Object.keys(args).length === (hasContext ? 4 : 3) && (!hasContext || validContext) && typeof args.message === 'string' && args.message.length <= 10000 &&
       (args.expectedHead === null || typeof args.expectedHead === 'string' && /^[a-f0-9]{40}$/.test(args.expectedHead)) &&
       typeof args.expectedIndexRevision === 'string' && hashPattern.test(args.expectedIndexRevision)) {
       git = { operationId, fingerprint: gitReceiptFingerprint('commit_git_changes', args), expectedHead: args.expectedHead as string | null }
@@ -204,6 +211,14 @@ export function spoolNativeHook(envelope: NativeHookEnvelope, spool: string): 'W
 }
 
 export function prepareNativeSpool(spool: string): void {
+  let ancestor = resolve(spool)
+  while (true) {
+    const stat = lstatSync(ancestor, { throwIfNoEntry: false })
+    if (stat && (stat.isSymbolicLink() || !stat.isDirectory() || realpathSync(ancestor) !== ancestor)) throw new Error('UNSAFE_SPOOL')
+    const parent = dirname(ancestor)
+    if (parent === ancestor) break
+    ancestor = parent
+  }
   mkdirSync(spool, { recursive: true, mode: 0o700 })
   if (lstatSync(spool).isSymbolicLink() || realpathSync(dirname(spool)) !== resolve(dirname(spool))) throw new Error('UNSAFE_SPOOL')
 }

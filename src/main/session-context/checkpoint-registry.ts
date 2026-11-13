@@ -75,6 +75,10 @@ export class CheckpointRegistry {
       const counts = this.db.prepare(`WITH pairs AS (
         SELECT e.fromId,count(DISTINCT json_extract(e.payload,'$.relation')) AS halves FROM registry_edges e
         WHERE e.toId=? AND e.state='OBSERVED' AND json_extract(e.payload,'$.evidenceKind')='NATIVE_CAPTURE_WINDOW' GROUP BY e.fromId
+      ), causal_edges AS (
+        SELECT e.state FROM pairs p JOIN registry_entities i ON i.id=p.fromId
+        JOIN registry_edges e ON e.source IN ('NATIVE_ARTIFACT:'||substr(i.externalId,19),'NATIVE_GIT:'||substr(i.externalId,19))
+        WHERE json_extract(e.payload,'$.evidenceKind') IN ('NATIVE_GIT_CAUSAL','NATIVE_ARTIFACT_CAUSAL')
       ), outcomes AS (
         SELECT p.halves,CASE WHEN a.status='COMPLETE' OR g.status='COMPLETE' THEN 'verified'
           WHEN a.cursor LIKE '%AMBIGUOUS%' OR g.cursor LIKE '%AMBIGUOUS%' THEN 'ambiguous'
@@ -84,12 +88,14 @@ export class CheckpointRegistry {
         LEFT JOIN registry_sources g ON g.source='NATIVE_GIT:'||substr(i.externalId,19)
       ) SELECT count(*) AS invocations,coalesce(sum(halves=2),0) AS pairs,
         coalesce(sum(outcome='verified'),0) AS verified,coalesce(sum(outcome='partial'),0) AS partial,
-        coalesce(sum(outcome='ambiguous'),0) AS ambiguous,coalesce(sum(outcome='pending'),0) AS pending FROM outcomes`).get(window) as Record<string, number>
+        coalesce(sum(outcome='ambiguous'),0) AS ambiguous,coalesce(sum(outcome='pending'),0) AS pending,
+        (SELECT count(*) FROM causal_edges WHERE state='OBSERVED') AS currentEdges,
+        (SELECT count(*) FROM causal_edges WHERE state IN ('CONFLICT','SUPERSEDED','STALE')) AS withdrawnEdges FROM outcomes`).get(window) as Record<string, number>
       const metrics = JSON.parse(this.source('NATIVE_WINDOW_METRICS:' + capture.epoch)?.cursor ?? 'null') as Record<string, number> | null
       return { ...capture, accepted: events.accepted, ingress: metrics?.ingress ?? null, deduplicated: metrics?.deduplicated ?? null,
         rejected: metrics?.rejected ?? null, expired: metrics?.expired ?? null, pairs: counts.pairs, incompletePairs: counts.invocations - counts.pairs,
         correlations: { verified: counts.verified, partial: counts.partial, ambiguous: counts.ambiguous, pending: counts.pending },
-        denominator: null, coverage: 'COVERAGE_UNKNOWN' }
+        causalEdges: { current: counts.currentEdges, withdrawn: counts.withdrawnEdges }, denominator: null, coverage: 'COVERAGE_UNKNOWN' }
     })
   }
   nativeHookEvidence(worktreeId: string, generation: string, sessionId?: string): NativeHookEnvelope[] {
