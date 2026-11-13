@@ -11,6 +11,30 @@ const { publicError } = require('./local-agent/discovery.cjs')
 const root = path.resolve(__dirname, '..')
 const evidenceRoot = path.join(root, '.code-awareness', 'test-output')
 const limits = { success: 900, failure: 3500 }
+const tapFields = ['tests', 'suites', 'pass', 'fail', 'cancelled', 'skipped', 'todo', 'duration_ms']
+const nodeOptionsWithValue = new Set([
+  '-C', '--conditions', '-r', '--require', '--import', '-e', '--eval', '-p', '--print',
+  '--env-file', '--env-file-if-exists', '--input-type', '--loader', '--experimental-loader',
+  ...['concurrency', 'coverage-branches', 'coverage-functions', 'coverage-lines',
+    'coverage-exclude', 'coverage-include', 'global-setup', 'isolation', 'name-pattern',
+    'random-seed', 'reporter', 'reporter-destination', 'rerun-failures', 'shard',
+    'skip-pattern', 'timeout'].map(name => `--test-${name}`),
+  '--experimental-test-isolation'
+])
+
+function isNativeNodeTest(command, args) {
+  if (!/(?:^|[/\\])node(?:\.exe)?$/i.test(command) && command !== process.execPath) return false
+  let enabled = false
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]
+    if (arg === '--' || arg === '-' || !arg.startsWith('-')) break
+    const option = arg.split('=', 1)[0]
+    if (option === '--test') enabled = true
+    else if (option === '--no-test') enabled = false
+    else if (nodeOptionsWithValue.has(arg)) index++
+  }
+  return enabled
+}
 
 function parseTestCounts(summary) {
   const match = summary.match(/^(.+?)\s+\((\d+)\)$/)
@@ -27,10 +51,15 @@ function parseTestCounts(summary) {
   return { ...counts, total, executed: counts.passed + counts.failed }
 }
 
-function testEvidence(expected, summaries, processState) {
+function testEvidence(expected, summaries, processState, tapSummary) {
   if (!expected) return { state: 'NOT_APPLICABLE' }
-  const runs = summaries.map(parseTestCounts)
+  const tapCounts = tapSummary && parseTestCounts(tapSummary)
+  if (processState === 'FAIL' && tapSummary) {
+    if (tapCounts?.failed > 0) return { state: 'FAILED', runs: [tapCounts] }
+  }
   if (processState !== 'PASS') return { state: 'UNKNOWN', reason: 'Process did not complete successfully.' }
+  const runs = summaries.map(parseTestCounts)
+  if (tapSummary) runs.push(tapCounts)
   if (!runs.length || runs.some(counts => counts === null)) return { state: 'UNKNOWN', reason: 'Reliable test counts unavailable.' }
   if (runs.some(counts => counts.failed > 0)) return { state: 'FAILED', runs }
   if (runs.some(counts => counts.executed === 0)) return { state: 'INSUFFICIENT', runs, reason: 'A test run executed zero tests.' }
@@ -99,9 +128,14 @@ async function run(command, args = [], options = {}) {
   const directory = path.join(options.evidenceRoot || path.join(options.cwd || root, '.code-awareness', 'test-output'), id)
   protectDirectory(directory)
   const files = ['stdout.log', 'stderr.log'].map(name => fs.openSync(path.join(directory, name), 'wx', 0o600))
-  const expectTests = options.expectTests || [command, ...args].some(value => /(?:^|[/\\])vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?$/.test(value))
+  const nativeNodeTest = isNativeNodeTest(command, args)
+  const expectTests = nativeNodeTest || options.expectTests || [command, ...args].some(value => /(?:^|[/\\])vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?$/.test(value))
   const testSummaries = []
   const tapCounts = {}
+  let tapPrefix
+  let tapStream
+  let tapIndex = 0
+  let invalidTap = false
   const receipt = { version: 1, id, command: [command, ...args], cwd: fs.realpathSync(options.cwd || root), directory, startedAt: new Date(started).toISOString(), state: 'RUNNING', pid: null }
   let connection, registrationDiagnostic
   const diagnostics = []
@@ -145,8 +179,27 @@ async function run(command, args = [], options = {}) {
     const consume = (stream, fd) => new Promise((resolve, reject) => {
       let pending = ''
       const decoder = new (require('node:string_decoder').StringDecoder)('utf8')
-      const line = raw => {
-        const text = raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').trim()
+      let truncated = false
+      const line = (raw, complete) => {
+        const uncolored = raw.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+        const text = uncolored.trim()
+        const tap = uncolored.match(/^(#|ℹ) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)(?:\s+(.*))?$/)
+        if (tap) {
+          const [, prefix, field, value] = tap
+          tapPrefix ??= prefix
+          tapStream ??= fd
+          const validValue = field === 'duration_ms'
+            ? /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value))
+            : /^\d+$/.test(value) && Number.isSafeInteger(Number(value))
+          if (!complete || prefix !== tapPrefix || fd !== tapStream || field !== tapFields[tapIndex] || !validValue) {
+            invalidTap = true
+          } else {
+            tapCounts[field] = Number(value)
+            tapIndex++
+          }
+        } else if (fd === tapStream && tapIndex < tapFields.length) {
+          invalidTap = true
+        }
         if (!text) return
         tail.push(bounded(text, 300)); if (tail.length > 6) tail.shift()
         if (/FAIL|Error|Assertion|expected|received|❯|×|not ok|at .*:\d+/i.test(text) && !seen.has(text)) {
@@ -155,8 +208,6 @@ async function run(command, args = [], options = {}) {
         const match = text.match(/^\s*(Tests|Test Files)\s+(.+)$/)
         if (match) { receipt.counts ||= {}; receipt.counts[match[1]] = bounded(match[2], 100) }
         if (match?.[1] === 'Tests') testSummaries.push(match[2])
-        const tap = text.match(/^(?:#|ℹ) (tests|pass|fail|skipped|todo) (\d+)$/)
-        if (tap) tapCounts[tap[1]] = Number(tap[2])
       }
       stream.on('data', chunk => {
         try {
@@ -166,11 +217,22 @@ async function run(command, args = [], options = {}) {
         pending += decoder.write(chunk)
         const lines = pending.split(/\r?\n/)
         pending = lines.pop()
-        for (const value of lines) line(value)
-        if (pending.length > 4096) { line(pending.slice(0, 4096)); pending = pending.slice(-4096) }
+        for (const value of lines) {
+          line(value, !truncated)
+          truncated = false
+        }
+        if (pending.length > 4096) {
+          line(pending.slice(0, 4096), false)
+          pending = pending.slice(-4096)
+          truncated = true
+        }
       })
       stream.on('error', reject)
-      stream.on('end', () => { line(pending + decoder.end()); resolve() })
+      stream.on('end', () => {
+        pending += decoder.end()
+        if (pending) line(pending, false)
+        resolve()
+      })
     })
     let launchError
     child.on('error', error => { launchError = error.message })
@@ -196,10 +258,11 @@ async function run(command, args = [], options = {}) {
   receipt.durationMs = Date.now() - started
   receipt.finishedAt = new Date().toISOString()
   receipt.processState = receipt.state
-  if (Number.isSafeInteger(tapCounts.tests) && Number.isSafeInteger(tapCounts.pass) && Number.isSafeInteger(tapCounts.fail)) {
-    testSummaries.push(`${tapCounts.pass} passed | ${tapCounts.fail} failed | ${tapCounts.skipped || 0} skipped | ${tapCounts.todo || 0} todo (${tapCounts.tests})`)
-  }
-  receipt.validation = testEvidence(expectTests || testSummaries.length > 0, testSummaries, receipt.processState)
+  const tapSummary = !invalidTap && tapIndex === tapFields.length && tapCounts.cancelled === 0
+    ? `${tapCounts.pass} passed | ${tapCounts.fail} failed | ${tapCounts.skipped} skipped | ${tapCounts.todo} todo (${tapCounts.tests})`
+    : null
+  receipt.validation = testEvidence(expectTests || testSummaries.length > 0 || tapSummary,
+    nativeNodeTest ? [] : testSummaries, receipt.processState, tapSummary)
   if (receipt.processState === 'PASS' && !['SUFFICIENT', 'NOT_APPLICABLE'].includes(receipt.validation.state)) {
     receipt.state = receipt.validation.state === 'FAILED' ? 'FAIL' : receipt.validation.state
     receipt.diagnostic = receipt.validation.reason || 'Test summary reports failures.'
