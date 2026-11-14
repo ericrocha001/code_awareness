@@ -14,7 +14,7 @@ import type { SessionFilter } from './associations'
 import { captureHealthQuery, inspectCaptureHealth } from './capture-health'
 import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
-import { inspectNativeTrust, type NativeHookClient } from './native-hook-preflight'
+import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import { reconcileRegistry, registrySelector } from './registry-reconciliation'
 import type { RegistryReader } from './checkpoint-registry'
 import type { CaptureHealthObservation } from './capture-health-types'
@@ -167,7 +167,8 @@ export async function executeSessionTool(
   _legacyArchiveObservation?: undefined,
   registryReader?: RegistryReader,
   archiveAccountHash?: string,
-  nativeClient?: NativeHookClient
+  nativeClient?: NativeHookClient,
+  nativeTrustSnapshot?: NativeTrustSnapshot
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -188,7 +189,12 @@ export async function executeSessionTool(
       data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
       const observation = data as CaptureHealthObservation
       await reconcileRegistry(store as SessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
-      const nativeTrust = await inspectNativeTrust(root, { repositoryId: store.repositoryId, ...selectedTarget }, (q as ReturnType<typeof parseCaptureHealth>).inspectNativeTrust, nativeClient, assertActive)
+      const requested = (q as ReturnType<typeof parseCaptureHealth>).inspectNativeTrust
+      const trustTarget = { repositoryId: store.repositoryId, ...selectedTarget }
+      const nativeTrust = requested && nativeTrustSnapshot
+        ? nativeTrustSnapshot.repositoryId === trustTarget.repositoryId && nativeTrustSnapshot.worktreeId === trustTarget.worktreeId && nativeTrustSnapshot.generation === trustTarget.generation
+          ? nativeTrustSnapshot.observation : unknownNativeTrust('SESSION_SCOPE_CHANGED')
+        : await inspectNativeTrust(root, trustTarget, requested, nativeClient, assertActive)
       data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true, ...nativeCaptureDiagnostics((store as SessionStore).registry, root), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, nativeTrust) } }
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>

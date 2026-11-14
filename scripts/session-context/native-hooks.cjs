@@ -2,6 +2,7 @@ const { execFileSync } = require('node:child_process')
 const { resolve } = require('node:path')
 const { existsSync, readFileSync, lstatSync } = require('node:fs')
 const { createHash } = require('node:crypto')
+const { isQualifiedCodexHookVersion } = require('../../src/shared/native-hook-preflight.cjs')
 const { buildSync } = require('esbuild')
 const root = process.cwd()
 const action = process.argv[2]
@@ -18,9 +19,19 @@ function compile(name) {
   return module.exports
 }
 const { installNativeHooks, disableNativeHooks, inspectNativeInstallation } = compile('native-hook-installation')
+function inspectVersion() {
+  let output
+  try { output = execFileSync('codex', ['--version'], { encoding: 'utf8', windowsHide: true, timeout: 2000, stdio: ['ignore', 'pipe', 'pipe'] }).trim() }
+  catch { return { state: 'UNKNOWN', reasonCode: 'CODEX_EXECUTABLE_UNAVAILABLE' } }
+  const version = /^codex-cli ([a-zA-Z0-9.+_-]{1,80})$/.exec(output)?.[1]
+  if (!version) return { state: 'UNKNOWN', reasonCode: 'CODEX_VERSION_UNAVAILABLE' }
+  return isQualifiedCodexHookVersion(version)
+    ? { state: 'QUALIFIED', version }
+    : { state: 'UNSUPPORTED', reasonCode: 'VERSION_UNSUPPORTED', version }
+}
 if (action === 'install') {
-  const version = execFileSync('codex', ['--version'], { encoding: 'utf8', windowsHide: true }).trim()
-  if (!['codex-cli 0.166.0-alpha.6', 'codex-cli 0.167.0-alpha.3.2'].includes(version)) throw new Error('UNSUPPORTED_CODEX_VERSION: validate the hook protocol before installation')
+  const client = inspectVersion()
+  if (client.state !== 'QUALIFIED') throw new Error(client.reasonCode)
   const branch = execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
   const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
   const tool = process.argv.find(value => value.startsWith('--git-commit-tool='))?.slice(18)
@@ -47,5 +58,5 @@ else if (action === 'acknowledge-gap') {
 else {
   const { handlers, ...installation } = inspectNativeInstallation(root, { repositoryId: status.repository.repositoryId, ...record })
   const state = installation.reasonCode === 'NATIVE_CAPTURE_DISABLED' ? 'DISABLED' : installation.state === 'MISSING' ? 'HOOKS_MISSING' : installation.state
-  console.log(JSON.stringify({ state, capture: 'UNOBSERVED', installation, trust: { state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' }, execution: { state: 'UNOBSERVED' }, captureReadiness: { state: 'NOT_VERIFIED' }, repositoryId: status.repository.repositoryId, worktreeId: record.worktreeId }))
+  console.log(JSON.stringify({ state, capture: 'UNOBSERVED', installation, client: inspectVersion(), generation: record.generation, trust: { state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' }, execution: { state: 'UNOBSERVED' }, captureReadiness: { state: 'NOT_VERIFIED' }, repositoryId: status.repository.repositoryId, worktreeId: record.worktreeId }))
 }

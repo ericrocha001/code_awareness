@@ -1,4 +1,6 @@
 const { createHash } = require('node:crypto')
+const qualifiedVersions = new Set(['0.166.0-alpha.6', '0.167.0-alpha.3.2'])
+const isQualifiedCodexHookVersion = version => qualifiedVersions.has(version)
 const events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd']
 function summarizeHookList(response, expected) {
   const unknown = reasonCode => ({ state: 'UNKNOWN', reasonCode, expected: 7, matched: 0, trusted: 0, issues: [] })
@@ -27,4 +29,4 @@ function summarizeHookList(response, expected) {
     expected: 7, matched: selected.length, trusted, issues, stale,
     hashDigest: createHash('sha256').update(JSON.stringify(selected.sort((a, b) => a[0].localeCompare(b[0])))).digest('hex') }
 }
-module.exports = { summarizeHookList }
+module.exports = { summarizeHookList, isQualifiedCodexHookVersion }

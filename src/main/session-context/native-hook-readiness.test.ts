@@ -1,12 +1,16 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { SessionStore, sessionStorePath } from './store'
 import { nativeHookReadiness } from './native-hook-readiness'
+import { buildSync } from 'esbuild'
+import { execFileSync } from 'node:child_process'
+import { SessionContextClient } from './client'
+import { sourceFingerprint, type SessionTargetResolver } from './target'
 import { inspectNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
 import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
@@ -16,7 +20,10 @@ const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hook-readiness-'))
-  cleanup.push(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }))
+  cleanup.push(() => {
+    if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5 })", root], { windowsHide: true })
+    else rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+  })
   mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/test\n')
   const commandPath = join(root, 'native-hook.cjs'); writeFileSync(commandPath, '')
   const target = { repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64) }
@@ -66,7 +73,7 @@ it('U1 keeps observed envelopes historical and isolated by generation after rest
   expect(nativeHookReadiness(f.store().registry, f.root, { ...f.target, generation: '3'.repeat(64) }).execution.state).toBe('UNOBSERVED')
 })
 function clientFixture(f: ReturnType<typeof fixture>) {
-  let scope: NativeClientScope | undefined = { ...f.target, clientId: 'private-client', threadId: 'private-thread', sessionId: 'PRIVATE_SESSION', protocolVersion: 'codex-app-server/v2', clientVersion: '0.166.0-alpha.6', connectedAt: new Date(Date.now() - 5000).toISOString() }
+  let scope: NativeClientScope | undefined = { ...f.target, workspaceRoot: f.root, projectTrusted: true, clientId: 'private-client', threadId: 'private-thread', sessionId: 'PRIVATE_SESSION', protocolVersion: 'codex-app-server/v2', clientVersion: '0.166.0-alpha.6', connectedAt: new Date(Date.now() - 5000).toISOString() }
   const hooks = inspectNativeInstallation(f.root, f.target).handlers.map(handler => ({ key: handler.key, eventName: handler.event[0].toLowerCase() + handler.event.slice(1),
     currentHash: 'sha256:' + nativeDigest(handler.key), enabled: true, trustStatus: 'trusted', command: 'PRIVATE_COMMAND', sourcePath: f.configPath, displayOrder: 0 }))
   const calls: unknown[] = []
@@ -122,7 +129,15 @@ it('U2 distinguishes untrusted, changed hash, missing/ambiguous hooks, unsupport
   c.client.authorized = false; c.calls.length = 0
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'CLIENT_AUTHORIZATION_REQUIRED' })
   expect(c.calls).toEqual([])
-  c.client.authorized = true; c.client.request = async () => { throw Object.assign(new Error('PRIVATE_FAILURE'), { code: -32601 }) }
+  c.client.authorized = true
+  const qualified = c.scope()
+  c.changeScope({ ...qualified, projectTrusted: false })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'PROJECT_TRUST_UNAVAILABLE' })
+  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.11.1' })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'VERSION_UNSUPPORTED' })
+  expect(c.calls).toEqual([])
+  c.changeScope(qualified)
+  c.client.request = async () => { throw Object.assign(new Error('PRIVATE_FAILURE'), { code: -32601 }) }
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'PROTOCOL_UNSUPPORTED' })
   expect(await inspectNativeTrust(f.root, f.target, true)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' })
 })
@@ -178,3 +193,37 @@ it('U3 retains legacy coverage as historical UNKNOWN rather than inventing a cur
   f.store().registry.apply({ repositoryId: 'repo', source: `NATIVE_CAPTURE:${f.target.worktreeId}:${f.target.generation}`, revision: 'legacy', status: 'OBSERVED', edges: [] }, undefined)
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ execution: { state: 'UNKNOWN', reasonCode: 'EVENT_DETAIL_UNAVAILABLE', freshness: 'HISTORICAL' } })
 })
+
+
+it('sends only host-observed trust through the real worker and rejects a changed session at readback', async () => {
+  const f = fixture()
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: f.root, windowsHide: true, stdio: 'pipe' })
+  git('init', '-b', 'test')
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture')
+  f.install()
+  const live = clientFixture(f)
+  const worker = join(f.root, 'worker.cjs')
+  const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
+  writeFileSync(worker, 'require = require("node:module").createRequire(' + JSON.stringify(resolve('package.json')) + ');\n' + code)
+  let changeAtReadback = false
+  const validate = vi.fn(async () => {
+    if (changeAtReadback && validate.mock.calls.length > 1) live.changeScope({ ...live.scope(), threadId: 'other-thread' })
+  })
+  const target: SessionTargetResolver = async () => ({ root: f.root, fingerprint: sourceFingerprint(f.root), validate })
+  const client = new SessionContextClient(f.root, 'repo', f.root, () => true, worker, target, 20000, undefined, undefined, undefined, live.client)
+  try {
+    const query = { worktreeId: f.target.worktreeId, generation: f.target.generation, inspectNativeTrust: true }
+    const result = await client.call('inspect_capture_health', query)
+    expect(result.isError, result.content[0].text).toBeFalsy()
+    expect(JSON.parse(result.content[0].text).nativeCapture.readiness).toMatchObject({
+      installation: { installed: 7 }, trust: { state: 'TRUSTED', trusted: 7 }, captureReadiness: { state: 'NOT_VERIFIED' }
+    })
+    expect(result.content[0].text).not.toContain('private-thread')
+    expect(result.content[0].text).not.toContain('PRIVATE_COMMAND')
+    validate.mockClear()
+    changeAtReadback = true
+    const changed = await client.call('inspect_capture_health', query)
+    expect(changed.isError).toBe(true)
+    expect(JSON.parse(changed.content[0].text)).toMatchObject({ code: 'SESSION_SCOPE_CHANGED' })
+  } finally { await client.dispose() }
+}, 60000)

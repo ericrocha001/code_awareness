@@ -1,12 +1,14 @@
 # Captura nativa de proveniência
 
-O adaptador foi exercitado com Codex CLI `0.166.0-alpha.6`. Outras versões exigem qualificação do protocolo antes da instalação. Entire permanece independente.
+O instalador e a inspeção de trust usam a mesma lista de versões qualificadas. O status informa a versão encontrada no PATH da execução, se disponível. O schema gerado pelo executável ajuda a qualificar uma versão. O aceite também exige inspeção autorizada da thread ativa e prova de execução.
 
 Execute no checkout governado e vinculado ao Code Awareness:
 
 ```powershell
 node scripts/session-context/native-hooks.cjs status
 ```
+
+Rode `status` também em Worktrees criadas fora do aplicativo, depois de vinculá-las ao repositório ativo. `INSTALLATION_OWNERSHIP_UNPROVEN` indica que o snapshot não comprova a propriedade dos handlers. Em conflito, preserve a configuração e investigue sua origem antes de reparar.
 
 Somente após autorização explícita do operador para alterar os hooks desse checkout:
 

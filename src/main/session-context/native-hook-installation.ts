@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs'
+import { existsSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { boundedFile, nativeDigest, nativeGitIdentity, nativeHookEvents, prepareNativeSpool, readNativeBinding, type NativeHookBinding } from './native-hooks'
 import { assertProfilePath, assertRevision, revision, writeConfig, removeConfig, type FileRevision } from '../local-mcp-clients/safe-config-file'
@@ -31,7 +31,7 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
       binding.root !== identity.root || binding.directoryIdentity !== identity.directoryIdentity || binding.commonDirectory !== identity.commonDirectory || binding.spool !== join(directory, 'spool')) return result('INCOMPATIBLE', 'WORKTREE_STALE')
     if ([directory, dirname(configPath), binding.spool].some(path => realpathSync(path) !== resolve(path))) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE')
     if (!binding.enabled) return result('INCOMPATIBLE', 'NATIVE_CAPTURE_DISABLED')
-    if (!existsSync(join(directory, 'installation.json'))) return result('UNKNOWN', 'INSTALLATION_SNAPSHOT_MISSING')
+    if (!existsSync(join(directory, 'installation.json'))) return { ...result('UNKNOWN', 'INSTALLATION_SNAPSHOT_MISSING'), repairability: 'CONFLICT' }
     const snapshot: HookSnapshot = JSON.parse(boundedFile(join(directory, 'installation.json'), MAX_INSTALLATION_BYTES)), text = boundedFile(configPath, MAX_HOOK_CONFIG_BYTES)
     if (![1, 2].includes(snapshot.schema) || snapshot.path !== configPath) return { ...result('INCOMPATIBLE', 'INSTALLATION_SNAPSHOT_INVALID'), repairability: 'CONFLICT' }
     const config = JSON.parse(text), handlers: NativeInstallationInspection['handlers'] = []
@@ -47,7 +47,7 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
           const paths = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(hook.command)
           if (!paths || paths[3] !== bindingPath) continue
           if (group.matcher !== undefined || hook.async === true || hook.timeout !== 3) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', handlers.length)
-          if (paths.slice(1).some(path => resolve(path) !== path || !existsSync(path) || realpathSync(path) !== path)) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', handlers.length)
+          if (paths.slice(1).some(path => resolve(path) !== path || !existsSync(path) || !statSync(path).isFile() || realpathSync(path) !== path)) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', handlers.length)
           if (!validatedCommands.has(paths[2])) {
             const digestPath = /^native-hook-([a-f0-9]{64})\.cjs$/.exec(paths[2].split(/[\\/]/).at(-1)!)
             if (digestPath && nativeDigest(boundedFile(paths[2], MAX_INSTALLATION_BYTES)) !== digestPath[1]) return result('INCOMPATIBLE', 'HOOK_COMMAND_DIGEST_MISMATCH', handlers.length)
@@ -59,17 +59,24 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
           matches.push({ key: `${configPath}:${name}:${groupIndex}:${handlerIndex}`, event })
         }
       }
-      if (matches.length > 1) return result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS', handlers.length)
+      if (matches.length > 1) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS'), repairability: 'CONFLICT' }
       handlers.push(...matches)
     }
+    const state = readInstallation(root, target)
     const bindingDrift = snapshot.schema === 2 && !same(snapshot.binding, binding)
-    if (handlers.length !== 7 || snapshot.installedDigest !== nativeDigest(text) || bindingDrift) {
-      const state = readInstallation(root, target)
-      const reason = handlers.length !== 7 ? 'NATIVE_HANDLERS_MISSING' : bindingDrift ? 'HOOK_BINDING_DRIFT' : 'HOOK_CONFIG_DRIFT'
+    if (handlers.length !== 7 || state?.removed !== 7 || snapshot.installedDigest !== nativeDigest(text) || bindingDrift) {
+      const reason = handlers.length !== 7 || state?.removed !== 7 ? 'NATIVE_HANDLERS_MISSING' : bindingDrift ? 'HOOK_BINDING_DRIFT' : 'HOOK_CONFIG_DRIFT'
       return { ...result('INCOMPATIBLE', reason, handlers.length), repairability: state ? 'REPAIRABLE' : 'CONFLICT' }
     }
     return { state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED', digest: snapshot.installedDigest, installed: 7, expected: 7, handlers }
-  } catch (error) { return { ...result('UNKNOWN', 'INSTALLATION_UNVERIFIABLE'), repairability: error instanceof Error && /(?:UNSAFE|LINK|PROFILE|PATH)/.test(error.message) ? 'UNSAFE' : 'CONFLICT' } }
+  } catch (error) {
+    const code = error instanceof Error ? error.message : ''
+    if (code === 'WORKTREE_STALE') return result('INCOMPATIBLE', code)
+    if (code === 'INSTALLATION_OWNERSHIP_UNPROVEN' || code === 'INSTALLATION_SNAPSHOT_MISSING' || code === 'NATIVE_HANDLER_CONFLICT') {
+      return { ...result('UNKNOWN', code), repairability: 'CONFLICT' }
+    }
+    return { ...result('UNKNOWN', 'INSTALLATION_UNVERIFIABLE'), repairability: /(?:UNSAFE|LINK|PROFILE|PATH)/.test(code) ? 'UNSAFE' : 'CONFLICT' }
+  }
 }
 
 interface OwnedHook { type: 'command'; command: string; commandWindows?: string; timeout: 3 }

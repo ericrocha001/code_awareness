@@ -1,4 +1,4 @@
-import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
+import { summarizeHookList, isQualifiedCodexHookVersion } from '../../shared/native-hook-preflight.cjs'
 import { nativeDigest } from './native-hooks'
 import { inspectNativeInstallation } from './native-hook-installation'
 
@@ -7,6 +7,7 @@ export interface NativeClientScope {
   clientId: string; threadId: string; sessionId: string
   protocolVersion: string; clientVersion: string
   connectedAt: string
+  workspaceRoot: string; projectTrusted: boolean
 }
 export interface NativeHookClient {
   authorized: boolean
@@ -23,6 +24,21 @@ export interface NativeTrustObservation {
   expected?: number; matched?: number; trusted?: number; issues?: { eventType: string; reasonCode: string }[]
   execution?: NativeExecutionObservation
 }
+export interface NativeTrustSnapshot {
+  repositoryId: string; worktreeId: string; generation: string
+  observation: NativeTrustObservation
+}
+
+export function matchesNativeClient(client: NativeHookClient, observation: NativeTrustObservation, target: { repositoryId: string; worktreeId: string; generation: string }, root: string): boolean {
+  const scope = client.scope()
+  return !!scope && client.authorized && scope.projectTrusted === true && scope.workspaceRoot === root && scope.repositoryId === target.repositoryId && scope.worktreeId === target.worktreeId &&
+    scope.generation === target.generation && observation.connectedAt === scope.connectedAt &&
+    observation.clientVersion === scope.clientVersion && observation.protocolVersion === scope.protocolVersion &&
+    observation.clientId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex-client', scope.clientId])) &&
+    observation.threadId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex-thread', scope.threadId])) &&
+    observation.sessionId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex', scope.sessionId]))
+}
+
 export interface NativeExecutionObservation {
   state: 'OBSERVED' | 'FAILED'; reasonCode: string; freshness: string
   eventId: string; eventType: string; sessionId: string; observedAt: string
@@ -56,7 +72,10 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
   const scope = client.scope()
   if (!scope || scope.repositoryId !== target.repositoryId || scope.worktreeId !== target.worktreeId || scope.generation !== target.generation ||
     ![scope.clientId, scope.threadId, scope.sessionId].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(scope.clientVersion) || !Number.isFinite(Date.parse(scope.connectedAt)) || Date.parse(scope.connectedAt) > Date.now()) return unknownNativeTrust('SESSION_SCOPE_UNAVAILABLE')
+  if (scope.workspaceRoot !== root) return unknownNativeTrust('SESSION_SCOPE_UNAVAILABLE')
+  if (scope.projectTrusted !== true) return unknownNativeTrust('PROJECT_TRUST_UNAVAILABLE')
   if (scope.protocolVersion !== 'codex-app-server/v2') return { ...unknownNativeTrust('PROTOCOL_UNSUPPORTED'), state: 'UNSUPPORTED' }
+  if (!isQualifiedCodexHookVersion(scope.clientVersion)) return { ...unknownNativeTrust('VERSION_UNSUPPORTED'), state: 'UNSUPPORTED' }
   const installation = inspectNativeInstallation(root, target)
   if (installation.state !== 'CONFIGURED') return unknownNativeTrust(installation.reasonCode)
   const scopeDigest = nativeDigest(JSON.stringify(scope))

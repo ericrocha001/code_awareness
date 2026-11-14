@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
 import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp'
+import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
 
@@ -18,6 +19,7 @@ interface Request {
   deadline: number
   generation?: Generation
   validate?: () => Promise<void>
+  verifyNativeTrust?: () => boolean
   phase: string
 }
 export class SessionContextClient implements SessionContextPort {
@@ -32,7 +34,8 @@ export class SessionContextClient implements SessionContextPort {
     private readonly workerPath = join(__dirname, 'session-context-worker.js'), private readonly resolveTarget?: SessionTargetResolver,
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
-    private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort) {}
+    private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort,
+    private readonly nativeHookClient?: NativeHookClient) {}
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -118,7 +121,19 @@ export class SessionContextClient implements SessionContextPort {
         worker.postMessage({ validation: message.validate, code, ...(target ? { target } : {}) })
         return
       }
-      if (message.result) this.finish(message.id, message.result)
+      if (message.result) {
+        try {
+          if (request.verifyNativeTrust) {
+            await request.validate?.()
+            if (!this.pending.has(message.id) || !this.active()) return
+            if (Date.now() >= request.deadline) { this.expire(message.id); return }
+            if (!request.verifyNativeTrust()) { this.finish(message.id, failure('SESSION_SCOPE_CHANGED')); return }
+          }
+          this.finish(message.id, message.result)
+        } catch {
+          this.finish(message.id, failure('WORKTREE_STALE'))
+        }
+      }
     })
     worker.on('error', () => { void this.retire(generation, 'SESSION_CONTEXT_UNAVAILABLE') })
     worker.on('exit', () => { if (!generation.closing) void this.retire(generation, 'SESSION_CONTEXT_UNAVAILABLE', true) })
@@ -164,6 +179,7 @@ export class SessionContextClient implements SessionContextPort {
           let target
           let liveTargets
           let nativeTargets
+          let nativeTrust: NativeTrustSnapshot | undefined
           let indexOnlyNativeDelivery = false
           if (name === 'list_agent_sessions') {
             try {
@@ -186,6 +202,21 @@ export class SessionContextClient implements SessionContextPort {
             } else if (this.resolveTarget?.current) target = await this.resolveTarget.current()
             if (!target) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
             request.validate = target.validate
+            const client = this.nativeHookClient
+            if (query.inspectNativeTrust && client) {
+              request.phase = 'native-trust-inspection'
+              const root = target.root
+              const scope = { repositoryId: this.repositoryId, ...target.selection }
+              const assertCurrent = () => {
+                if (!this.pending.has(id) || !this.active() || Date.now() >= deadline) throw new Error('PROJECT_CONTEXT_CHANGED')
+              }
+              const observation = await inspectNativeTrust(root, scope, true, client, assertCurrent)
+              await target.validate()
+              assertCurrent()
+              nativeTrust = { ...scope, observation }
+              if (observation.clientId) request.verifyNativeTrust = () => matchesNativeClient(client, observation, scope, root) &&
+                !!observation.expiresAt && Date.parse(observation.expiresAt) > Date.now()
+            }
           }
           if (isLiveSessionTool(name)) {
             const q = parseLiveSessionQuery(name, args)
@@ -240,7 +271,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(nativeTrust ? { nativeTrust } : {}), ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }
