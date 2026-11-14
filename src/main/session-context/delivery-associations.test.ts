@@ -166,13 +166,24 @@ it('normalizes only semantically explicit nonconflicting Handoff fields', () => 
 })
 
 it('accepts opt-in only through authenticated callback and preserves all arguments in the real governed Git receipt', async () => {
-  const f = await fixture(), operations = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
-  writeFileSync(join(f.root, 'change.txt'), 'fixture'); await gitExec(f.root, ['add', 'change.txt'])
+  const f = await fixture()
+  const checkout = join(f.root, 'delivery-worktree')
+  await gitExec(f.root, ['worktree', 'add', '-b', 'fixture-delivery', checkout])
+  writeFileSync(join(checkout, 'change.txt'), 'fixture')
+  await gitExec(checkout, ['add', 'change.txt'])
+  const identity = { repositoryId: 'fixture', isActive: () => true }
+  const trees = new GitWorktreeRegistry(f.root, f.git, identity)
+  const tree = (await trees.discover()).worktrees.find(value => value.path === checkout)!
+  const inventory = new GitBranchInventory(f.root, f.git, trees, identity)
+  const observe = () => inventory.executionSnapshot(tree.worktreeId, tree.generation)
+  const linked = await f.service.bindExecutionBranch(f.request.executionId, f.plan.artifactId, observe)
+  const authority = authorizeArtifactAgent(f.authority.principal, 'fixture', () => true, tree.worktreeId)
+  const operations = new GitOperationsService(checkout, f.git, {} as any, identity)
   const state = await operations.getState()
-  const args = { operationId: 'mcp-commit', message: 'fixture', expectedHead: state.head, expectedIndexRevision: state.indexRevision, deliveryContext: f.request }
+  const args = { operationId: 'mcp-commit', message: 'fixture', expectedHead: state.head, expectedIndexRevision: state.indexRevision, deliveryContext: { ...f.request, bindingArtifactId: linked.artifactId, bindingRevision: linked.revision } }
   expect((await executeGitOperationsTool(operations, 'commit_git_changes', args)).isError).toBe(true)
   expect(await f.git.readOperationReceipt(f.root, args.operationId)).toBeNull()
-  const result = await executeGitOperationsTool(operations, 'commit_git_changes', args, request => f.service.prepareDeliveryContext(f.authority, request, f.observe))
+  const result = await executeGitOperationsTool(operations, 'commit_git_changes', args, request => f.service.prepareDeliveryContext(authority, request, observe))
   expect(result.isError, result.content[0].text).toBeFalsy()
   const receipt = (await f.git.readOperationReceipt(f.root, args.operationId))!.receipt
   expect(receipt.deliveryVerified).toBe(true)
@@ -180,30 +191,61 @@ it('accepts opt-in only through authenticated callback and preserves all argumen
   expect(receipt.argumentFingerprint).toBe(gitReceiptFingerprint('commit_git_changes', fingerprintArgs))
   expect((await operations.deliveryProjectionPage()).observations).toHaveLength(1)
 
-  const snapshot = await f.observe(), spool = join(f.root, '.code-awareness/native-hooks/spool')
+  const snapshot = await observe(), spool = join(checkout, '.code-awareness/native-hooks/spool')
   prepareNativeSpool(spool)
   const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'fixture', worktreeId: snapshot.worktreeId,
-    generation: snapshot.worktreeGeneration, ...nativeGitIdentity(f.root), spool, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes' }
+    generation: snapshot.worktreeGeneration, ...nativeGitIdentity(checkout), spool, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes' }
   const path = sessionStorePath(join(f.root, '.git'), 'fixture')
   let sessions = new SessionStore(path, 'fixture')
   try {
     const session = 'governed-delivery-fixture', sessionId = nativeDigest(JSON.stringify(['fixture', 'codex', session]))
     const stamp = startCaptureFixture(sessions.registry, binding, sessionId)
-    const payload = { session_id: session, cwd: f.root, tool_name: binding.gitCommitTool, tool_use_id: 'governed-call', tool_input: args }
+    const payload = { session_id: session, cwd: checkout, tool_name: binding.gitCommitTool, tool_use_id: 'governed-call', tool_input: args }
     const pre = stamp(normalizeNativeHook({ ...payload, hook_event_name: 'PreToolUse' }, binding))
     const post = stamp(normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response: result }, binding))
     expect(pre.git?.fingerprint).toBe(receipt.argumentFingerprint)
-    expect(post.git).toMatchObject({ sha: await f.git.getCurrentCommitHash(f.root), replayed: false, fingerprint: receipt.argumentFingerprint })
+    expect(post.git).toMatchObject({ sha: await f.git.getCurrentCommitHash(checkout), replayed: false, fingerprint: receipt.argumentFingerprint })
     const invocationId = pre.invocationId!, sha = post.git!.sha!
     sessions.registry.apply(nativeObservationBatch(pre), undefined)
     expect(await correlateNativeGit(sessions.registry, binding, invocationId, f.git, () => {})).toBe('INVOCATION_INCOMPLETE')
     sessions.registry.apply(nativeObservationBatch(post), undefined)
     expect(await correlateNativeGit(sessions.registry, binding, invocationId, f.git, () => {})).toBe('VERIFIED')
-    sessions.close(); sessions = new SessionStore(path, 'fixture')
-    for (const selector of [{ type: 'INVOCATION', id: invocationId }, { type: 'COMMIT', id: sha }]) {
+    const pr = { kind: 'PR' as const, id: '89' }
+    const membership = { repositoryId: 'fixture', revision: sha, status: 'COMPLETE', edges: [] }
+    sessions.registry.applyAll([
+      { ...membership, source: 'GITHUB:PR:89:1', edges: [
+        { from: { kind: 'COMMIT', id: sha }, to: pr, relation: 'member-of', evidenceKind: 'GITHUB_COMMIT_LIST',
+          evidenceRef: 'PR:89:' + sha + ':1', digest: nativeDigest(sha), freshness: 'OBSERVED_SNAPSHOT' }
+      ] },
+      { ...membership, source: 'GITHUB:PR:89' }
+    ], () => {})
+    startCaptureFixture(sessions.registry, { ...binding, worktreeId: 'b'.repeat(64) }, 'b'.repeat(64))
+    const provider = { refresh: vi.fn() }
+    const list = async (filter: object) => {
+      const result = await executeSessionTool(sessions, provider, 'list_agent_sessions', { source: 'NATIVE_HOOK', ...filter }, () => {})
+      expect(result.isError, result.content[0].text).toBeFalsy()
+      return JSON.parse(result.content[0].text)
+    }
+    for (const restart of [false, true]) {
+      if (restart) {
+        sessions.close()
+        await gitExec(f.root, ['worktree', 'remove', '--force', checkout])
+        sessions = new SessionStore(path, 'fixture')
+      }
+      for (const selector of [{ commitSha: sha }, { pullRequest: 89 }]) {
+        const result = await list(selector)
+        expect(result.sessions.map((session: { providerSessionId: string }) => session.providerSessionId)).toEqual([sessionId])
+        expect(result.sessions[0].evidence.native).toMatchObject({ state: 'VERIFIED_CAUSAL', commitSha: sha })
+        if ('pullRequest' in selector) expect(result.sessions[0].evidence.membership).toMatchObject({ kind: 'GITHUB_COMMIT_LIST', state: 'VERIFIED' })
+        expect(JSON.stringify(result)).not.toContain(checkout)
+      }
+      expect((await list({ pullRequest: 90 })).reason).toBe('NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED')
+    }
+    expect(provider.refresh).not.toHaveBeenCalled()
+    for (const selector of [{ type: 'SESSION', provider: 'codex-native', id: sessionId }, { type: 'COMMIT', id: sha }]) {
       const graph = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', { selector, mode: 'RELATION_DETAIL', depth: 1 }, () => {})
       expect(graph.isError, graph.content[0].text).toBeFalsy()
-      expect(JSON.parse(graph.content[0].text).edges).toContainEqual(expect.objectContaining({ evidenceKind: 'NATIVE_GIT_CAUSAL', confidenceClass: 'VERIFIED_CAUSAL', relation: 'committed' }))
+      expect(JSON.parse(graph.content[0].text).edges).toContainEqual(expect.objectContaining({ evidenceKind: 'NATIVE_GIT_CAUSAL', confidenceClass: 'VERIFIED_CAUSAL', relation: selector.type === 'SESSION' ? 'invoked' : 'committed' }))
     }
     const db = new Database(path, { readonly: true })
     try {

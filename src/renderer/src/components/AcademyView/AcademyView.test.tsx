@@ -1156,3 +1156,94 @@ it('renders Plugin ChatGPT download, provenance, undo confirmation, and Download
   fireEvent.change(select, { target: { value: 'AUTOMATIC' } })
   await waitFor(() => expect(window.codeAwareness.setAcademyImportConfirmationPreference).toHaveBeenCalledWith('AUTOMATIC'))
 })
+
+function mockPluginPublicationWithRelease() {
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({
+    profile: {
+      name: 'academy-skills',
+      displayName: 'Academy Skills',
+      description: 'Skills',
+      author: {},
+      openAiInterface: {},
+      logoPath: null,
+      publishedVersion: '0.1.4',
+      deletionSemantics: 'UNKNOWN',
+      deletionSemanticsEvidence: null,
+      createdAt: detail.createdAt,
+      updatedAt: detail.updatedAt
+    },
+    latestPrepared: openAiRelease,
+    latestUploaded: null,
+    selectedRelease: openAiRelease,
+    publicSkillCount: 1,
+    artifactAvailable: true,
+    coverage: { catalog: 1, eligible: 1, includedInLastZip: 1, awaitingZip: 0, notApplicable: 0, excluded: [], preference: defaultPreference },
+    canonicalSnapshotHash: 'snapshot',
+    drifted: false,
+    currentPackageRevision: null,
+    importConfirmationPreference: { mode: 'MANUAL', updatedAt: detail.updatedAt },
+    hostedStatus: 'CURRENT'
+  })
+  vi.mocked(window.codeAwareness.listAcademyOpenAiReleases).mockResolvedValue([openAiRelease])
+}
+
+it('shows real pending feedback on the Plugin download CTA, blocks duplicate work and recovers after resolution', async () => {
+  mockPluginPublicationWithRelease()
+  let finish!: (value: typeof openAiRelease) => void
+  vi.mocked(window.codeAwareness.downloadAcademyOpenAiPackage).mockReturnValue(new Promise((resolve) => { finish = resolve }))
+  render(<AcademyView />)
+  const region = await screen.findByRole('region', { name: 'Plugin ChatGPT' })
+  const button = within(region).getByRole('button', { name: 'Baixar ZIP' })
+  expect(button.getAttribute('aria-busy')).toBeNull()
+
+  fireEvent.click(button)
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBe('true'))
+  expect(button.getAttribute('aria-disabled')).toBe('true')
+  expect(button.hasAttribute('disabled')).toBe(false)
+  expect(within(button).getByRole('status').textContent).toBe('Baixando ZIP')
+  fireEvent.click(button)
+  fireEvent.click(button)
+  expect(window.codeAwareness.downloadAcademyOpenAiPackage).toHaveBeenCalledTimes(1)
+
+  finish(openAiRelease)
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBeNull())
+  expect(within(button).queryByRole('status')).toBeNull()
+  fireEvent.click(button)
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyOpenAiPackage).toHaveBeenCalledTimes(2))
+})
+
+it('ends Plugin download pending state on rejection with a recoverable error and a working retry', async () => {
+  mockPluginPublicationWithRelease()
+  vi.mocked(window.codeAwareness.downloadAcademyOpenAiPackage)
+    .mockRejectedValueOnce(new Error('Disco indisponível'))
+    .mockResolvedValue(openAiRelease)
+  render(<AcademyView />)
+  const region = await screen.findByRole('region', { name: 'Plugin ChatGPT' })
+  const button = within(region).getByRole('button', { name: 'Baixar ZIP' })
+
+  fireEvent.click(button)
+  await waitFor(() => expect(within(region).getByText('Disco indisponível')).toBeTruthy())
+  expect(button.getAttribute('aria-busy')).toBeNull()
+  expect(button.hasAttribute('disabled')).toBe(false)
+
+  fireEvent.click(button)
+  await waitFor(() => expect(window.codeAwareness.downloadAcademyOpenAiPackage).toHaveBeenCalledTimes(2))
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBeNull())
+})
+
+it('shows pending feedback on the Gemini download CTA and does not duplicate the export', async () => {
+  let finish!: (value: Awaited<ReturnType<typeof window.codeAwareness.downloadAcademyGeminiExport>>) => void
+  vi.mocked(window.codeAwareness.downloadAcademyGeminiExport).mockReturnValue(new Promise((resolve) => { finish = resolve }))
+  render(<AcademyView />)
+  await openGeminiSurface()
+  const region = await screen.findByRole('region', { name: 'Exportação Gemini' })
+  const button = within(region).getAllByRole('button', { name: 'Baixar pacote' })[0]
+
+  fireEvent.click(button)
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBe('true'))
+  fireEvent.click(button)
+  expect(window.codeAwareness.downloadAcademyGeminiExport).toHaveBeenCalledTimes(1)
+
+  finish(await window.codeAwareness.getAcademyGeminiExportState())
+  await waitFor(() => expect(button.getAttribute('aria-busy')).toBeNull())
+})

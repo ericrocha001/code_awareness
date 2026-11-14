@@ -110,7 +110,7 @@ import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
 import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
 import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
-import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
+import { confirmPreviewProfile, requestAcceptanceObservation } from './work-orchestration/runtime-preview/authorization'
 import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
 import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
 import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
@@ -492,7 +492,8 @@ app.whenReady().then(async () => {
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
       const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
       const branchProfiles = new CodeAwarenessProfileResolver(previewProfiles, { root: app.getAppPath(), executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules })
-      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles,
+        async prompt => mainWindow && !mainWindow.isDestroyed() ? requestAcceptanceObservation(mainWindow, prompt) : 'CANCELLED')
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {

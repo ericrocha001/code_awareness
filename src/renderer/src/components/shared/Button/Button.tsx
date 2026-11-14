@@ -11,6 +11,8 @@ interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   icon?: React.ReactNode
   chevron?: boolean
   open?: boolean
+  busy?: boolean
+  busyLabel?: string
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
@@ -24,6 +26,10 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       icon,
       chevron = false,
       open = false,
+      busy = false,
+      busyLabel,
+      onClick,
+      onKeyDown,
       children,
       type = 'button',
       className = '',
@@ -37,16 +43,40 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
       : `app-${variant}-btn`
     const combinedClass = `${baseClass}${className ? ` ${className}` : ''}`
 
+    const handleClick: React.MouseEventHandler<HTMLButtonElement> = event => {
+      if (busy) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      onClick?.(event)
+    }
+
+    const handleKeyDown: React.KeyboardEventHandler<HTMLButtonElement> = event => {
+      if (busy && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      onKeyDown?.(event)
+    }
+
     return (
       <button
         ref={ref}
         type={type}
         className={combinedClass}
         aria-pressed={selected}
+        aria-busy={busy || undefined}
+        aria-disabled={busy || undefined}
+        data-busy={busy || undefined}
         {...rest}
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
       >
-        {icon && <span className="btn-icon" aria-hidden="true">{icon}</span>}
+        {busy ? <span className="btn-spinner" aria-hidden="true" /> : icon && <span className="btn-icon" aria-hidden="true">{icon}</span>}
         {children}
+        {busy && busyLabel && <span className="btn-busy-status" role="status">{busyLabel}</span>}
         {chevron && (
           <ChevronDown
             size={14}

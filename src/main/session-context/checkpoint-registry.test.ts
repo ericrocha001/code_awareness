@@ -167,6 +167,11 @@ it('F2 serves depth one through the Channel and worker without target fanout and
     const result = await adapter.callTool('discover_execution_context', { selector: { type: 'PR', id: '90' }, depth: 1 })
     expect(result.isError).toBeFalsy()
     expect(JSON.parse((result.content[0] as { text: string }).text).discovery.depth).toBe(1)
+    const native = await adapter.callTool('list_agent_sessions', { source: 'NATIVE_HOOK', pullRequest: 90 })
+    expect(native.isError).toBeFalsy()
+    expect(JSON.parse((native.content[0] as { text: string }).text)).toMatchObject({
+      sessions: [], coverage: 'PARTIAL', reason: 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED'
+    })
     expect(resolve.discover).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled()
     const blocked = client.reconcileProjection()
     await waiting
@@ -213,6 +218,57 @@ it('requires matching native invocation, fresh Git receipt and exact object befo
   expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('CAPTURE_PARTIAL')
   expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state !== 'VERIFIED')).toBe(true)
 })
+it('pages verified native delivery identities, revokes stale cursors and excludes documentary or stale links', async () => {
+  const f = fixture(), store = f.store(), registry = store.registry
+  const pr = { kind: 'PR' as const, id: '101' }
+  const sha = 'a'.repeat(40), head = 'b'.repeat(40)
+  const target = { kind: 'COMMIT' as const, id: sha }
+  const prefix = 'GITHUB:PR:101'
+  const membership = { from: target, to: pr, relation: 'member-of', evidenceKind: 'GITHUB_COMMIT_LIST',
+    evidenceRef: 'PR:101:' + head + ':1', digest: digest(sha), freshness: 'OBSERVED_SNAPSHOT' }
+  const batch = (source: string, revision: string, status: string, edges: RegistryBatch['edges']) => ({ repositoryId: 'repo', source, revision, status, edges })
+  registry.applyAll([
+    batch(prefix + ':1', head, 'COMPLETE', [membership]), batch(prefix, head, 'PARTIAL', []),
+    batch('NATIVE_HOOK', 'coverage', 'PARTIAL', []),
+    batch('ENTIRE_REFS', 'coverage', 'UNAVAILABLE', [])
+  ], () => {})
+  for (const char of ['1', '2', '3']) {
+    const invocationId = char.repeat(64), revision = digest(char)
+    const native = { evidenceKind: 'NATIVE_GIT_CAUSAL', evidenceRef: 'c'.repeat(40), digest: revision, freshness: 'OBSERVED_SNAPSHOT' }
+    const invocation = { kind: 'EXECUTION' as const, id: 'native-invocation:' + invocationId }
+    const session = { kind: 'SESSION' as const, id: 'codex-native:' + invocationId }
+    registry.apply(batch('NATIVE_GIT:' + invocationId, revision, 'COMPLETE', [
+      { from: session, to: invocation, relation: 'invoked', ...native },
+      { from: invocation, to: target, relation: 'committed', ...native, ...(char === '3' ? { evidenceKind: 'HANDOFF_DECLARED' } : {}) }
+    ]), undefined)
+  }
+  const provider = { refresh: vi.fn() }
+  const list = async (args: object, accountHash?: string) => {
+    const response = await executeSessionTool(f.store(), provider, 'list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1, ...args },
+      () => {}, undefined, [], undefined, undefined, undefined, undefined, accountHash)
+    return JSON.parse(response.content[0].text)
+  }
+  const first = await list({ pullRequest: 101 }, 'account-A')
+  expect(first).toMatchObject({ coverage: 'PARTIAL', coverageReasons: ['ENTIRE_REFS_UNAVAILABLE', 'GITHUB_PR_COVERAGE_PARTIAL', 'NATIVE_HOOK_PARTIAL'],
+    sessions: [{ providerSessionId: '1'.repeat(64) }], nextCursor: expect.any(String) })
+  expect(await list({ pullRequest: 101, commitSha: sha })).toEqual({ code: 'INVALID_ARGUMENT' })
+  expect(await list({ pullRequest: 101, cursor: first.nextCursor }, 'account-B')).toEqual({ code: 'CURSOR_STALE' })
+  expect(await list({ commitSha: sha, cursor: first.nextCursor }, 'account-A')).toEqual({ code: 'CURSOR_STALE' })
+  f.restart()
+  const second = await list({ pullRequest: 101, cursor: first.nextCursor }, 'account-A')
+  expect(second.sessions).toMatchObject([{ providerSessionId: '2'.repeat(64) }])
+  expect(second.nextCursor).toBeUndefined()
+  f.store().registry.apply(batch(prefix, 'd'.repeat(40), 'COMPLETE', []), head)
+  expect(await list({ pullRequest: 101, cursor: first.nextCursor }, 'account-A')).toEqual({ code: 'CURSOR_STALE' })
+  expect(await list({ pullRequest: 101 })).toMatchObject({ coverage: 'PARTIAL', reason: 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED', sessions: [] })
+  expect((await list({ commitSha: sha })).sessions).toHaveLength(1)
+  const native = 'NATIVE_GIT:' + '1'.repeat(64)
+  f.store().registry.apply(batch(native, digest('conflict'), 'CONFLICT', []), digest('1'))
+  expect((await list({ commitSha: sha })).sessions).toMatchObject([{ providerSessionId: '2'.repeat(64) }])
+  expect(() => f.store().registry.apply({ ...batch(prefix, head, 'COMPLETE', []), repositoryId: 'foreign' }, undefined)).toThrow('REPOSITORY_MISMATCH')
+  expect(provider.refresh).not.toHaveBeenCalled()
+})
+
 const runner: CommandRunner = async (_exe, args) => {
   const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'codex', session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'antigravity', session_id: 'session-two' }) : ''
   return { text, code: 0, limited: false }

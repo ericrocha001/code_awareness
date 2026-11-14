@@ -41,6 +41,16 @@ describe('execution closure assessment', () => {
     expect(result.evidence.contractCoverage).toBe('NOT_DEMONSTRATED')
     expect(result.nextActions.join(' ')).toContain('Human review')
   })
+  it.each(['available', 'unavailable'])('never upgrades a Handoff with only declared or local-receipt evidence to a registered proof (Ledger %s)', async availability => {
+    const f = fixture()
+    if (availability === 'unavailable') f.ledger.listProofs.mockRejectedValue(new Error('APP_UNAVAILABLE'))
+    const result = await f.run()
+    expect(result.evidence.proofs).toEqual([])
+    expect(result.evidence.contractCoverage).toBe('NOT_DEMONSTRATED')
+    expect(result.evidence.declarations).toEqual([{ artifactId: 'handoff', revision: 1, evidence: 'DECLARED', scope: 'HANDOFF_CONTENT_NOT_INDEPENDENTLY_VERIFIED' }])
+    expect(result.findings.map(f => f.code)).toContain(availability === 'available' ? 'PROOFS_NOT_REGISTERED' : 'LEDGER_UNAVAILABLE')
+    expect(JSON.stringify(result)).not.toContain('VERIFIED_CURRENT')
+  })
   it.each(['CURRENT', 'SOURCE_STALE', 'RUNTIME_HISTORICAL', 'UNVERIFIABLE'])('preserves %s proof without equating freshness with failure', async freshness => {
     const f = fixture(); f.ledger.listProofs.mockImplementation(async filter => filter.requirementId === 'plan' ? [proof(freshness)] : [])
     const result = await f.run()
