@@ -1,12 +1,14 @@
 import type { OrchestrationContext } from './work-orchestration-types'
 
-export type WorkBoardColumn = 'QUEUED' | 'ACTIVE' | 'COMPLETED'
+export type WorkBoardSelection =
+  | { perspective: 'WORK'; column: 'PENDING' | 'COMPLETED' }
+  | { perspective: 'IDEAS'; column: 'NOT_IMPLEMENTED' | 'IMPLEMENTED' }
+export type WorkBoardColumn = WorkBoardSelection['column']
 export type WorkBoardCoverage = 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE'
 export interface WorkBoardContext extends OrchestrationContext { repositoryId: string }
 
-export interface WorkBoardRequest {
+export type WorkBoardRequest = WorkBoardSelection & {
   context: WorkBoardContext
-  column: WorkBoardColumn
   cursor?: string
   inspect?: { artifactId: string; revision: number }
 }
@@ -36,6 +38,7 @@ export interface WorkBoardCard {
 }
 
 export interface WorkBoardPage {
+  perspective: WorkBoardSelection['perspective']
   column: WorkBoardColumn
   documentaryRevision: number
   queriedAt: string
@@ -55,7 +58,6 @@ export interface WorkBoardBranch {
 export interface WorkBoardInspection {
   artifactId: string
   revision: number
-  column: WorkBoardColumn
   branch?: WorkBoardBranch
   bindingArtifactId?: string
   activity: {

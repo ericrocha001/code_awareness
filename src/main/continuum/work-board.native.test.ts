@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { ContinuumService } from './continuum-service'
 import { fixture, markdown } from './continuum-test-fixtures'
-import { readWorkBoard } from '../work-orchestration/work-board'
+import { readWorkBoard, workBoardRequest } from '../work-orchestration/work-board'
 
 const context = { repositoryId: 'repo', projectId: 'project', revision: 1 }
 const resources: (() => void)[] = []
@@ -29,19 +29,49 @@ it('keeps only eligible work and collapses a direct same-status pair without mas
   add('plan-independent', 'EXECUTABLE_PLAN', 'PENDING', ['item-open'], 'related-to')
   add('cancelled', 'WORK_ITEM', 'CANCELLED')
   add('handoff', 'IMPLEMENTATION_HANDOFF')
-  const queued = readWorkBoard(service, { context, column: 'QUEUED' })
+  const queued = readWorkBoard(service, { context, perspective: 'WORK' as const, column: 'PENDING' })
   expect(queued.cards.map(card => card.artifact.artifactId).sort()).toEqual([
     'item-open', 'item-shared', 'plan-independent', 'plan-one', 'plan-paired', 'plan-two'
   ])
   expect(queued.cards.find(card => card.artifact.artifactId === 'plan-paired')?.workItem?.artifactId).toBe('item-paired')
   expect(queued.cards.filter(card => card.ambiguous).map(card => card.artifact.artifactId).sort()).toEqual(['item-shared', 'plan-one', 'plan-two'])
-  expect(readWorkBoard(service, { context, column: 'COMPLETED' }).cards.map(card => card.artifact.artifactId)).toEqual(['plan-complete'])
+  expect(readWorkBoard(service, { context, perspective: 'WORK', column: 'COMPLETED' }).cards.map(card => card.artifact.artifactId)).toEqual(['plan-complete'])
+})
+
+it('queries only Feature Ideas by existence status and preserves cross-perspective relations and cursors', () => {
+  const { service, add } = setup()
+  add('idea-open', 'FEATURE_IDEA', 'NOT_IMPLEMENTED')
+  add('idea-done', 'FEATURE_IDEA', 'IMPLEMENTED')
+  add('idea-legacy', 'FEATURE_IDEA', 'PENDING')
+  add('work', 'EXECUTABLE_PLAN', 'PENDING', ['idea-open'])
+  for (const kind of ['IMPLEMENTATION_HANDOFF', 'VALIDATION_PROOF', 'ARCHITECTURAL_DECISION', 'CAPABILITY_OPPORTUNITY']) {
+    add(kind, kind, 'NOT_IMPLEMENTED')
+  }
+  for (let n = 0; n < 22; n++) add('idea-' + n, 'FEATURE_IDEA', 'NOT_IMPLEMENTED')
+  const request = { context, perspective: 'IDEAS' as const, column: 'NOT_IMPLEMENTED' as const }
+  const first = readWorkBoard(service, request)
+  const last = readWorkBoard(service, { ...request, cursor: first.nextCursor })
+  const cards = [...first.cards, ...last.cards]
+  expect(first.cards).toHaveLength(20)
+  expect(cards).toHaveLength(23)
+  expect(new Set(cards.map(card => card.artifact.artifactId)).size).toBe(23)
+  expect(cards.every(card => card.artifact.kind === 'FEATURE_IDEA' && card.artifact.status === 'NOT_IMPLEMENTED')).toBe(true)
+  expect(cards.find(card => card.artifact.artifactId === 'idea-open')?.relations).toEqual([
+    expect.objectContaining({ direction: 'INBOUND', kind: 'derived-from', artifact: expect.objectContaining({ artifactId: 'work', status: 'PENDING' }) })
+  ])
+  expect(readWorkBoard(service, { ...request, column: 'IMPLEMENTED' }).cards.map(card => card.artifact.artifactId)).toEqual(['idea-done'])
+  expect(readWorkBoard(service, { context, perspective: 'WORK', column: 'PENDING' }).cards.map(card => card.artifact.artifactId)).toEqual(['work'])
+  expect(() => readWorkBoard(service, { ...request, column: 'IMPLEMENTED', cursor: first.nextCursor })).toThrow('INVALID_ARGUMENT')
+  expect(() => readWorkBoard(service, { context, perspective: 'WORK', column: 'PENDING', cursor: first.nextCursor })).toThrow('INVALID_ARGUMENT')
+  expect(() => readWorkBoard(service, { ...request, context: { ...context, repositoryId: 'other' }, cursor: first.nextCursor })).toThrow('PROJECT_CONTEXT_CHANGED')
+  for (const input of [{ ...request, column: 'PENDING' }, { ...request, perspective: 'WORK', column: 'ACTIVE' },
+    { ...request, inspect: { artifactId: 'idea-open', revision: 1 } }]) expect(workBoardRequest.safeParse(input).success).toBe(false)
 })
 
 it('paginates mixed kinds without repetition and rejects stale or out-of-scope cursors', () => {
   const { service, add } = setup()
   for (let n = 0; n < 44; n++) add('work-' + n, n % 2 ? 'WORK_ITEM' : 'EXECUTABLE_PLAN')
-  const request = { context, column: 'QUEUED' as const }
+  const request = { context, perspective: 'WORK' as const, column: 'PENDING' as const }
   const first = readWorkBoard(service, request)
   const second = readWorkBoard(service, { ...request, cursor: first.nextCursor })
   const last = readWorkBoard(service, { ...request, cursor: second.nextCursor })
