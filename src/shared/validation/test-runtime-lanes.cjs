@@ -55,6 +55,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/validation-ledger/validation-ledger.test.ts',
   'src/main/continuum/artifact-store.test.ts',
   'src/main/continuum/artifact-graph.test.ts',
+  'src/main/continuum/work-board.native.test.ts',
   'src/main/continuum/artifact-suggestions.test.ts',
   'src/main/continuum/visual-artifact.test.ts',
   'src/main/continuum/visual-mcp.test.ts',

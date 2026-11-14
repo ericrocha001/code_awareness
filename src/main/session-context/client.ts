@@ -9,6 +9,8 @@ import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp
 import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
+import { readExecutionSessionAssociations, sessionStorePath } from './store'
+import type { SessionAssociation } from './associations'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -39,6 +41,10 @@ export class SessionContextClient implements SessionContextPort {
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
+  }
+  readWorkAssociations(scope: Pick<SessionAssociation, 'artifactId' | 'executionId' | 'worktreeId' | 'generation'>) {
+    if (!this.active()) throw new Error('PROJECT_CONTEXT_CHANGED')
+    return readExecutionSessionAssociations(sessionStorePath(this.storageBase, this.repositoryId), { ...scope, repositoryId: this.repositoryId })
   }
   call(name: SessionToolName, args: unknown): Promise<McpToolResult> {
     if (!this.active()) return Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))

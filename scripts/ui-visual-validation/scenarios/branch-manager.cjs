@@ -95,11 +95,11 @@ exports.run = async ctx => {
   }
   const refresh = async () => {
     const before = uiInventoryReads
-    await clickText('Atualizar')
+    await clickText('Atualizar', '.bm-toolbar')
     const deadline = Date.now() + 5000
     while (uiInventoryReads === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
     ctx.check('Refresh reaches the real controller', uiInventoryReads > before)
-    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
+    await wait(() => !document.querySelector('.bm-toolbar button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
   }
   const preload = path.join(ctx.temporary, 'preload.cjs')
   buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
@@ -110,8 +110,9 @@ exports.run = async ctx => {
   fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}.fixture-nav{height:32px;display:flex;gap:20px;padding:4px 24px;box-sizing:border-box;font:12px system-ui}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
   try {
     await ctx.window.loadFile(page, { query: { repositoryPath: root } }); await ctx.viewport(1440, 900)
+    await clickText('Branches & Worktrees', '.wb-views')
     await wait(() => document.querySelectorAll('.bm-card').length > 0 && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
-    ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('branches') && document.body.textContent.includes('Worktrees sem branch confirmada')))
+    ctx.check('Renderer shows branch inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('branches') && document.body.textContent.includes('Worktrees sem branch confirmada')))
     ctx.check('No Continuum reads while mounting inventory', continuumReads === 0)
     await select('main')
     ctx.check('Main receives extinct origins with merge dates and rejected PR without delivery', await ctx.evaluate(() => {
@@ -130,7 +131,7 @@ exports.run = async ctx => {
     await ctx.capture('execution-documents-dark')
     await clickText('Abrir no Continuum', '.bm-executions'); await wait(() => !!document.querySelector('.continuum-markdown'))
     ctx.check('Artifact opens existing Continuum inspector', await ctx.evaluate(() => document.querySelector('.continuum-markdown').textContent.length > 0))
-    await clickText('Voltar ao gestor', '.fixture-nav'); await wait(() => !document.querySelector('.wo-header button').disabled)
+    await clickText('Voltar ao gestor', '.fixture-nav'); await wait(() => !document.querySelector('.bm-toolbar button').disabled)
     await select('topic')
     git(path.join(ctx.temporary, 'topic'), ['commit', '--allow-empty', '-m', 'Normal HEAD advance'])
     const advancedReplay = await cli(args)
@@ -155,7 +156,7 @@ exports.run = async ctx => {
     const receipt = await ctx.evaluate(() => document.querySelector('.bm-receipt').textContent)
     const recovery = /refs\/code-awareness\/recovery\/[a-f0-9-]+/.exec(receipt)[0]
     ctx.check('Recovery ref retains abandoned SHA and exact bytes', git(root, ['rev-parse', recovery]) === abandonedHead && git(root, ['show', `${recovery}:exclusive.txt`]) === 'recover me')
-    await wait(() => !document.querySelector('.wo-header button').disabled); await select('topic'); await clickText('Preparar descarte da branch…', '.bm-detail'); await wait(() => !!document.querySelector('[role=dialog]'))
+    await wait(() => !document.querySelector('.bm-toolbar button').disabled); await select('topic'); await clickText('Preparar descarte da branch…', '.bm-detail'); await wait(() => !!document.querySelector('[role=dialog]'))
     ctx.check('Occupied branch cannot be confirmed', await ctx.evaluate(() => document.querySelector('[role=dialog]').textContent.includes('Branch em checkout') && !document.querySelector('[role=dialog] input')))
     await clickText('Cancelar', '[role=dialog]')
     phase('removal')
@@ -169,7 +170,7 @@ exports.run = async ctx => {
     const removalError = await ctx.evaluate(() => document.querySelector('[role=dialog] [role=alert]')?.textContent)
     if (removalError) throw new Error('FIXTURE_REMOVAL_BLOCKED: ' + removalError)
     ctx.check('Separate removal handshake preserves branch', releaseConfirmations === 1 && git(root, ['rev-parse', 'refs/heads/topic']) === topicBefore && !fs.existsSync(path.join(ctx.temporary, 'topic')))
-    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
+    await wait(() => !document.querySelector('.bm-toolbar button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
     await select('topic'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     ctx.check('Association remains after authorized fixture Worktree removal', await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('checkout histórico')))
     if (process.env.CA_BRANCH_MANAGER_FOCUSED === '1') { await ctx.capture('details-functional-regression'); await ctx.overflow(); return }

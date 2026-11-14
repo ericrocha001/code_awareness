@@ -20,6 +20,7 @@ import type { GitAtlasCheckoutObservation, GitAtlasRequest, GitAtlasPage, GitAtl
 import type { AtlasCatalogRequest, AtlasCatalogState, AtlasCatalogChange } from '../shared/types/git-atlas-catalog-types'
 import type { GitAtlasCoreRequest, GitAtlasCoreEvidence, GitAtlasPrRequest, GitAtlasPrEvidence } from '../shared/types/git-atlas-evidence-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
+import type { WorkBoardRequest, WorkBoardResult } from '../shared/types/work-board-types'
 import type { OrchestrationAttentionChange } from '../shared/types/work-orchestration-attention-types'
 import type { BranchManagerRequest, BranchManagerResult } from '../shared/types/branch-manager-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../shared/types/git-commit-correlation-types'
@@ -51,6 +52,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   } satisfies LocalMcpClientApi,
   getBranchOrchestration: (request: BranchManagerRequest): Promise<BranchManagerResult> => ipcRenderer.invoke('work-orchestration:branches', request),
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
+  getWorkBoard: (request: WorkBoardRequest): Promise<WorkBoardResult> => ipcRenderer.invoke('work-orchestration:board', request),
   onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, change: OrchestrationAttentionChange) => callback(change)
     ipcRenderer.on('work-orchestration:changed', listener)

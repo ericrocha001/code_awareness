@@ -54,6 +54,12 @@ export class ArtifactStore {
   associatePublication(value: PublicationAssociation) { return this.publicationAssociations.record(value) }
   invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.publicationAssociations.invalidate(invocationId, state) }
   publicationProvenance(artifactId: string, revision: number) { return this.publicationAssociations.projection(artifactId, revision) }
+  indexedArtifact(artifactId: string) {
+    const row = this.db.prepare('SELECT revision, metadata_json, provenance_json, content_hash FROM artifacts WHERE artifact_id=?').get(artifactId) as
+      { revision: number; metadata_json: string; provenance_json: string; content_hash: string } | undefined
+    return row ? { revision: row.revision, metadata: JSON.parse(row.metadata_json) as Artifact['metadata'],
+      provenance: JSON.parse(row.provenance_json) as Artifact['provenance'], contentHash: row.content_hash } : null
+  }
   readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
   createPublished(input: CreateArtifactInput, requestDigest: string) {
     return this.db.transaction(() => {
@@ -461,7 +467,7 @@ export class ArtifactStore {
     return artifact
   }
 
-  list(filter: ListArtifactsFilter = {}): ArtifactPage {
+  list(filter: ListArtifactsFilter = {}, options: { kinds?: readonly string[] } = {}): ArtifactPage {
     if (filter.sortBy !== undefined && filter.sortBy !== 'createdAt' && filter.sortBy !== 'updatedAt') throw new Error('INVALID_ARGUMENT: invalid sortBy')
     if (filter.includeTags !== undefined && typeof filter.includeTags !== 'boolean') throw new Error('INVALID_ARGUMENT: includeTags must be boolean')
     const timestampKey = filter.sortBy === 'createdAt' ? 'createdAt' : 'updatedAt'
@@ -474,6 +480,10 @@ export class ArtifactStore {
     if (filter.tag !== undefined) validateTagSlug(filter.tag)
     const clauses: string[] = []
     const params: (string | number)[] = []
+    if (options.kinds?.length) {
+      clauses.push(`a.kind IN (${options.kinds.map(() => '?').join(',')})`)
+      params.push(...options.kinds)
+    }
     if (filter.tag !== undefined) { clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_tags WHERE slug = ?)'); params.push(filter.tag) }
     for (const key of ['kind', 'status'] as const) if (filter[key] !== undefined) { clauses.push(`a.${key} = ?`); params.push(filter[key]!) }
     if (filter.query) {
@@ -508,7 +518,7 @@ export class ArtifactStore {
       clauses.push(`a.artifact_id IN (${parts.join(' UNION ')})`)
     } else if (filter.direction || filter.relationKind) throw new Error('INVALID_ARGUMENT: relation filters require relatedToArtifactId')
     const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, sortBy, includeTags, ...legacySelection } = filter
-    const selection = sortBy === 'createdAt' ? { ...legacySelection, sortBy } : legacySelection
+    const selection = { ...legacySelection, ...(sortBy === 'createdAt' ? { sortBy } : {}), ...(options.kinds ? { kinds: options.kinds } : {}) }
     const signature = computeContentHash(this.repositoryId + ':' + canonicalJson(normalizeMetadataValue(selection)))
     if (filter.cursor) {
       let cursor: { createdAt?: string; updatedAt?: string; artifactId: string; signature: string }

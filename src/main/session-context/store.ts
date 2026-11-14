@@ -16,6 +16,23 @@ export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
   return join(base, 'repositories', Buffer.from(repositoryId).toString('base64url'), 'session-context.sqlite')
 }
+
+export function readExecutionSessionAssociations(path: string, scope: Pick<SessionAssociation, 'repositoryId' | 'artifactId' | 'executionId' | 'worktreeId' | 'generation'>): SessionAssociation[] {
+  const db = new Database(path, { readonly: true, fileMustExist: true, timeout: 100 })
+  try {
+    const rows = db.prepare(`SELECT payload, integrity FROM session_associations WHERE provider='entire'
+      AND json_extract(payload, '$.artifactId')=? AND json_extract(payload, '$.executionId')=?
+      AND json_extract(payload, '$.worktreeId')=? AND json_extract(payload, '$.generation')=?
+      AND json_extract(payload, '$.evidence')='HANDOFF_DECLARED' ORDER BY observedAt DESC, id LIMIT 9`)
+      .all(scope.artifactId, scope.executionId, scope.worktreeId, scope.generation) as { payload: string; integrity: string }[]
+    if (rows.length > 8) throw new Error('ASSOCIATION_COVERAGE_PARTIAL')
+    return rows.map(({ payload, integrity }) => {
+      const association = JSON.parse(payload) as SessionAssociation
+      if (digest(payload) !== integrity || association.repositoryId !== scope.repositoryId) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
+      return association
+    })
+  } finally { db.close() }
+}
 function associationQuery(filter: SessionFilter): { where: string[]; params: (string | number)[] } {
   const where: string[] = [], params: (string | number)[] = []
   for (const key of ['executionId', 'commitSha', 'pullRequest'] as const) {
