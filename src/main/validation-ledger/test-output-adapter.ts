@@ -93,7 +93,7 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         }
         if (tree.generation !== request.generation || tree.worktreeId !== request.worktreeId) throw new Error('WORKTREE_STALE')
         current.assertCurrent()
-        return { tree, assertCurrent: current.assertCurrent }
+        return { ...current, tree }
       } catch (error) {
         current.assertCurrent()
         if (error instanceof Error && ['WORKTREE_UNLINKED', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_UNAVAILABLE'].includes(error.message)) throw new Error('WORKTREE_STALE')
@@ -148,11 +148,16 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         } catch (error) { current.assertCurrent(); throw error }
       }),
       snapshot: operation(input => target.parse(input), async (request, context) => {
-        const { tree, assertCurrent } = await select(request, context.connected)
-        const snapshot = await captureValidationSource(tree.path, request.repositoryId)
-        assertCurrent()
-        if (snapshot.generation !== request.generation || snapshot.worktreeId !== request.worktreeId) throw new Error('WORKTREE_STALE')
-        return snapshot
+        context.markSnapshotPhase?.('select')
+        const { tree, git, registry, assertCurrent } = await select(request, context.connected)
+        try {
+          const snapshot = await captureValidationSource(tree.path, request.repositoryId, { git, registry, record: tree, mark: context.markSnapshotPhase })
+          if (snapshot.generation !== request.generation || snapshot.worktreeId !== request.worktreeId) throw new Error('WORKTREE_STALE')
+          context.markSnapshotPhase?.('response')
+          return snapshot
+        } finally {
+          assertCurrent()
+        }
       }),
       register: operation(input => receiptRequest.parse(input), async (request, context) => {
         const { input, assertCurrent } = await prepareReceipt(request, context.connected)
