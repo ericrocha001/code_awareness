@@ -9,9 +9,9 @@ const digestPattern = /^[a-f0-9]{64}$/
 
 async function validationConnection(cwd, profile) {
   const descriptor = readDescriptor(profile, { directory: 'local-agent-channel', protocol: 'code-awareness-local/v1' })
-  const send = async (action, args) => {
+  const send = async (action, args, onSnapshotDiagnostic) => {
     const start = performance.now()
-    try { return await connect(descriptor, { domain: 'validation', action, args }, { timeoutMs: action === 'resolve' ? 2000 : 12000 }) }
+    try { return await connect(descriptor, { domain: 'validation', action, args }, { timeoutMs: action === 'resolve' ? 2000 : 12000, onSnapshotDiagnostic }) }
     catch (error) { error.operation = action; error.elapsedMs = Math.round(performance.now() - start); throw error }
   }
   const identity = await send('resolve', { cwd })
@@ -32,7 +32,7 @@ async function validationConnection(cwd, profile) {
       return { state: 'REGISTRATION_PENDING', reason: 'IPC_TIMEOUT', diagnostic: publicError(error), recovery }
     }
   }
-  return { identity, snapshot: () => send('snapshot', selection), lookup, register }
+  return { identity, snapshot: onDiagnostic => send('snapshot', selection, onDiagnostic), lookup, register }
 }
 
 async function registerReceipt(id, { cwd = process.cwd(), profile, association } = {}) {

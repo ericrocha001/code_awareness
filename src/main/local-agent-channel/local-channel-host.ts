@@ -4,13 +4,33 @@ import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
+import { performance } from 'node:perf_hooks'
 import { object, text } from './request-validation'
-import type { LocalChannelAdapter, LocalRequestContext } from './local-channel-types'
+import type { LocalChannelAdapter, LocalRequestContext, SnapshotPhase } from './local-channel-types'
 import { authenticatedAgentPrincipal } from '../continuum/agent-authority'
 
 export const LOCAL_MAX_BYTES = 8 * 1024 * 1024
 export const LOCAL_TIMEOUT_MS = 15_000
 function fail(code: string): never { throw new Error(code) }
+
+function trackSnapshot(dispatchedAt: number) {
+  let phase: SnapshotPhase = 'dispatch'
+  let phaseStartedAt = dispatchedAt
+  const timings: Partial<Record<SnapshotPhase, number>> = {}
+  const elapsed = (from: number) => Math.min(60000, Math.round(performance.now() - from))
+  return {
+    mark(next: SnapshotPhase) {
+      if (phase === next) return
+      timings[phase] = elapsed(phaseStartedAt)
+      phase = next
+      phaseStartedAt = performance.now()
+    },
+    diagnostic() {
+      return { operation: 'snapshot', elapsedMs: elapsed(dispatchedAt), snapshotPhase: phase,
+        snapshotTimings: { ...timings, [phase]: elapsed(phaseStartedAt) } }
+    }
+  }
+}
 
 export class LocalChannelHost {
   private server?: Server
@@ -73,6 +93,13 @@ export class LocalChannelHost {
     const deadline = setTimeout(() => socket.destroy(), LOCAL_TIMEOUT_MS)
     socket.once('close', () => clearTimeout(deadline))
     let chunks: Buffer[] = [], bytes = 0, handled = false
+    let snapshot: ReturnType<typeof trackSnapshot> | undefined
+    let responseSent = false
+    socket.once('close', () => {
+      if (snapshot && !responseSent) {
+        console.warn('[Local Agent Channel]', safeDiagnostic({ code: 'IPC_CLOSED', ...snapshot.diagnostic() }))
+      }
+    })
     socket.on('data', chunk => {
       if (handled) return
       bytes += chunk.length
@@ -81,13 +108,22 @@ export class LocalChannelHost {
       if (!chunk.includes(10)) return
       handled = true
       const raw = Buffer.concat(chunks); chunks = []
+      const dispatchedAt = performance.now()
       void (async () => {
         try {
           if (raw.indexOf(10) !== raw.length - 1) fail('INVALID_ARGUMENT')
-          const result = await this.dispatch(JSON.parse(raw.subarray(0, -1).toString('utf8')), () => !socket.destroyed)
-          const response = JSON.stringify({ result }) + '\n'
-          if (Buffer.byteLength(response) > LOCAL_MAX_BYTES * 2) fail('RESPONSE_TOO_LARGE')
-          socket.end(response)
+          const result = await this.dispatch(JSON.parse(raw.subarray(0, -1).toString('utf8')), () => !socket.destroyed, () => {
+            snapshot = trackSnapshot(dispatchedAt)
+            return snapshot.mark
+          })
+          if (socket.destroyed) return
+          snapshot?.mark('response')
+          const response = { result }
+          const frame = JSON.stringify(snapshot
+            ? { ...response, diagnostic: safeDiagnostic({ code: 'SNAPSHOT_COMPLETE', ...snapshot.diagnostic() }) }
+            : response) + '\n'
+          if (Buffer.byteLength(frame) > LOCAL_MAX_BYTES * 2) fail('RESPONSE_TOO_LARGE')
+          socket.end(frame, () => { responseSent = true })
         } catch (error) {
           const message = error instanceof Error ? error.message : ''
           const explicit = (error as { code?: string })?.code
@@ -95,13 +131,15 @@ export class LocalChannelHost {
           const field = (error as { field?: unknown })?.field
           const semantic = code === 'MISSING_SEMANTIC_FIELD' && typeof field === 'string' && ['name', 'description', 'kind'].includes(field)
             ? { field, guidance: `Provide an explicit semantic ${field}` } : {}
-          socket.end(JSON.stringify({ error: { ...safeDiagnostic({ ...(error as object), code }), ...semantic } }) + '\n')
+          if (socket.destroyed) return
+          socket.end(JSON.stringify({ error: { ...safeDiagnostic({ ...(error as object), ...snapshot?.diagnostic(), code }), ...semantic } }) + '\n',
+            () => { responseSent = true })
         }
       })()
     })
   }
 
-  private async dispatch(input: unknown, connected: () => boolean): Promise<unknown> {
+  private async dispatch(input: unknown, connected: () => boolean, startSnapshot: () => (phase: SnapshotPhase) => void): Promise<unknown> {
     const value = object(input)
     const supplied = typeof value.token === 'string' ? Buffer.from(value.token) : Buffer.alloc(0)
     const expected = Buffer.from(this.token)
@@ -126,6 +164,7 @@ export class LocalChannelHost {
     const adapter = this.adapters.find(adapter => adapter.domain === domain)
     if (!adapter || !Object.hasOwn(adapter.operations, action)) fail('METHOD_NOT_FOUND')
     const context: LocalRequestContext = { connected, principal: authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => !!this.server && connected()) }
+    if (domain === 'validation' && action === 'snapshot') context.markSnapshotPhase = startSnapshot()
     if (!connected()) fail('IPC_CLOSED')
     return adapter.operations[action].execute(args, context)
   }

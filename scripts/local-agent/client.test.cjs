@@ -115,6 +115,34 @@ test('OS timeouts retain IPC_TIMEOUT and safe transport/server diagnostics', asy
   assert.deepEqual(publicError({ code: 'BAD_CODE', stage: '/private/path', reason: 'private-token', operation: 'private-payload' }), { code: 'BAD_CODE' })
 })
 
+test('snapshot timing diagnostics are bounded and a response timeout makes no host phase claim', async () => {
+  const payload = { domain: 'validation', action: 'snapshot' }
+  const socket = socketFixture()
+  const observations = []
+  const result = connect(descriptor, payload, { createConnection: () => socket, onSnapshotDiagnostic: value => observations.push(value) })
+  socket.emit('connect')
+  socket.emit('data', JSON.stringify({ result: { version: 1 }, diagnostic: {
+    elapsedMs: 80, snapshotPhase: 'response', snapshotTimings: { select: 20, worktree: 50, revalidate: -5, 'private-path': 1 }
+  } }) + '\n')
+  assert.deepEqual(await result, { version: 1 })
+  assert.equal(observations.length, 1)
+  assert.deepEqual(observations[0].snapshotTimings, { select: 20, worktree: 50 })
+  assert.equal(observations[0].snapshotPhase, 'response')
+  assert.ok(observations[0].connectMs >= 0)
+  assert.ok(observations[0].roundTripMs >= 0)
+  const stalled = socketFixture()
+  const pending = connect(descriptor, payload, { createConnection: () => stalled, timeoutMs: 5 })
+  stalled.emit('connect')
+  await assert.rejects(pending, error => {
+    const diagnostic = publicError(error)
+    assert.equal(diagnostic.code, 'IPC_TIMEOUT')
+    assert.equal(diagnostic.stage, 'response')
+    assert.ok(diagnostic.connectMs >= 0)
+    assert.equal(diagnostic.snapshotPhase, undefined)
+    return true
+  })
+})
+
 test('malformed responses have a safe response-stage reason', async () => {
   for (const wire of ['null\n', '[]\n', '{}\n', '{"error":{"code":"private secret"}}\n']) {
     const socket = socketFixture(), result = connect(descriptor, {}, { createConnection: () => socket })
