@@ -35,6 +35,8 @@ export interface RuntimePreviewStatus {
   resourcesReleased: boolean | null; activeProcesses: number | null; handlesClosed: boolean | null
   observedAt: string | null
 }
+export type PreviewAcceptanceOutcome = 'APPROVED' | 'REJECTED' | 'NOT_VERIFIABLE' | 'CANCELLED'
+export type PreviewAcceptanceNavigation = 'GUIDED_MANUAL_NAVIGATION' | 'AUTOMATED_NAVIGATION'
 export type RuntimePreviewRequest =
   | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
@@ -45,6 +47,7 @@ export type RuntimePreviewRequest =
   | { action: 'PROBE'; sessionId: string; probes: Array<'READINESS' | 'ATTESTATION'> }
   | { action: 'EVIDENCE'; sessionId: string; revision?: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; offset?: number; limit?: number }
   | { action: 'QUALIFY'; sessionId: string; bindingId: string; criterionId: string; proofId: string }
+  | { action: 'ACCEPT'; sessionId: string; scenarioId: string; bindingId: string; criterionId: string }
 export type RuntimePreviewData =
   | RuntimePreviewStatus
   | { kind: 'BRANCH_APP'; reasonCode: string; message: string; candidates?: BranchWorktree[]; preflight?: PreviewPreflight; activeSession?: PreviewSessionView }
@@ -56,4 +59,5 @@ export type RuntimePreviewData =
   | { kind: 'EVIDENCE'; sessionId: string; revision: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; entries: unknown[]; nextOffset: number | null }
   | { kind: 'BINDINGS'; bindings: Array<{ bindingId: string; executionId: string }>; reason: string | null }
   | { kind: 'QUALIFICATION'; session: PreviewSessionView; qualification: PreviewQualification }
+  | { kind: 'ACCEPTANCE'; scenarioId: string; outcome: PreviewAcceptanceOutcome; navigation: PreviewAcceptanceNavigation; targetPositioned: boolean; proofId: string | null; session: PreviewSessionView; qualification: PreviewQualification | null }
 export type RuntimePreviewResult = { success: true; data: RuntimePreviewData } | { success: false; code: string }

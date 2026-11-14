@@ -5,7 +5,7 @@ const crypto = require('node:crypto')
 const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
 const { receiptDigest } = require('../src/shared/validation/test-output-receipt.cjs')
-const { validationConnection, registerReceipt } = require('./local-agent/validation.cjs')
+const { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds } = require('./local-agent/validation.cjs')
 const { publicError } = require('./local-agent/discovery.cjs')
 
 const root = path.resolve(__dirname, '..')
@@ -69,6 +69,9 @@ function project(receipt) {
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
   if (receipt.cleanupWarning) summary.cleanupWarning = receipt.cleanupWarning
   if (receipt.registration) summary.registration = receipt.registration
+  if (receipt.state === 'PASS' && receipt.registration && !['PERSISTED'].includes(receipt.registration.state) && receipt.registration.reason !== 'REGISTRATION_NOT_REQUESTED') summary.evidenceStatus = 'TESTE LOCAL APROVADO / REGISTRO PENDENTE'
+  if (receipt.reconciliation?.reconciled.length) summary.reconciled = receipt.reconciliation.reconciled.map(({ id, state, proofId }) => ({ id, state, ...(proofId ? { proofId } : {}) }))
+  if (receipt.reconciliation?.remaining) summary.pendingRegistrations = receipt.reconciliation.remaining
   if (receipt.ledgerDiagnostics?.length) summary.ledgerDiagnostics = receipt.ledgerDiagnostics.slice(0, 3)
   summary.logs = 'Full stdout/stderr and receipt in evidence; inspect for selective expansion.'
   let output = JSON.stringify(summary)
@@ -212,6 +215,19 @@ async function run(command, args = [], options = {}) {
     try { receipt.registration = await connection.register(id, receipt.digest) }
     catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
+    if (receipt.registration.state === 'PERSISTED') {
+      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200 }) } catch (error) { diagnostics.push(publicError(error)) }
+    } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+      try {
+        const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
+        if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
+      } catch { }
+    }
+  } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+    try {
+      const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
+      if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
+    } catch { }
   }
   return receipt
 }
@@ -281,6 +297,18 @@ async function cli() {
     }
     console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association }))); return
   }
+  if (action === 'reconcile') {
+    let id, limit, cursor, profile
+    while (args.length) {
+      const flag = args.shift(), value = args.shift()
+      if (flag === '--receipt') id = value
+      else if (flag === '--limit') limit = Number(value)
+      else if (flag === '--cursor') cursor = value
+      else if (flag === '--profile') profile = value
+      else throw new Error('Invalid reconcile option')
+    }
+    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
+  }
   if (action === 'observe') {
     const id = args.shift(); let afterState
     if (args.length) { if (args.shift() !== '--after-state') throw new Error('Invalid observation option'); afterState = args.shift() }
@@ -309,7 +337,7 @@ async function cli() {
     if (receipt.state === 'RUNNING') throw new Error('Cannot clean running evidence')
     fs.rmSync(directory, { recursive: true }); console.log(JSON.stringify({ removed: id })); return
   }
-  if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; inspect id; clean id')
+  if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; inspect id; reconcile [--receipt id] [--limit N]; clean id')
   let human = false; let timeoutMs; let expectTests = false; let association; let profile
   while (args[0] !== '--') {
     const flag = args.shift()

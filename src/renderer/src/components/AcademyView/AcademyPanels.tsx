@@ -162,6 +162,7 @@ interface PluginOverviewSurfaceProps {
   preference: AcademyPublicationPreference | null
   skillCount: number
   preparing: boolean
+  downloading?: boolean
   pluginError: string | null
   onPrepareRelease: () => void
   onRevealRelease: (release: AcademyOpenAiRelease) => void
@@ -179,6 +180,7 @@ export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
   preference,
   skillCount,
   preparing,
+  downloading = false,
   pluginError,
   onPrepareRelease,
   onRevealRelease,
@@ -326,7 +328,7 @@ export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
                     <Button variant="outline" intent="neutral" size="compact" onClick={() => onRevealRelease(release)}>
                       Mostrar ZIP
                     </Button>
-                    <Button variant="outline" intent="neutral" size="compact" onClick={() => onDownloadRelease(release)}>
+                    <Button variant="outline" intent="neutral" size="compact" busy={downloading} busyLabel="Baixando ZIP" onClick={() => onDownloadRelease(release)}>
                       Baixar ZIP
                     </Button>
                   </>
@@ -415,6 +417,7 @@ interface GeminiOverviewSurfaceProps {
   geminiExport: AcademyGeminiExportState | null
   preparing: boolean
   busy?: boolean
+  downloading?: boolean
   geminiError: string | null
   onPrepareExport: () => void
   onRevealExport: () => void
@@ -433,6 +436,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
   geminiExport,
   preparing,
   busy = false,
+  downloading = false,
   geminiError,
   onPrepareExport,
   onRevealExport,
@@ -613,7 +617,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
                   <Button variant="solid" intent="primary" size="comfortable" onClick={onRevealExport}>
                     Abrir pasta
                   </Button>
-                  <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                  <Button variant="outline" intent="neutral" size="compact" disabled={busy && !downloading} busy={downloading} busyLabel="Baixando pacote" onClick={onDownloadExport}>
                     Baixar pacote
                   </Button>
                   <Button variant="subtle" intent="neutral" size="compact" disabled={busy} onClick={() => onConfirmImport()}>
@@ -645,7 +649,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
                 <Button variant="solid" intent="primary" size="comfortable" onClick={onRevealExport}>
                   Abrir ZIP
                 </Button>
-                <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                <Button variant="outline" intent="neutral" size="compact" disabled={busy && !downloading} busy={downloading} busyLabel="Baixando pacote" onClick={onDownloadExport}>
                   Baixar pacote
                 </Button>
                 <Button variant="ghost" intent="neutral" size="compact" onClick={onPrepareExport}>
@@ -711,7 +715,7 @@ export const GeminiOverviewSurface: React.FC<GeminiOverviewSurfaceProps> = ({
                     <Button variant="outline" intent="neutral" size="compact" onClick={onRevealExport}>
                       {isDifferential ? 'Mostrar pasta' : 'Mostrar ZIP'}
                     </Button>
-                    <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={onDownloadExport}>
+                    <Button variant="outline" intent="neutral" size="compact" disabled={busy && !downloading} busy={downloading} busyLabel="Baixando pacote" onClick={onDownloadExport}>
                       Baixar pacote
                     </Button>
                   </>
