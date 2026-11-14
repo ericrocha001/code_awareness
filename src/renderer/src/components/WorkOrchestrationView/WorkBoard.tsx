@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ArrowUpRight, CheckCircle2, Circle, RefreshCw, X } from 'lucide-react'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
-import type { WorkBoardArtifact, WorkBoardBranch, WorkBoardCard, WorkBoardColumn, WorkBoardInspection, WorkBoardPage, WorkBoardSelection } from '../../../../shared/types/work-board-types'
+import type { WorkBoardArtifact, WorkBoardCard, WorkBoardColumn, WorkBoardInspection, WorkBoardPage, WorkBoardSelection } from '../../../../shared/types/work-board-types'
 import type { ArtifactNavigation } from './BranchExecutions'
 
 const columns = {
@@ -18,7 +18,7 @@ const date = (value: string) => new Date(value).toLocaleString('pt-BR', { dateSt
 const kind = (artifact: WorkBoardArtifact) => artifact.kind === 'FEATURE_IDEA' ? 'Ideia' : artifact.kind === 'EXECUTABLE_PLAN' ? 'Plano executável' : artifact.kind === 'WORK_ITEM' ? 'Work Item' : artifact.kind === 'IMPLEMENTATION_HANDOFF' ? 'Handoff' : artifact.kind
 
 interface WorkBoardProps {
-  state: ActiveProjectState; active: boolean; onArtifact?: (intent: ArtifactNavigation) => void; onBranch: (target: WorkBoardBranch) => void
+  state: ActiveProjectState; active: boolean; onArtifact?: (intent: ArtifactNavigation) => void
 }
 
 export function WorkBoard(props: WorkBoardProps) {
@@ -34,7 +34,7 @@ export function WorkBoard(props: WorkBoardProps) {
   </section>
 }
 
-function BoardPerspective({ state, active, hidden, perspective, onArtifact, onBranch }: WorkBoardProps & {
+function BoardPerspective({ state, active, hidden, perspective, onArtifact }: WorkBoardProps & {
   perspective: WorkBoardSelection['perspective']; hidden: boolean
 }) {
   const { revision, project } = state
@@ -210,10 +210,10 @@ function BoardPerspective({ state, active, hidden, perspective, onArtifact, onBr
         <p className="wb-document-meta"><code>{selected.artifact.artifactId}</code><span>Revisão {selected.artifact.revision} · {status(selected.artifact)} no Continuum · {date(selected.artifact.updatedAt)}</span></p>
         <div className="wb-actions">
           <button disabled={!onArtifact} onClick={() => openArtifact(selected.artifact.artifactId)}>Abrir no Continuum <ArrowUpRight size={14} aria-hidden="true"/></button>
-          {inspection?.branch && <button onClick={() => onBranch(inspection.branch!)}>Ver branch/execução</button>}
         </div>
         {perspective === 'WORK' && <section>
           <h3>Atividade e validação</h3>
+          {inspection?.branch && <p>Branch vinculada · <code>{inspection.branch.ref}</code></p>}
           {inspecting && <p role="status">Verificando vínculos e evidências…</p>}
           {inspectionError && <p role="alert">A verificação ficou indisponível.</p>}
           {inspection && <p>{inspection.activity.state === 'ACTIVE' ? `Sessão ativa observada em ${date(inspection.activity.observedAt)}. Observação pontual da execução selecionada.`

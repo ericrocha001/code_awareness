@@ -26,12 +26,9 @@ exports.run = async ctx => {
   const continuum = { getActiveSession: () => available ? session : null, getActiveService: () => available ? service : null, onChanged: () => () => {} }
   const unregisterContinuum = registerContinuumHandlers(continuum)
   const { ipcMain } = require('electron')
-  ipcMain.handle('work-orchestration:branches', (_event, { context, operation }) => {
+  ipcMain.handle('work-orchestration:branches', () => {
     branchReads++
-    if (operation.action === 'INVENTORY') return { success: true, context, data: { kind: 'INVENTORY', inventory: { repositoryId: 'fixture',
-      revision: 'inventory', branches: [{ key: 'main', ref: 'refs/heads/main', name: 'main', namespace: 'LOCAL', creation: { at: null }, worktrees: [] }],
-      worktrees: [], unassignedWorktrees: [] } } }
-    return { success: false, code: 'FIXTURE_REMOTE_UNAVAILABLE' }
+    throw new Error('UNEXPECTED_BRANCH_INVENTORY')
   })
   const publish = (name, description, kind, extra = {}) => service.publish('---\n' + JSON.stringify({ name, description, kind, ...extra }) + '\n---\n\nCorpo do Artifact de aceitação.')
   const item = publish('Entrega auditável no Work Orchestration', 'Escopo de produto acompanhado no Continuum.', 'WORK_ITEM')
@@ -84,7 +81,9 @@ exports.run = async ctx => {
         const invalid = await window.codeAwareness.getWorkBoard({ context: { repositoryId: 'fixture', projectId: 'fixture', revision: 1 }, perspective: 'WORK', column: 'ACTIVE' })
         return invalid.code === 'INVALID_ARGUMENT' && [...document.querySelectorAll('.wb-lane h2')].map(node => node.textContent).join('|') === 'Pendentes|Concluídos'
       }))
-    ctx.check('Default Board uses real IPC and defers branch inventory', branchReads === 0 && await ctx.evaluate(() => document.querySelectorAll('h1').length === 1))
+    ctx.check('Work Orchestration opens directly on the Work Board', branchReads === 0 && await ctx.evaluate(() =>
+      document.querySelectorAll('h1').length === 1 && document.querySelector('h1').textContent === 'Work Board' &&
+      !document.querySelector('.wb-views, .bm-view')))
     ctx.check('Dense queue has independent scrolling', await ctx.evaluate(() => {
       const lane = document.querySelector('.wb-lane--pending .wb-cards')
       return lane.scrollHeight > lane.clientHeight
@@ -174,9 +173,8 @@ exports.run = async ctx => {
     await ctx.click('.wb-toolbar button')
     await ctx.waitFor(() => !!document.querySelector('.wb-toolbar [role="alert"]'))
     await ctx.capture('work-board-partial')
-    await ctx.click('.wb-views button:nth-child(2)')
-    await ctx.waitFor(() => !!document.querySelector('.bm-card'))
-    ctx.check('Branches remains available during Continuum failure', branchReads > 0 && await ctx.evaluate(() => document.querySelectorAll('h1').length === 1))
+    ctx.check('The Work Board stays visible through failure without loading branch inventory', branchReads === 0 &&
+      await ctx.evaluate(() => !!document.querySelector('.wb-board') && !document.querySelector('.bm-view')))
   } finally {
     unregister()
     unregisterContinuum()

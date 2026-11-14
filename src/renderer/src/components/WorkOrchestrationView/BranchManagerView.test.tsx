@@ -5,7 +5,6 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { GitHubPullRequestCatalog } from '../../../../main/github/github-pull-request-catalog'
 import type { PullRequestCatalog } from '../../../../shared/types/branch-pull-request-types'
 import { BranchManagerView, orderBranches } from './BranchManagerView'
-import { WorkOrchestrationTab } from './WorkOrchestrationTab'
 import type { BranchInventory, BranchRecord } from '../../../../shared/types/branch-orchestration-types'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -93,18 +92,17 @@ it('invalidates actions and drops delayed detail responses when hidden', async (
   await waitFor(() => expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy())
   expect(screen.queryByText('Delayed stale result')).toBeNull()
 })
-it('mounts lazily and revalidates inventory automatically on tab return while preserving selection and filter', async () => {
+it('revalidates inventory on return while preserving selection and filter', async () => {
   const read = install()
-  const view = render(<WorkOrchestrationTab state={state} active={false}/>)
+  const view = render(<BranchManagerView state={state} active={false}/>)
   expect(read).not.toHaveBeenCalled()
-  view.rerender(<WorkOrchestrationTab state={state} active/>)
-  fireEvent.click(screen.getByRole('button', { name: 'Branches & Worktrees' }))
+  view.rerender(<BranchManagerView state={state} active/>)
   fireEvent.click(await screen.findByText('topic'))
   fireEvent.change(screen.getByPlaceholderText('Nome ou referência'), { target: { value: 'topic' } })
   await screen.findByText(/cobertura indisponível/)
   const count = read.mock.calls.length
-  view.rerender(<WorkOrchestrationTab state={state} active={false}/>)
-  view.rerender(<WorkOrchestrationTab state={state} active/>)
+  view.rerender(<BranchManagerView state={state} active={false}/>)
+  view.rerender(<BranchManagerView state={state} active/>)
   await waitFor(() => expect(read.mock.calls.slice(count).some(([r]) => r.operation.action === 'EXECUTIONS')).toBe(true))
   expect(read.mock.calls.slice(count).every(([r]) => ['EXECUTIONS', 'PREVIEW_RUNTIME', 'INVENTORY', 'PULL_REQUESTS'].includes(r.operation.action))).toBe(true)
   expect((screen.getByPlaceholderText('Nome ou referência') as HTMLInputElement).value).toBe('topic')

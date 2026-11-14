@@ -8,17 +8,16 @@
 .wb-feature .wo-feature-icon {
   background: linear-gradient(135deg, color-mix(in srgb, #0487ed 30%, var(--bg-secondary)), color-mix(in srgb, var(--accent) 30%, var(--bg-secondary)));
 }
-.wb-views { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
-.wb-views button[aria-pressed="true"], .wb-perspectives button[aria-pressed="true"] { border-color: var(--accent); background: var(--selected-bg); }
-.wb-panel, .wb-board, .wb-perspective, .wb-embedded-branches { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
-.wb-panel[hidden], .wb-perspective[hidden] { display: none; }
+.wb-perspectives button[aria-pressed="true"] { border-color: var(--accent); background: var(--selected-bg); }
+.wb-board, .wb-perspective { display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0; }
+.wb-perspective[hidden] { display: none; }
 .wb-board, .wb-perspective { gap: 10px; }
 .wb-perspectives { display: flex; gap: 4px; align-self: flex-start; }
 .wb-feature .wb-perspectives button { padding: 5px 10px; font-size: 12px; }
 .wb-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .wb-toolbar p { color: var(--text-secondary); font-size: 12px; margin: 0; }
 .wb-toolbar p.wb-read-error { color: var(--color-warning); margin-top: 4px; }
-.wb-toolbar button, .wb-actions button, .wb-embedded-branches .bm-toolbar button {
+.wb-toolbar button, .wb-actions button {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px; font-size: 12px;
 }
 .wb-workspace { display: flex; gap: 14px; flex: 1; min-height: 0; min-width: 0; position: relative; }
@@ -72,7 +71,6 @@
 .wb-inspector li button { text-align: left; overflow-wrap: anywhere; max-width: 100%; }
 .wb-inspector code { font-size: 10px; color: var(--text-secondary); }
 .wb-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.wb-embedded-branches .bm-toolbar { flex-wrap: wrap; }
 
 @container (max-width: 980px) {
   .wb-inspector { position: absolute; z-index: 2; inset: 0 0 0 auto; width: min(100%, 360px); box-shadow: 0 0 20px #0005; }

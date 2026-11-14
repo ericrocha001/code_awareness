@@ -8,7 +8,6 @@ import type { BranchDiscardPreview } from '../../../../shared/types/branch-disca
 import type { WorktreeRemovalPreview } from '../../../../shared/types/worktree-removal-types'
 import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 import type { ObservableWorktree, OrchestrationRequest } from '../../../../shared/types/work-orchestration-types'
-import type { WorkBoardBranch } from '../../../../shared/types/work-board-types'
 import { LocalChangesInspector } from './LocalChangesInspector'
 import { WorktreeDocumentContext } from './WorktreeDocumentContext'
 import { WorktreeCommitsDisclosure } from './WorktreeCommitsDisclosure'
@@ -31,8 +30,8 @@ const orderPrs = <T extends { pullRequest: PullRequestRecord }>(relations: T[]) 
 
 type Preview = { kind: 'DISCARD'; value: BranchDiscardPreview } | { kind: 'REMOVAL'; value: WorktreeRemovalPreview }
 
-export function BranchManagerView({ state, active = true, embedded, branchIntent, onCommit, onArtifact }: {
-  state: ActiveProjectState; active?: boolean; embedded?: boolean; branchIntent?: WorkBoardBranch
+export function BranchManagerView({ state, active = true, onCommit, onArtifact }: {
+  state: ActiveProjectState; active?: boolean
   onCommit?: (intent: CommitNavigationIntent) => void; onArtifact?: (intent: ArtifactNavigation) => void
 }) {
   const [inventory, setInventory] = useState<BranchInventory | null>(null), [prs, setPrs] = useState<BranchPullRequests | null>(null)
@@ -46,7 +45,6 @@ export function BranchManagerView({ state, active = true, embedded, branchIntent
   const dialog = useRef<HTMLDivElement>(null), previousFocus = useRef<HTMLElement | null>(null)
   const pendingMutation = useRef<{ previewId: string; operation: BranchManagerOperation } | null>(null)
   const detail = useRef<HTMLElement>(null), detailReturnFocus = useRef<HTMLElement | null>(null)
-  const handledIntent = useRef<WorkBoardBranch>()
   const projectId = state.project?.id, revision = state.revision
   activeRef.current = active
   const query = useCallback(async (operation: BranchManagerOperation): Promise<BranchManagerData> => {
@@ -85,17 +83,6 @@ export function BranchManagerView({ state, active = true, embedded, branchIntent
     if (!active) { detailEpoch.current++; setPreview(null); setTree(null); setStale(true); setBusy(false) }
     else void refresh()
   }, [active, refresh])
-  useEffect(() => {
-    if (!active || !inventory || stale || loading || !branchIntent || handledIntent.current === branchIntent) return
-    if (inventory.repositoryId !== state.context?.repositoryId) return
-    handledIntent.current = branchIntent
-    const match = inventory.branches.find(branch => branch.ref === branchIntent.ref && branch.generation === branchIntent.branchGeneration &&
-      branch.worktrees.some(tree => tree.worktreeId === branchIntent.worktreeId && tree.generation === branchIntent.generation))
-    if (match) {
-      detailEpoch.current++
-      setSelected(match.key); setAdvanced(false); setHistory(null); setPrCommits(null); setTree(null); setError('')
-    } else setError('O vínculo com a branch precisa ser verificado novamente no Work Board.')
-  }, [active, branchIntent, inventory, loading, stale, state.context?.repositoryId])
   useEffect(() => {
     if (preview) { previousFocus.current = document.activeElement as HTMLElement; dialog.current?.focus() }
     else previousFocus.current?.focus()
@@ -152,9 +139,9 @@ export function BranchManagerView({ state, active = true, embedded, branchIntent
   const emptyPrs = remoteLoading || loading ? 'Consultando PRs…' : !stale && prs?.catalog.coverage === 'COMPLETE' ? 'Nenhum PR observado nesta direção.' : 'Consulta inconclusiva. Consulte a cobertura GitHub acima.'
   const branchTrees = branch ? inventory?.worktrees.filter(w => branch.worktrees.some(link => link.worktreeId === w.worktreeId && link.generation === w.generation)) ?? [] : []
   const refreshButton = <button onClick={() => void refresh()} disabled={loading || busy || !active}><RefreshCw size={16}/> Atualizar</button>
-  return <main className={embedded ? 'bm-view wb-embedded-branches' : 'wo-view bm-view'} aria-label="Gestor por branch">
-    {!embedded && <header className="wo-header"><div className="wo-feature-identity"><span className="wo-feature-icon"><GitBranch size={34}/></span><div><h1>Work Orchestration</h1><p>Branches, entregas e ambientes de trabalho</p></div></div>{refreshButton}</header>}
-    <div className="bm-toolbar"><label>Filtrar branches <input value={filter} onChange={e => { setFilter(e.target.value); setLimit(50) }} placeholder="Nome ou referência"/></label><span>{inventory ? `${inventory.branches.length} branches` : loading ? 'Lendo inventário Git…' : 'Inventário indisponível'}</span>{embedded && refreshButton}</div>
+  return <main className="wo-view bm-view" aria-label="Gestor por branch">
+    <header className="wo-header"><div className="wo-feature-identity"><span className="wo-feature-icon"><GitBranch size={34}/></span><div><h1>Work Orchestration</h1><p>Branches, entregas e ambientes de trabalho</p></div></div>{refreshButton}</header>
+    <div className="bm-toolbar"><label>Filtrar branches <input value={filter} onChange={e => { setFilter(e.target.value); setLimit(50) }} placeholder="Nome ou referência"/></label><span>{inventory ? `${inventory.branches.length} branches` : loading ? 'Lendo inventário Git…' : 'Inventário indisponível'}</span></div>
     {error && <p role="alert" className="wo-warning">{error}</p>}{receipt && <p role="status" className="bm-receipt">{receipt}</p>}
     {runtime.uncertain && <div className="bm-app-recovery" role="alert"><span>{runtime.notice?.message}</span>{!runtime.observationPaused && <button disabled={!active} onClick={runtime.reconcile}>Verificar estado do aplicativo</button>}<details><summary>Diagnóstico</summary><code>{runtime.notice?.code}</code></details></div>}
     {stale && <p role="status" className="wo-warning">Estado precisa de atualização antes de agir.</p>}
