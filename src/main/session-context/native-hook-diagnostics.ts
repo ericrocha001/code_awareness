@@ -2,7 +2,7 @@ import { existsSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileS
 import { join, resolve } from 'node:path'
 import type { CheckpointRegistry } from './checkpoint-registry'
 import { receiptDigest } from '../../shared/validation/test-output-receipt.cjs'
-import { boundedFile, nativeDigest, nativeGapReasons, nativeGitIdentity, nativeHookEvents, readNativeBinding, type NativeGap, type NativeGapReason, type NativeHookBinding } from './native-hooks'
+import { boundedFile, nativeDigest, nativeGapReasons, nativeGitIdentity, nativeHookEvents, nativeHookProviders, readNativeBinding, type NativeGap, type NativeGapReason, type NativeHookBinding, type NativeHookProvider } from './native-hooks'
 
 interface GapObservation extends Omit<NativeGap, 'phase' | 'observedAt'> { phase: NativeGap['phase'] | 'UNKNOWN'; observedAt: string | null; revision: string }
 interface GapAck { revision: string; proofDigest: string; qualifiedReason: NativeGapReason; verifiedAt: string }
@@ -85,14 +85,17 @@ export function acknowledgeNativeGaps(spool: string, expectedRevision: string, q
   return { revision: expectedRevision, acknowledged: acknowledgements.length, proofDigest }
 }
 
-export function nativeDiagnosticSource(binding: Pick<NativeHookBinding, 'worktreeId' | 'generation'>): string {
-  return `NATIVE_CAPTURE:${binding.worktreeId}:${binding.generation}`
+export function nativeDiagnosticSource(binding: Pick<NativeHookBinding, 'provider' | 'worktreeId' | 'generation'>): string {
+  return binding.provider === 'antigravity' ? `NATIVE_CAPTURE:antigravity:${binding.worktreeId}:${binding.generation}` : `NATIVE_CAPTURE:${binding.worktreeId}:${binding.generation}`
 }
 
-export function acknowledgeCheckoutGaps(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, revision: string, reason: NativeGapReason, proof: string, authorized: boolean) {
+const nativeBindingPath = (root: string, provider: NativeHookProvider = 'codex') =>
+  join(root, provider === 'antigravity' ? '.code-awareness/native-hooks/antigravity/binding.json' : '.code-awareness/native-hooks/binding.json')
+
+export function acknowledgeCheckoutGaps(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, revision: string, reason: NativeGapReason, proof: string, authorized: boolean, provider: NativeHookProvider = 'codex') {
   if (!authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
-  const binding = readNativeBinding(join(root, '.code-awareness/native-hooks/binding.json')), identity = nativeGitIdentity(root)
-  if (binding.repositoryId !== target.repositoryId || binding.worktreeId !== target.worktreeId || binding.generation !== target.generation ||
+  const binding = readNativeBinding(nativeBindingPath(root, provider)), identity = nativeGitIdentity(root)
+  if ((binding.provider ?? 'codex') !== provider || binding.repositoryId !== target.repositoryId || binding.worktreeId !== target.worktreeId || binding.generation !== target.generation ||
     identity.root !== binding.root || identity.directoryIdentity !== binding.directoryIdentity || identity.commonDirectory !== binding.commonDirectory) throw new Error('WORKTREE_STALE')
   return acknowledgeNativeGaps(binding.spool, revision, reason, boundedFile(proof, 65536), authorized)
 }
@@ -118,11 +121,16 @@ export function persistNativeCapture(registry: CheckpointRegistry, binding: Nati
   return { currentOperationalCapture, historicalCoverage }
 }
 
-export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: string): object {
+export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: string, provider?: NativeHookProvider): object {
   try {
     if (!root) return {}
-    const binding = readNativeBinding(join(root, '.code-awareness/native-hooks/binding.json'))
-    if (binding.repositoryId !== registry.repositoryId) return {}
+    const order: readonly NativeHookProvider[] = provider ? [provider] : nativeHookProviders
+    let binding: NativeHookBinding | undefined
+    for (const candidate of order) {
+      try { binding = readNativeBinding(nativeBindingPath(root, candidate)); break }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || provider) throw error }
+    }
+    if (!binding || binding.repositoryId !== registry.repositoryId) return {}
     if (!binding.enabled) return { currentOperationalCapture: { state: 'DISABLED' } }
     const identity = nativeGitIdentity(root)
     if (identity.directoryIdentity !== binding.directoryIdentity || identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory) return { currentOperationalCapture: { state: 'UNAVAILABLE', reasonCode: 'WORKTREE_STALE' } }

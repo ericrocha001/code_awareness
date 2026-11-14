@@ -10,7 +10,7 @@ export const executionSelector = z.discriminatedUnion('type', [
   z.object({ type: z.literal('PR'), id: z.string().regex(/^[1-9][0-9]{0,9}$/) }).strict(),
   z.object({ type: z.literal('COMMIT'), id: z.string().regex(/^[a-f0-9]{40}$/) }).strict(),
   z.object({ type: z.literal('CHECKPOINT'), id: z.string().regex(/^(?:[a-f0-9]{10,40}|[0-9A-HJKMNP-TV-Z]{26})$/) }).strict(),
-  z.object({ type: z.literal('SESSION'), id: identifier, provider: z.enum(['entire', 'codex', 'codex-native']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional() }).strict(),
+  z.object({ type: z.literal('SESSION'), id: identifier, provider: z.enum(['entire', 'codex', 'codex-native', 'antigravity-native']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional() }).strict(),
   z.object({ type: z.literal('ARTIFACT'), id: z.string().regex(/^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/), revision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).optional() }).strict(),
   z.object({ type: z.literal('PROOF'), id: z.string().regex(/^proof-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/) }).strict(),
   z.object({ type: z.literal('EXECUTION'), id: identifier }).strict(),
@@ -21,7 +21,7 @@ export const executionContextQuery = z.object({ selector: executionSelector, mod
   depth: z.number().int().min(1).max(4).default(4),
   limit: z.number().int().min(1).max(24).default(20), cursor: z.string().max(512).optional() }).strict()
 export type ExecutionSelector = z.infer<typeof executionSelector>
-export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, revision: { type: 'integer', minimum: 1, description: 'Exact Artifact revision when selecting publication provenance.' }, type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'INVOCATION', 'WORKTREE'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex', 'codex-native'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
+export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, revision: { type: 'integer', minimum: 1, description: 'Exact Artifact revision when selecting publication provenance.' }, type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'INVOCATION', 'WORKTREE'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex', 'codex-native', 'antigravity-native'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
 export function executionEntity(store: SessionStore, selector: ExecutionSelector, accountHash?: string): RegistryEntity | undefined {
   if (selector.type === 'INVOCATION') return { kind: 'EXECUTION', id: 'native-invocation:' + selector.id }
   if (selector.type === 'WORKTREE') return { kind: 'WORKTREE', id: selector.id + ':' + selector.generation }
@@ -49,8 +49,10 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
   for (const source of sourceCoverage) if (['PARTIAL','UNAVAILABLE','UNSUPPORTED','NETWORK_NOT_AUTHORIZED','CONFLICT'].includes(source.status)) reasons.add(source.source + '_' + source.status)
   for (const node of graph.nodes) if (node.type === 'WORKTREE' && node.generation) {
     try {
-      const capture = JSON.parse(store.registry.source(`NATIVE_CAPTURE:${node.id}:${node.generation}`)?.cursor ?? '{}')
-      if (capture.historicalCoverage?.state === 'PARTIAL') reasons.add('NATIVE_CAPTURE_HISTORICALLY_PARTIAL')
+      for (const source of [`NATIVE_CAPTURE:${node.id}:${node.generation}`, `NATIVE_CAPTURE:antigravity:${node.id}:${node.generation}`]) {
+        const capture = JSON.parse(store.registry.source(source)?.cursor ?? '{}')
+        if (capture.historicalCoverage?.state === 'PARTIAL') reasons.add('NATIVE_CAPTURE_HISTORICALLY_PARTIAL')
+      }
     } catch { reasons.add('NATIVE_CAPTURE_COVERAGE_UNAVAILABLE') }
   }
   const observedRelations = graph.edges.some(edge => edge.evidenceKind !== 'CONTINUUM_REVISION')

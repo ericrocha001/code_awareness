@@ -13,7 +13,7 @@ const binary = join(root, 'codex.exe')
 
 function run(args, { version = '0.166.0-alpha.6', replaced = false } = {}) {
   let selections = 0
-  const installed = [], output = [], executables = []
+  const installed = [], inspected = [], output = [], executables = []
   const overrides = {
     'node:child_process': { execFileSync(exe, argv) {
       if (exe === process.execPath) {
@@ -30,7 +30,7 @@ function run(args, { version = '0.166.0-alpha.6', replaced = false } = {}) {
     esbuild: { buildSync: () => ({ outputFiles: [{ text: 'module.exports = fixture' }] }) }
   }
   const api = {
-    inspectNativeInstallation: () => ({ state: 'MISSING', handlers: [] }),
+    inspectNativeInstallation: (_root, _target, _platform, provider = 'codex') => { inspected.push(provider); return { state: 'MISSING', handlers: [] } },
     installNativeHooks: input => { installed.push(input); return { state: 'CONFIGURED' } }
   }
   const invoke = () => runInNewContext(source, {
@@ -38,7 +38,7 @@ function run(args, { version = '0.166.0-alpha.6', replaced = false } = {}) {
     console: { log: line => output.push(JSON.parse(line)) },
     require: name => Object.hasOwn(overrides, name) ? overrides[name] : localRequire(name)
   }, { filename })
-  return { invoke, installed, output, executables }
+  return { invoke, installed, inspected, output, executables }
 }
 
 test('provisions the linked Worktree using the explicitly selected executable including 0.169.0-alpha.11.1', () => {
@@ -73,4 +73,23 @@ test('installation refuses missing authorization, unidentified client, unsupport
     assert.throws(f.invoke, error)
     assert.equal(f.installed.length, 0)
   }
+})
+
+test('supports --provider=antigravity status and install without requiring --codex', () => {
+  const status = run(['status', '--provider=antigravity'])
+  status.invoke()
+  assert.deepEqual(status.inspected, ['antigravity'])
+  assert.equal(status.output[0].provider, 'antigravity')
+  assert.equal(status.output[0].client.contract, 'agents-hooks-v1')
+  assert.equal(status.output[0].trust.reasonCode, 'CLIENT_TRUST_UNSUPPORTED')
+  assert.equal(status.installed.length, 0)
+
+  assert.throws(run(['install', '--provider=antigravity']).invoke, /HOOK_AUTHORIZATION_REQUIRED/)
+
+  const install = run(['install', '--authorized', '--provider=antigravity'])
+  install.invoke()
+  assert.equal(install.executables.length, 0)
+  assert.equal(install.installed.length, 1)
+  assert.equal(install.installed[0].provider, 'antigravity')
+  assert.equal(install.installed[0].record.path, root)
 })

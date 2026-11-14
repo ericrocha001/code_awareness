@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { z } from 'zod'
 import type { McpToolDefinition, McpToolResult } from '../mcp/mcp-types'
 import type { SessionStore } from './store'
@@ -195,7 +197,9 @@ export async function executeSessionTool(
         ? nativeTrustSnapshot.repositoryId === trustTarget.repositoryId && nativeTrustSnapshot.worktreeId === trustTarget.worktreeId && nativeTrustSnapshot.generation === trustTarget.generation
           ? nativeTrustSnapshot.observation : unknownNativeTrust('SESSION_SCOPE_CHANGED')
         : await inspectNativeTrust(root, trustTarget, requested, nativeClient, assertActive)
-      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true, ...nativeCaptureDiagnostics((store as SessionStore).registry, root), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, nativeTrust) } }
+      const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) || existsSync(join(root, '.agents/hooks.json'))
+      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true, ...nativeCaptureDiagnostics((store as SessionStore).registry, root, 'codex'), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, nativeTrust, 'codex'),
+        ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics((store as SessionStore).registry, root, 'antigravity'), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, { state: 'UNKNOWN', reasonCode: 'CLIENT_TRUST_UNSUPPORTED', freshness: 'UNAVAILABLE' }, 'antigravity') } } } : {}) } }
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')

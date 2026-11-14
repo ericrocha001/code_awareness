@@ -2,11 +2,11 @@ import { readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CheckpointRegistry, RegistryBatch, RegistryEntity } from './checkpoint-registry'
 import type { SessionTargetResolver } from './target'
-import { boundedFile, nativeCaptureRuntimeId, nativeDigest, nativeGapReason, nativeGitIdentity, nativeHookLimits, parseNativeEnvelope, recordNativeGap, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { boundedFile, nativeCaptureRuntimeId, nativeDigest, nativeGapReason, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, parseNativeEnvelope, recordNativeGap, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { persistNativeCapture } from './native-hook-diagnostics'
 
 export function nativeObservationBatch(event: NativeHookEnvelope): RegistryBatch {
-  const session: RegistryEntity = { kind: 'SESSION', id: `codex-native:${event.sessionId}` }
+  const session: RegistryEntity = { kind: 'SESSION', id: nativeSessionEntityId(event, event.sessionId) }
   const observation: RegistryEntity = { kind: 'EXECUTION', id: `native-observation:${event.eventId}` }
   const invocation: RegistryEntity | undefined = event.invocationId ? { kind: 'EXECUTION', id: `native-invocation:${event.invocationId}` } : undefined
   const evidence = { evidenceKind: 'NATIVE_HOOK_OBSERVED', evidenceRef: event.eventId, digest: event.digest, freshness: 'OBSERVED_SNAPSHOT' }
@@ -76,7 +76,7 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
     if (!existing) admitted.push(batch.revision)
     else receipt.deduplicated++
     await onEvent?.(event)
-    const currentSource = `NATIVE_CURRENT:${binding.worktreeId}:${binding.generation}`
+    const currentSource = binding.provider === 'antigravity' ? `NATIVE_CURRENT:antigravity:${binding.worktreeId}:${binding.generation}` : `NATIVE_CURRENT:${binding.worktreeId}:${binding.generation}`
     const cursor = JSON.stringify({ runtimeId: nativeCaptureRuntimeId, eventId: event.eventId, sessionId: event.sessionId, epoch: event.capture?.epoch })
     if (!existing) registry.apply({ repositoryId: binding.repositoryId, source: currentSource, revision: nativeDigest(cursor), status: 'OBSERVED', cursor, edges: [] }, registry.source(currentSource)?.revision, assertCurrent)
     unlinkSync(path)

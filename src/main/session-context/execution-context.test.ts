@@ -195,3 +195,18 @@ it.skipIf(process.env.EXECUTION_CONTEXT_REAL !== '1')('accepts an actual reposit
   expect(result.isError).toBeFalsy(); expect(map.counts.SESSION).toBe(2); expect(map.counts.CHECKPOINT).toBe(1)
   expect(f.store.count()).toBe(0)
 }, 20000)
+
+it('discovers execution context for an antigravity-native session selector without inventing causal edges', async () => {
+  const f = fixture(), sessionHash = 'a'.repeat(64), worktree = 'c'.repeat(64) + ':' + 'd'.repeat(64)
+  const observation = entity('EXECUTION', 'native-observation:' + 'b'.repeat(64))
+  f.add([
+    edge(observation, entity('SESSION', 'antigravity-native:' + sessionHash), 'NATIVE_HOOK_OBSERVED', 'PreToolUse'),
+    edge(observation, entity('WORKTREE', worktree), 'NATIVE_HOOK_OBSERVED', 'observed-in')
+  ], 'NATIVE_HOOK:' + 'b'.repeat(64))
+  const result = await f.call({ selector: { type: 'SESSION', provider: 'antigravity-native', id: sessionHash } }), map = data(result)
+  expect(result.isError).toBeFalsy()
+  expect(map.counts).toMatchObject({ SESSION: 1, EXECUTION: 1, WORKTREE: 1, ARTIFACT: 0, COMMIT: 0, PR: 0 })
+  expect(map.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'SESSION', provider: 'antigravity-native', id: sessionHash })]))
+  expect(map.edges).toHaveLength(2)
+  expect(map.edges.every((item: { evidenceKind: string }) => item.evidenceKind === 'NATIVE_HOOK_OBSERVED')).toBe(true)
+})

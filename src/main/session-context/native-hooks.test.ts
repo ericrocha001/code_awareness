@@ -2,9 +2,10 @@ import { afterEach, expect, test, vi } from 'vitest'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFile, execFileSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { execFile, execFileSync, spawnSync } from 'node:child_process'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
+import { buildSync } from 'esbuild'
 import { publicationRequestDigest, publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import { nativeObservationBatch } from './native-hook-ingestion'
 
@@ -194,7 +195,7 @@ test('requires explicit opt-in, preserves Entire handlers and restores exact con
   expect(disableNativeHooks(f.root, true)).toEqual({ state: 'DISABLED', restored: true })
   expect(readFileSync(config, 'utf8')).toBe(before)
   expect(composeNativeHooks(composeNativeHooks(before, 'native-command'), 'native-command')).toBe(composeNativeHooks(before, 'native-command'))
-})
+}, 30000)
 
 function installationFixture() {
   const f = fixture(), commandPath = join(f.root, 'command.cjs'); writeFileSync(commandPath, '')
@@ -322,4 +323,103 @@ test('U1 publishes a new command only after preflight and detects immutable bund
   writeFileSync(commandPath, 'tampered')
   expect(() => installNativeHooks(options)).toThrow('HOOK_COMMAND_DIGEST_MISMATCH')
   expect(inspectNativeInstallation(f.root, { repositoryId: 'repository', ...f.options.record })).toMatchObject({ reasonCode: 'HOOK_COMMAND_DIGEST_MISMATCH' })
+}, 30000)
+
+function antigravityFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'ag-hooks-')); directories.push(root)
+  mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/test\n')
+  const spool = join(root, '.code-awareness/native-hooks/antigravity/spool'); prepareNativeSpool(spool)
+  const binding: NativeHookBinding = { schema: 1, provider: 'antigravity', enabled: true, repositoryId: 'repository', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), ...nativeGitIdentity(root), spool }
+  return { root, spool, binding, payload: { conversationId: 'conv-1', workspacePaths: [root], cwd: root, hookEventName: 'PreToolUse', invocationNum: 3, stepIdx: 9, toolCall: { id: 'toolu_01', name: 'run_command', args: { CommandLine: 'SECRET_CMD' } } } }
+}
+
+test('Antigravity normalizes 6 lifecycle events, enforces workspacePaths scope, drops secrets and isolates session IDs from Codex', () => {
+  const f = antigravityFixture(), secret = 'SECRET_ANTIGRAVITY_PROMPT_AND_PATH'
+  const extra = { lastUserInput: secret, transcriptPath: join(f.root, '.gemini/transcript.jsonl'), artifactDirectoryPath: join(f.root, '.gemini/artifacts'), error: secret }
+  const start = normalizeNativeHook({ conversationId: 'conv-1', workspacePaths: [f.root], hookEventName: 'SessionStart', ...extra }, f.binding)
+  const preInv = normalizeNativeHook({ conversationId: 'conv-1', workspacePaths: [f.root], hookEventName: 'PreInvocation', invocationNum: 3, ...extra }, f.binding)
+  const pre = normalizeNativeHook({ ...f.payload, ...extra, tool_input: { operationId: 'op-1', expectedHead: 'a'.repeat(40) } }, f.binding)
+  const post = normalizeNativeHook({ ...f.payload, ...extra, hookEventName: 'PostToolUse', toolCall: { id: 'toolu_01', name: 'call_mcp_tool', args: { Query: secret } } }, f.binding)
+  const postInv = normalizeNativeHook({ conversationId: 'conv-1', workspacePaths: [f.root], hookEventName: 'PostInvocation', invocationNum: 3, ...extra }, f.binding)
+  const stop = normalizeNativeHook({ conversationId: 'conv-1', workspacePaths: [f.root], hookEventName: 'Stop', ...extra }, f.binding)
+  const stepFallback = normalizeNativeHook({ ...f.payload, toolCall: { name: 'read_file' }, stepIdx: 12 }, f.binding)
+
+  expect([start, preInv, pre, post, postInv, stop].map(item => item.event)).toEqual(['SessionStart', 'PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation', 'Stop'])
+  expect(pre.source).toBe('ANTIGRAVITY_NATIVE_HOOK')
+  expect(pre.tool).toBe('SHELL'); expect(post.tool).toBe('MCP'); expect(stepFallback.tool).toBe('OTHER')
+  expect(pre.sessionId).toBe(post.sessionId); expect(pre.invocationId).toBe(post.invocationId)
+  expect(pre.turnId).toBe(preInv.turnId); expect(postInv.turnId).toBe(preInv.turnId)
+  expect(stepFallback.invocationId).toBeDefined()
+  for (const item of [start, preInv, pre, post, postInv, stop]) {
+    expect(item.git).toBeUndefined(); expect(item.artifact).toBeUndefined()
+    expect(parseNativeEnvelope(JSON.stringify(item))).toEqual(item)
+    expect(JSON.stringify(item)).not.toContain(secret)
+    expect(JSON.stringify(item)).not.toContain('transcript.jsonl')
+    expect(JSON.stringify(item)).not.toContain(f.root)
+  }
+
+  const codex = normalizeNativeHook({ session_id: 'conv-1', cwd: f.root, hook_event_name: 'SessionStart' }, { ...f.binding, provider: 'codex' })
+  expect(codex.sessionId).not.toBe(start.sessionId)
+  expect(nativeSessionEntityId(start, start.sessionId)).toBe('antigravity-native:' + start.sessionId)
+  expect(nativeSessionEntityId(codex, codex.sessionId)).toBe('codex-native:' + codex.sessionId)
+
+  const secondRoot = mkdtempSync(join(tmpdir(), 'ag-other-')); directories.push(secondRoot)
+  mkdirSync(join(secondRoot, '.git')); writeFileSync(join(secondRoot, '.git', 'HEAD'), 'ref: refs/heads/test\n')
+  expect(() => normalizeNativeHook({ ...f.payload, workspacePaths: [f.root, secondRoot] }, f.binding)).toThrow('WORKTREE_SCOPE_AMBIGUOUS')
+  expect(() => normalizeNativeHook({ ...f.payload, cwd: secondRoot }, f.binding)).toThrow('WORKTREE_MISMATCH')
+})
+
+test('Antigravity native-hook-command emits allow/empty JSON on stdout and fails open safely', () => {
+  const f = antigravityFixture(), bindingPath = join(f.root, 'binding.json')
+  writeFileSync(bindingPath, JSON.stringify(f.binding))
+  const bundle = join(f.root, 'command.cjs')
+  const built = buildSync({ entryPoints: ['src/main/session-context/native-hook-command.ts'], outfile: bundle, write: false, bundle: true, platform: 'node', target: 'node20', format: 'cjs' }).outputFiles[0].text
+  writeFileSync(bundle, built)
+
+  expect(execFileSync(process.execPath, [bundle, bindingPath], { input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 3000 })).toBe('{"decision":"allow"}\n')
+  for (const hookEventName of ['SessionStart', 'PreInvocation', 'PostToolUse', 'PostInvocation', 'Stop']) {
+    const payload = { conversationId: 'conv-1', workspacePaths: [f.root], hookEventName, ...(hookEventName === 'PostToolUse' ? { toolCall: { id: 'toolu_01', name: 'read_file' } } : {}) }
+    expect(execFileSync(process.execPath, [bundle, bindingPath], { input: JSON.stringify(payload), encoding: 'utf8', timeout: 3000 })).toBe('{}\n')
+  }
+  expect(execFileSync(process.execPath, [bundle, bindingPath], { input: '{', encoding: 'utf8', timeout: 3000 })).toBe('{}\n')
+  expect(readdirSync(f.spool).some(name => name.startsWith('gap-'))).toBe(true)
+
+  writeFileSync(bindingPath, JSON.stringify({ ...f.binding, enabled: false }))
+  const beforeCount = readdirSync(f.spool).length
+  expect(execFileSync(process.execPath, [bundle, bindingPath], { input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 3000 })).toBe('{"decision":"allow"}\n')
+  expect(readdirSync(f.spool).length).toBe(beforeCount)
+}, 30000)
+
+test('Antigravity provisions .agents/hooks.json, executes via Windows cmd when on win32, and preserves third-party hooks', () => {
+  const f = antigravityFixture()
+  const commandContent = buildSync({ entryPoints: ['src/main/session-context/native-hook-command.ts'], outfile: join(f.root, 'out/session-context/native-hook.cjs'), write: false, bundle: true, platform: 'node', target: 'node20', format: 'cjs' }).outputFiles[0].text
+  const commandPath = join(f.root, 'out/session-context', 'native-hook-' + nativeDigest(commandContent) + '.cjs')
+  const configPath = join(f.root, '.agents/hooks.json')
+  mkdirSync(join(f.root, '.agents'), { recursive: true })
+  const before = JSON.stringify({ 'lint-checker': { enabled: true, PostToolUse: [{ matcher: 'run_command', hooks: [{ type: 'command', command: './scripts/lint.sh', timeout: 10 }] }] } }, null, 2) + '\n'
+  writeFileSync(configPath, before)
+  const record = { path: f.root, worktreeId: f.binding.worktreeId, generation: f.binding.generation, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }
+
+  expect(() => installNativeHooks({ repositoryId: 'repository', record, commandPath, commandContent, nodePath: process.execPath, provider: 'antigravity', authorized: false })).toThrow('HOOK_AUTHORIZATION_REQUIRED')
+  expect(readFileSync(configPath, 'utf8')).toBe(before)
+
+  expect(installNativeHooks({ repositoryId: 'repository', record, commandPath, commandContent, nodePath: process.execPath, provider: 'antigravity', authorized: true })).toMatchObject({ state: 'CONFIGURED', capture: 'UNOBSERVED', trust: 'REVIEW_REQUIRED' })
+  expect(inspectNativeInstallation(f.root, { repositoryId: 'repository', ...record }, process.platform, 'antigravity')).toMatchObject({ state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED', installed: 6, expected: 6 })
+  expect(installNativeHooks({ repositoryId: 'repository', record, commandPath, commandContent, nodePath: process.execPath, provider: 'antigravity', authorized: true })).toMatchObject({ state: 'NO_CHANGE', trust: 'UNCHANGED' })
+
+  const composed = JSON.parse(readFileSync(configPath, 'utf8'))
+  expect(composed['lint-checker']).toEqual(JSON.parse(before)['lint-checker'])
+  expect(composed['code-awareness-session-context'].PreToolUse[0].matcher).toBe('*')
+  expect(composeNativeHooks(composeNativeHooks(before, 'cmd', undefined, 'antigravity'), 'cmd', undefined, 'antigravity')).toBe(composeNativeHooks(before, 'cmd', undefined, 'antigravity'))
+
+  if (process.platform === 'win32') {
+    const preCmd = composed['code-awareness-session-context'].PreToolUse[0].hooks[0].command
+    expect(preCmd).not.toContain('"')
+    const res = spawnSync('cmd.exe', ['/c', preCmd], { input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 5000 })
+    expect(res.status).toBe(0)
+    expect(res.stdout).toBe('{"decision":"allow"}\n')
+  }
+
+  expect(disableNativeHooks(f.root, true, 'antigravity')).toEqual({ state: 'DISABLED', restored: true })
+  expect(readFileSync(configPath, 'utf8')).toBe(before)
 }, 30000)

@@ -195,7 +195,9 @@ export class SessionContextClient implements SessionContextPort {
           }
           if (!indexOnlyNativeDelivery && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
             request.phase = 'native-target-resolution'
-            const available = (await this.resolveTarget.discover()).filter(target => existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')))
+            const available = (await this.resolveTarget.discover()).filter(target =>
+              existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')) ||
+              existsSync(join(target.root, '.code-awareness/native-hooks/antigravity/binding.json')))
             const start = this.nativeOffset % Math.max(1, available.length)
             nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)
             this.nativeOffset = (start + nativeTargets.length) % Math.max(1, available.length)
