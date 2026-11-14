@@ -26,9 +26,9 @@ export async function inspectWorkBoard(continuum: Continuum, sources: WorkBoardI
   const { artifactId, revision } = request.inspect!
   const selected = continuum.indexedArtifact(artifactId)
   if (!selected || selected.revision !== revision || !['WORK_ITEM', 'EXECUTABLE_PLAN'].includes(selected.metadata.kind) ||
-    !['PENDING', 'COMPLETED'].includes(selected.metadata.status ?? '')) throw new Error('BOARD_CHANGED')
+    request.perspective !== 'WORK' || selected.metadata.status !== request.column) throw new Error('BOARD_CHANGED')
   const pending = selected.metadata.status === 'PENDING'
-  const result: WorkBoardInspection = { artifactId, revision, column: pending ? 'QUEUED' : 'COMPLETED',
+  const result: WorkBoardInspection = { artifactId, revision,
     activity: { state: 'INCONCLUSIVE', source: 'SESSION_CONTEXT', observedAt: new Date().toISOString(), coverage: 'PARTIAL' },
     reconciliation: { coverage: 'PARTIAL', sources: [] } }
   const graph = continuum.readIndexedGraph({ artifactIds: [artifactId], expand: true, nodeLimit: 30, edgeLimit: 60 })
@@ -108,7 +108,6 @@ export async function inspectWorkBoard(continuum: Continuum, sources: WorkBoardI
     const latestSessions = [...new Set(sources.sessions.readWorkAssociations(scope).filter(associationCurrent).map(association => association.providerSessionId))]
     if (latestSessions.length === 1 && latestSessions[0] === sessions[0] && currentSession(JSON.parse(block.text), sessions[0], now)) {
       result.activity = { state: 'ACTIVE', source: 'SESSION_CONTEXT', coverage: 'COMPLETE', observedAt: new Date(now).toISOString() }
-      result.column = 'ACTIVE'
     }
   } catch (error) {
     assertCurrent()

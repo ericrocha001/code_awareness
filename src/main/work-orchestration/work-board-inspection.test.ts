@@ -5,7 +5,7 @@ import type { ContinuumService } from '../continuum/continuum-service'
 
 const context = { repositoryId: 'repo', projectId: 'project', revision: 1 }
 const target = { worktreeId: 'tree', generation: 'generation' }
-const request = { context, column: 'QUEUED' as const, inspect: { artifactId: 'plan', revision: 1 } }
+const request = { context, perspective: 'WORK' as const, column: 'PENDING' as const, inspect: { artifactId: 'plan', revision: 1 } }
 const handoff = { artifactId: 'handoff', revision: 1, kind: 'IMPLEMENTATION_HANDOFF', status: 'VALIDATED', name: 'Handoff',
   updatedAt: new Date().toISOString(), incomingDegree: 0, outgoingDegree: 1, relationCount: 1 }
 function setup(status = 'PENDING') {
@@ -41,7 +41,7 @@ function setup(status = 'PENDING') {
 it('promotes only a current direct observation while preserving the documentary revision', async () => {
   const { continuum, sources, call } = setup()
   const result = await inspectWorkBoard(continuum, sources, request, () => {})
-  expect(result).toMatchObject({ column: 'ACTIVE', revision: 1, activity: { source: 'SESSION_CONTEXT', state: 'ACTIVE' } })
+  expect(result).toMatchObject({ revision: 1, activity: { source: 'SESSION_CONTEXT', state: 'ACTIVE' } })
   expect(call).toHaveBeenCalledWith('inspect_entire_session', { ...target, providerSessionId: 'provider' })
 })
 
@@ -51,14 +51,14 @@ it('leaves branch-only, another plan, historical association, stale activity and
   for (const value of [[], [{ ...association, artifactId: 'another-plan' }], [{ ...association, sourceRevision: 0 }],
     [association, { ...association, providerSessionId: 'second' }]]) {
     readWorkAssociations.mockReturnValueOnce(value)
-    expect(await inspect()).toMatchObject({ column: 'QUEUED', activity: { state: 'INCONCLUSIVE' } })
+    expect(await inspect()).toMatchObject({ activity: { state: 'INCONCLUSIVE' } })
   }
   expect(call).not.toHaveBeenCalled()
   call.mockResolvedValueOnce({ content: [{ type: 'text', text: JSON.stringify({ source: 'ENTIRE_LIVE', providerSessionId: 'provider',
     state: 'ACTIVE', lastActive: '2020-01-01T00:00:00Z' }) }] })
-  expect((await inspect()).column).toBe('QUEUED')
+  expect((await inspect()).activity.state).toBe('INCONCLUSIVE')
   call.mockRejectedValueOnce(new Error('PROVIDER_UNAVAILABLE'))
-  expect(await inspect()).toMatchObject({ column: 'QUEUED', activity: { state: 'UNAVAILABLE' } })
+  expect(await inspect()).toMatchObject({ activity: { state: 'UNAVAILABLE' } })
 })
 
 it('shows scoped passing proof as consultative reconciliation without changing documentary status', async () => {
@@ -66,14 +66,14 @@ it('shows scoped passing proof as consultative reconciliation without changing d
   readWorkAssociations.mockReturnValue([])
   const ledger: WorkBoardInspectionSources['ledger'] = { getProof: () => ({ status: 'PASSED', evidenceFor: ['plan'] }) }
   const result = await inspectWorkBoard(continuum, { ...sources, ledger }, request, () => {})
-  expect(result.column).toBe('QUEUED')
+  expect(result).not.toHaveProperty('column')
   expect(result.reconciliation.sources).toEqual([{ artifact: handoff, relation: 'implements', proofIds: ['proof'] }])
   expect(continuum.indexedArtifact('plan')?.metadata.status).toBe('PENDING')
 })
 
 it('keeps documentary completion and rejects a response after a project change', async () => {
   const completed = setup('COMPLETED')
-  expect((await inspectWorkBoard(completed.continuum, completed.sources, request, () => {})).column).toBe('COMPLETED')
+  expect(await inspectWorkBoard(completed.continuum, completed.sources, { ...request, column: 'COMPLETED' }, () => {})).not.toHaveProperty('column')
   expect(completed.call).not.toHaveBeenCalled()
   const { continuum, sources, call } = setup()
   await expect(inspectWorkBoard(continuum, sources, request, () => {
