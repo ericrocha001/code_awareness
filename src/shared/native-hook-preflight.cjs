@@ -2,6 +2,14 @@ const { createHash } = require('node:crypto')
 const qualifiedVersions = new Set(['0.166.0-alpha.6', '0.167.0-alpha.3.2', '0.169.0-alpha.11.1'])
 const isQualifiedCodexHookVersion = version => qualifiedVersions.has(version)
 const events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd']
+const comparableHookPath = value => process.platform === 'win32' ? value.replaceAll('/', '\\').toLowerCase() : value
+const sameHookPath = (a, b) => typeof a === 'string' && typeof b === 'string' && comparableHookPath(a) === comparableHookPath(b)
+function matchesHookKey(key, handler) {
+  if (!handler.sourcePath) return key === handler.key
+  if (typeof key !== 'string') return false
+  const suffix = handler.key.slice(handler.sourcePath.length)
+  return /^:[a-z_]+:\d+:\d+$/.test(suffix) && key.endsWith(suffix) && sameHookPath(key.slice(0, -suffix.length), handler.sourcePath)
+}
 function summarizeHookList(response, expected) {
   const unknown = reasonCode => ({ state: 'UNKNOWN', reasonCode, expected: 7, matched: 0, trusted: 0, issues: [] })
   if (!Array.isArray(expected) || expected.length !== 7 || new Set(expected.map(h => h.key)).size !== 7 || new Set(expected.map(h => h.event)).size !== 7 || expected.some(h => typeof h.key !== 'string' || !events.includes(h.event))) return unknown('HOOK_SCOPE_UNAVAILABLE')
@@ -10,10 +18,11 @@ function summarizeHookList(response, expected) {
   const hooks = response.data.flatMap(entry => entry.hooks), selected = [], issues = []
   let trusted = 0, stale = false
   for (const handler of expected) {
-    const matches = hooks.filter(hook => hook?.key === handler.key)
+    const matches = hooks.filter(hook => matchesHookKey(hook?.key, handler))
     if (matches.length > 1) return unknown('HOOK_SCOPE_AMBIGUOUS')
     if (!matches.length) { issues.push({ eventType: handler.event, reasonCode: 'HOOK_NOT_LISTED' }); continue }
     const hook = matches[0], eventName = handler.event[0].toLowerCase() + handler.event.slice(1)
+    if (handler.sourcePath && !sameHookPath(hook.sourcePath, handler.sourcePath)) return unknown('HOOK_DISCOVERY_MISMATCH')
     if (hook.eventName !== eventName || !/^sha256:[a-f0-9]{64}$/.test(hook.currentHash) || typeof hook.enabled !== 'boolean' || !['trusted','untrusted','modified','managed'].includes(hook.trustStatus) || hook.trustStatus === 'managed' && hook.isManaged !== true) return unknown('INVALID_HOOK_RESPONSE')
     selected.push([handler.key, hook.currentHash])
     if (!hook.enabled) issues.push({ eventType: handler.event, reasonCode: 'HOOK_DISABLED' })
@@ -29,4 +38,4 @@ function summarizeHookList(response, expected) {
     expected: 7, matched: selected.length, trusted, issues, stale,
     hashDigest: createHash('sha256').update(JSON.stringify(selected.sort((a, b) => a[0].localeCompare(b[0])))).digest('hex') }
 }
-module.exports = { summarizeHookList, isQualifiedCodexHookVersion }
+module.exports = { summarizeHookList, isQualifiedCodexHookVersion, sameHookPath, matchesHookKey }

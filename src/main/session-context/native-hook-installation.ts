@@ -1,6 +1,6 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { boundedFile, nativeDigest, nativeGitIdentity, nativeHookEvents, prepareNativeSpool, readNativeBinding, type NativeHookBinding } from './native-hooks'
+import { boundedFile, nativeBindingPath, nativeDigest, nativeDispatchMismatch, nativeGitIdentity, nativeHookEvents, prepareNativeSpool, readNativeBinding, resolveNativeHookBinding, type NativeHookBinding } from './native-hooks'
 import { assertProfilePath, assertRevision, revision, writeConfig, removeConfig, type FileRevision } from '../local-mcp-clients/safe-config-file'
 import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 
@@ -14,7 +14,7 @@ export interface NativeInstallationInspection {
   installed: number
   repairability?: 'REPAIRABLE' | 'CONFLICT' | 'UNSAFE'
   expected: 7
-  handlers: { key: string; event: typeof nativeHookEvents[number] }[]
+  handlers: { key: string; event: typeof nativeHookEvents[number]; sourcePath: string }[]
 }
 export function inspectNativeInstallation(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, platform = process.platform): NativeInstallationInspection {
   const result = (state: NativeInstallationInspection['state'], reasonCode: string, installed = 0): NativeInstallationInspection => ({ state, reasonCode, installed, expected: 7, handlers: [] })
@@ -35,7 +35,6 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
     const snapshot: HookSnapshot = JSON.parse(boundedFile(join(directory, 'installation.json'), MAX_INSTALLATION_BYTES)), text = boundedFile(configPath, MAX_HOOK_CONFIG_BYTES)
     if (![1, 2].includes(snapshot.schema) || snapshot.path !== configPath) return { ...result('INCOMPATIBLE', 'INSTALLATION_SNAPSHOT_INVALID'), repairability: 'CONFLICT' }
     const config = JSON.parse(text), handlers: NativeInstallationInspection['handlers'] = []
-    const bindingPath = join(directory, 'binding.json')
     const validatedCommands = new Set<string>()
     for (const event of nativeHookEvents) {
       const matches: NativeInstallationInspection['handlers'] = []
@@ -44,19 +43,22 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
         if (!Array.isArray(group?.hooks)) continue
         for (const [handlerIndex, hook] of group.hooks.entries()) {
           if (hook?.type !== 'command' || typeof hook.command !== 'string') continue
-          const paths = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(hook.command)
-          if (!paths || paths[3] !== bindingPath) continue
+          const parsed = ownedCommandPaths(hook.command, root, snapshot.schema === 1 && hook.commandWindows === undefined)
+          if (!parsed) continue
+          const { paths, legacy } = parsed
           if (group.matcher !== undefined || hook.async === true || hook.timeout !== 3) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', handlers.length)
-          if (paths.slice(1).some(path => resolve(path) !== path || !existsSync(path) || !statSync(path).isFile() || realpathSync(path) !== path)) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', handlers.length)
-          if (!validatedCommands.has(paths[2])) {
-            const digestPath = /^native-hook-([a-f0-9]{64})\.cjs$/.exec(paths[2].split(/[\\/]/).at(-1)!)
-            if (digestPath && nativeDigest(boundedFile(paths[2], MAX_INSTALLATION_BYTES)) !== digestPath[1]) return result('INCOMPATIBLE', 'HOOK_COMMAND_DIGEST_MISMATCH', handlers.length)
-            validatedCommands.add(paths[2])
+          for (const path of paths) assertProfilePath(path, dirname(path))
+          if (paths.some((path, index) => resolve(path) !== path || !existsSync(path) || !statSync(path).isFile() ||
+            (realpathSync(path) !== path && !(legacy && index === 0 && platform === 'win32' && /^node\.exe$/i.test(realpathSync(path).split(/[\\/]/).at(-1)!))))) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', handlers.length)
+          if (!validatedCommands.has(paths[1])) {
+            const digestPath = /^native-hook-([a-f0-9]{64})\.cjs$/.exec(paths[1].split(/[\\/]/).at(-1)!)
+            if (digestPath && nativeDigest(boundedFile(paths[1], MAX_INSTALLATION_BYTES)) !== digestPath[1]) return result('INCOMPATIBLE', 'HOOK_COMMAND_DIGEST_MISMATCH', handlers.length)
+            validatedCommands.add(paths[1])
           }
-          const windows = '& ' + paths.slice(1).map(path => "'" + path.replaceAll("'", "''") + "'").join(' ')
-          if (platform === 'win32' && hook.commandWindows !== windows) return result('INCOMPATIBLE', 'WINDOWS_COMMAND_INCOMPATIBLE', handlers.length)
+          const windows = '& ' + paths.map(path => "'" + path.replaceAll("'", "''") + "'").join(' ')
+          if (platform === 'win32' && !legacy && hook.commandWindows !== windows) return result('INCOMPATIBLE', 'WINDOWS_COMMAND_INCOMPATIBLE', handlers.length)
           const name = event.replace(/[A-Z]/g, (letter, offset) => (offset ? '_' : '') + letter.toLowerCase())
-          matches.push({ key: `${configPath}:${name}:${groupIndex}:${handlerIndex}`, event })
+          matches.push({ key: `${configPath}:${name}:${groupIndex}:${handlerIndex}`, event, sourcePath: configPath })
         }
       }
       if (matches.length > 1) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS'), repairability: 'CONFLICT' }
@@ -79,6 +81,28 @@ export function inspectNativeInstallation(root: string, target: { repositoryId: 
   }
 }
 
+export function inspectSharedNativeInstallation(root: string, target: { repositoryId: string; worktreeId: string; generation: string }) {
+  try {
+    const identity = nativeGitIdentity(root)
+    const main = dirname(identity.commonDirectory)
+    if (main === identity.root || join(main, '.git') !== identity.commonDirectory) return
+    const anchorPath = nativeBindingPath(main)
+    const binding = resolveNativeHookBinding(anchorPath, root)
+    if (binding.repositoryId !== target.repositoryId || binding.worktreeId !== target.worktreeId || binding.generation !== target.generation) return
+    const anchor = readNativeBinding(anchorPath)
+    const installation = inspectNativeInstallation(main, anchor)
+    if (installation.state !== 'CONFIGURED') return
+    const state = readInstallation(main, anchor)
+    const helper = join(main, 'out/session-context/native-hook.cjs')
+    const checkoutHelper = join(root, 'out/session-context/native-hook.cjs')
+    if (!state || ownedCommandPaths(state.owned.command, main, state.snapshot.schema === 1)?.paths[1] !== helper) return
+    assertProfilePath(checkoutHelper, root)
+    const local = boundedFile(checkoutHelper, MAX_INSTALLATION_BYTES)
+    if (!local.includes(nativeDispatchMismatch) || boundedFile(helper, MAX_INSTALLATION_BYTES) !== local) return
+    return { handlers: installation.handlers, digest: nativeDigest(JSON.stringify([installation.digest, nativeDigest(local), anchor])) }
+  } catch {}
+}
+
 interface OwnedHook { type: 'command'; command: string; commandWindows?: string; timeout: 3 }
 interface HookSnapshot { schema: 1 | 2; path: string; before: string | null; installedDigest: string; owned?: OwnedHook; binding?: NativeHookBinding; rollbackBase?: string | null; previousOwned?: OwnedHook }
 interface InstallationState { snapshot: HookSnapshot; binding: NativeHookBinding; owned: OwnedHook; text: string | null; cleaned: string | null; revisions: Map<string, FileRevision>; removed: number }
@@ -87,6 +111,16 @@ const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
 function hookPaths(root: string) {
   const directory = join(root, '.code-awareness/native-hooks')
   return { directory, bindingPath: join(directory, 'binding.json'), snapshotPath: join(directory, 'installation.json'), configPath: join(root, '.codex/hooks.json') }
+}
+function ownedCommandPaths(command: string, root: string, allowLegacy: boolean) {
+  const { bindingPath } = hookPaths(root)
+  const quoted = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(command)
+  if (quoted?.[3] === bindingPath) return { paths: quoted.slice(1), legacy: false }
+  if (!allowLegacy) return
+  const paths = command.split(' ')
+  if (paths.length === 3 && paths[2] === bindingPath && paths[1] === join(root, 'out/session-context/native-hook.cjs') &&
+      paths.every(path => resolve(path) === path && !/["'\s&|<>^%!$();\x60]/.test(path)) &&
+      /^node(?:\.exe)?$/i.test(paths[0].split(/[\\/]/).at(-1)!)) return { paths, legacy: true }
 }
 function checkPaths(root: string): void {
   if (realpathSync(root) !== resolve(root)) throw new Error('UNSAFE_HOOK_DIRECTORY')
@@ -137,12 +171,14 @@ function readInstallation(root: string, target?: { repositoryId: string; worktre
     owned = [...candidates.values()].find(hook => nativeDigest(composeNativeHooks(snapshot.before, hook.command, hook.commandWindows)) === snapshot.installedDigest)
   }
   if (!owned || owned.type !== 'command' || owned.timeout !== 3 || typeof owned.command !== 'string' || !same(Object.keys(owned).sort(), ['command', 'commandWindows', 'timeout', 'type'].filter(key => key !== 'commandWindows' || owned!.commandWindows !== undefined).sort())) throw new Error('INSTALLATION_OWNERSHIP_UNPROVEN')
-  const command = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(owned.command)
-  if (!command || command[3] !== bindingPath) throw new Error('INSTALLATION_OWNERSHIP_UNPROVEN')
+  const command = ownedCommandPaths(owned.command, root, snapshot.schema === 1 && owned.commandWindows === undefined)
+  if (!command || command.legacy && text !== null && nativeDigest(text) !== snapshot.installedDigest) throw new Error('INSTALLATION_OWNERSHIP_UNPROVEN')
   const before = parseConfig(snapshot.before)
   const ownership = [owned, ...(snapshot.previousOwned ? [snapshot.previousOwned] : [])]
   for (const prior of ownership) {
-    if (prior.type !== 'command' || prior.timeout !== 3 || typeof prior.command !== 'string' || prior.commandWindows !== undefined && typeof prior.commandWindows !== 'string' || !/^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(prior.command) || !prior.command.endsWith('"' + bindingPath + '"')) throw new Error('INSTALLATION_OWNERSHIP_UNPROVEN')
+    if (prior.type !== 'command' || prior.timeout !== 3 || typeof prior.command !== 'string' ||
+        prior.commandWindows !== undefined && typeof prior.commandWindows !== 'string' ||
+        !ownedCommandPaths(prior.command, root, prior.commandWindows === undefined)) throw new Error('INSTALLATION_OWNERSHIP_UNPROVEN')
   }
   let removed = 0
   for (const event of nativeHookEvents) {

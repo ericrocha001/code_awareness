@@ -8,6 +8,8 @@ export interface HookListSummary {
   stale?: boolean
   hashDigest?: string
 }
-export function summarizeHookList(response: unknown, expected: { key: string; event: string }[]): HookListSummary
+export function summarizeHookList(response: unknown, expected: { key: string; event: string; sourcePath?: string }[]): HookListSummary
+export function matchesHookKey(key: unknown, handler: { key: string; sourcePath?: string }): boolean
+export function sameHookPath(first: unknown, second: unknown): boolean
 
 export function isQualifiedCodexHookVersion(version: string): boolean
