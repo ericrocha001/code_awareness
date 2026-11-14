@@ -10,14 +10,15 @@ node scripts/session-context/native-hooks.cjs status
 
 Rode `status` também em Worktrees criadas fora do aplicativo, depois de vinculá-las ao repositório ativo. `INSTALLATION_OWNERSHIP_UNPROVEN` indica que o snapshot não comprova a propriedade dos handlers. Em conflito, preserve a configuração e investigue sua origem antes de reparar.
 
-Somente após autorização explícita do operador para alterar os hooks desse checkout:
+Antes de abrir a sessão Codex, selecione o caminho absoluto do executável que será usado para iniciá-la. Após autorização explícita do operador para alterar os hooks do checkout, execute a preparação na própria Worktree:
 
 ```powershell
-node scripts/session-context/native-hooks.cjs install --authorized --git-commit-tool=mcp__code_awareness_local__commit_git_changes
+node scripts/session-context/native-hooks.cjs status "--codex=$codexExecutable"
+node scripts/session-context/native-hooks.cjs install --authorized "--codex=$codexExecutable" --git-commit-tool=mcp__code_awareness_local__commit_git_changes
 node scripts/session-context/native-hooks.cjs disable --authorized
 ```
 
-Use o nome exato da ferramenta MCP autorizado naquele ambiente. A instalação acrescenta handlers, conserva os existentes e guarda o estado para restauração. Revise e confie nos novos hooks pela interface do Codex; configuração não comprova captura. Se houver edição concorrente do arquivo, o desligamento preserva essa edição e informa `restored:false`.
+Use o nome exato da ferramenta MCP autorizado naquele ambiente. A instalação acrescenta handlers, conserva os existentes e guarda o estado para restauração. Inicie a sessão com o executável selecionado e revise os hashes pela interface nativa do Codex. Confirme a captura com eventos dessa sessão e recibos verificados. Se houver edição concorrente do arquivo, o desligamento preserva essa edição e informa `restored:false`.
 
 O comando coleta apenas campos estruturais permitidos em spool limitado, sem rede ou SQLite próprio. A ativação do projeto e consultas de Session Context ingerem pequenas rodadas no Store existente. `list_agent_sessions` com `source:NATIVE_HOOK` lista identidades pseudonimizadas; `discover_execution_context` aprofunda as relações.
 
