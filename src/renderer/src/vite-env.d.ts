@@ -32,6 +32,7 @@ declare global {
   interface Window {
     codeAwareness: {
       getBranchOrchestration: (request: import('../../shared/types/branch-manager-types').BranchManagerRequest) => Promise<import('../../shared/types/branch-manager-types').BranchManagerResult>
+      getWorkBoard: (request: import('../../shared/types/work-board-types').WorkBoardRequest) => Promise<import('../../shared/types/work-board-types').WorkBoardResult>
       getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationData>>
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>

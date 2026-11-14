@@ -105,6 +105,7 @@ import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitManagementController, registerGitManagementHandlers } from './ipc/git-management-handler'
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
 import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
+import { registerWorkBoardHandler } from './ipc/work-board-handler'
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
@@ -478,6 +479,8 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
+  let boardGit: GitOperationsService | undefined
+  registerWorkBoardHandler(activeProjects, continuumSession, () => ({ git: boardGit, sessions: activeSessionContext, ledger: validationLedger }))
   const previewDirectory = join(app.getPath('userData'), 'work-orchestration')
   mkdirSync(join(previewDirectory, 'preview-profiles'), { recursive: true })
   const previewProfiles = new PreviewProfileStore(join(previewDirectory, 'preview-profiles'))
@@ -512,6 +515,7 @@ app.whenReady().then(async () => {
   activeProjects.onBeforeChange(async () => {
     await gitManagement.deactivate()
     workOrchestration.deactivate()
+    boardGit = undefined
     await branchOrchestration.deactivate()
     await mcpLifecycle.quiesce()
     await activeValidationExecution?.shutdown()
@@ -675,6 +679,7 @@ app.whenReady().then(async () => {
       GitAtlasSqliteCache.clearRepository(join(app.getPath('userData'),'cache','git-atlas'),gitRepositoryId,common,authorization)
     })
     gitManagement.bind(gitOperations)
+    boardGit = gitOperations
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
     branchOrchestration.bind(gitOperations, githubIntegration, project.path)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
