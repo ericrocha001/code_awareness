@@ -9,3 +9,5 @@ export interface HookListSummary {
   hashDigest?: string
 }
 export function summarizeHookList(response: unknown, expected: { key: string; event: string }[]): HookListSummary
+
+export function isQualifiedCodexHookVersion(version: string): boolean

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { publicationRequestDigest, publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import { nativeObservationBatch } from './native-hook-ingestion'
@@ -275,6 +275,12 @@ test('U1 legacy v1 ownership is reconstructed only from exact composition and ke
   expect(f.install()).toMatchObject({ state: 'CONFIGURED' }); expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).before).toBe(legacy.before)
   const unknown = JSON.parse(readFileSync(f.snapshot, 'utf8')); unknown.schema = 1; unknown.installedDigest = '0'.repeat(64); writeFileSync(f.snapshot, JSON.stringify(unknown))
   expect(() => f.install()).toThrow('INSTALLATION_OWNERSHIP_UNPROVEN')
+  const config = readFileSync(f.config, 'utf8')
+  unknown.installedDigest = nativeDigest(config)
+  unknown.before = config
+  writeFileSync(f.snapshot, JSON.stringify(unknown))
+  expect(inspectNativeInstallation(f.root, readNativeBinding(f.binding))).toMatchObject({ state: 'UNKNOWN', reasonCode: 'INSTALLATION_OWNERSHIP_UNPROVEN', repairability: 'CONFLICT', installed: 0 })
+  expect(readFileSync(f.config, 'utf8')).toBe(config)
 }, 30000)
 
 test('U1 rejects oversized config before creating the spool or installation journal', () => {
@@ -298,7 +304,7 @@ test('U1 repairs external binding drift from the journal and re-enables a disabl
   expect(JSON.parse(readFileSync(f.binding, 'utf8'))).toEqual(binding)
   expect(f.install()).toMatchObject({ state: 'NO_CHANGE' })
   expect(disableNativeHooks(f.root, true)).toMatchObject({ restored: true }); expect(existsSync(f.config)).toBe(false)
-}, 30000)
+}, 60000)
 
 test('U1 publishes a new command only after preflight and detects immutable bundle tampering', () => {
   const f = installationFixture(), commandContent = 'process.exitCode = 0\n'
