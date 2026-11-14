@@ -1,5 +1,5 @@
 const { createHash } = require('node:crypto')
-const qualifiedVersions = new Set(['0.166.0-alpha.6', '0.167.0-alpha.3.2'])
+const qualifiedVersions = new Set(['0.166.0-alpha.6', '0.167.0-alpha.3.2', '0.169.0-alpha.11.1'])
 const isQualifiedCodexHookVersion = version => qualifiedVersions.has(version)
 const events = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd']
 function summarizeHookList(response, expected) {

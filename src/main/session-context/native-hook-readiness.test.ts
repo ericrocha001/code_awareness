@@ -131,9 +131,12 @@ it('U2 distinguishes untrusted, changed hash, missing/ambiguous hooks, unsupport
   expect(c.calls).toEqual([])
   c.client.authorized = true
   const qualified = c.scope()
+  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.11.1' })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNTRUSTED', clientVersion: '0.169.0-alpha.11.1' })
+  c.calls.length = 0
   c.changeScope({ ...qualified, projectTrusted: false })
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'PROJECT_TRUST_UNAVAILABLE' })
-  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.11.1' })
+  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.99' })
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'VERSION_UNSUPPORTED' })
   expect(c.calls).toEqual([])
   c.changeScope(qualified)

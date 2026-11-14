@@ -41,8 +41,8 @@ function run(args, { version = '0.166.0-alpha.6', replaced = false } = {}) {
   return { invoke, installed, output, executables }
 }
 
-test('provisions the linked Worktree using the explicitly selected executable', () => {
-  const f = run(['install', '--authorized', '--codex=' + binary])
+test('provisions the linked Worktree using the explicitly selected executable including 0.169.0-alpha.11.1', () => {
+  const f = run(['install', '--authorized', '--codex=' + binary], { version: '0.169.0-alpha.11.1' })
   f.invoke()
   assert.deepEqual(f.executables, [binary, binary])
   assert.equal(f.installed.length, 1)
@@ -51,10 +51,14 @@ test('provisions the linked Worktree using the explicitly selected executable', 
 })
 
 test('status is read-only and exposes the selected client qualification', () => {
-  const f = run(['status', '--codex=' + binary], { version: '0.169.0-alpha.11.1' })
+  const f = run(['status', '--codex=' + binary], { version: '0.169.0-alpha.99' })
   f.invoke()
   assert.equal(f.output[0].client.reasonCode, 'VERSION_UNSUPPORTED')
   assert.equal(f.installed.length, 0)
+  const qualified = run(['status', '--codex=' + binary], { version: '0.169.0-alpha.11.1' })
+  qualified.invoke()
+  assert.equal(qualified.output[0].client.state, 'QUALIFIED')
+  assert.equal(qualified.output[0].client.version, '0.169.0-alpha.11.1')
 })
 
 test('installation refuses missing authorization, unidentified client, unsupported version and generation drift', () => {
@@ -62,7 +66,7 @@ test('installation refuses missing authorization, unidentified client, unsupport
   for (const [args, options, error] of [
     [['install', selected], {}, /HOOK_AUTHORIZATION_REQUIRED/],
     [['install', '--authorized'], {}, /CODEX_EXECUTABLE_SELECTION_REQUIRED/],
-    [['install', '--authorized', selected], { version: '0.169.0-alpha.11.1' }, /VERSION_UNSUPPORTED/],
+    [['install', '--authorized', selected], { version: '0.169.0-alpha.99' }, /VERSION_UNSUPPORTED/],
     [['install', '--authorized', selected], { replaced: true }, /WORKTREE_STALE/]
   ]) {
     const f = run(args, options)
