@@ -98,6 +98,7 @@ it('mounts lazily and revalidates inventory automatically on tab return while pr
   const view = render(<WorkOrchestrationTab state={state} active={false}/>)
   expect(read).not.toHaveBeenCalled()
   view.rerender(<WorkOrchestrationTab state={state} active/>)
+  fireEvent.click(screen.getByRole('button', { name: 'Branches & Worktrees' }))
   fireEvent.click(await screen.findByText('topic'))
   fireEvent.change(screen.getByPlaceholderText('Nome ou referência'), { target: { value: 'topic' } })
   await screen.findByText(/cobertura indisponível/)

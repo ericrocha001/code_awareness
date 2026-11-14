@@ -403,6 +403,18 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return nativeArtifact ? { ...artifact, provenance: { ...artifact.provenance, nativeArtifact } } : artifact
   }
   list(filter: ListArtifactsFilter = {}): ArtifactPage { this.reconcile?.(); return this.store.list(filter) }
+  listIndexedArtifacts(filter: ListArtifactsFilter, kinds: readonly string[]): ArtifactPage {
+    this.assertActive()
+    return this.store.list(filter, { kinds })
+  }
+  readIndexedGraph(query: ContinuumGraphQuery) {
+    this.assertActive()
+    return this.store.graph(query, { indexOnly: true })
+  }
+  indexedArtifact(artifactId: string) {
+    this.assertActive()
+    return this.store.indexedArtifact(artifactId)
+  }
   importArtifact(source: string, input: CreateArtifactInput): ArtifactReceipt {
     const existing = this.store.get(input.artifactId)
     if (!existing) {
