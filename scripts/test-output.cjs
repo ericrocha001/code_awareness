@@ -216,16 +216,16 @@ async function run(command, args = [], options = {}) {
     catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
     if (receipt.registration.state === 'PERSISTED') {
-      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3 }) } catch (error) { diagnostics.push(publicError(error)) }
+      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200 }) } catch (error) { diagnostics.push(publicError(error)) }
     } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
       try {
-        const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id }).pending
+        const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
         if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
       } catch { }
     }
   } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
     try {
-      const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id }).pending
+      const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
       if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
     } catch { }
   }

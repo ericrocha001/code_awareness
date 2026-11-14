@@ -20,7 +20,7 @@ export async function requestAcceptanceObservation(window: BrowserWindow, prompt
   const { identity, scenario } = prompt
   const response = await dialog.showMessageBox(window, { type: 'question', title: 'Aceitação guiada do preview',
     message: scenario.title,
-    detail: `Instrução: ${scenario.instruction}\nResultado esperado: ${scenario.expected}\n\nBranch: ${identity.branch ?? '(detached)'}\nHEAD: ${identity.head.slice(0, 12)}\nSessão: ${prompt.sessionId}\n\nSomente sua resposta registra a observação. Cancelar ou não verificar não produz prova aprovada.`,
+    detail: `Posicionamento: ${scenario.navigation} (sessão READY; tela alvo não posicionada automaticamente)\nInstrução: ${scenario.instruction}\nResultado esperado: ${scenario.expected}\n\nBranch: ${identity.branch ?? '(detached)'}\nHEAD: ${identity.head.slice(0, 12)}\nSessão: ${prompt.sessionId}\n\nSomente sua resposta registra a observação. Cancelar ou não verificar não produz prova aprovada.`,
     buttons: ['Cancelar', 'Não consegui verificar', 'Reprovar', 'Aprovar'], defaultId: 0, cancelId: 0, noLink: true })
   return (['CANCELLED', 'NOT_VERIFIABLE', 'REJECTED', 'APPROVED'] as const)[response.response] ?? 'CANCELLED'
 }

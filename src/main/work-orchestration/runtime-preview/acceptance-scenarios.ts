@@ -1,16 +1,20 @@
 import type { PreviewAcceptanceOutcome } from '../../../shared/types/runtime-preview-operations'
 
+export type AcceptanceNavigationMode = 'GUIDED_MANUAL_NAVIGATION' | 'AUTOMATED_REQUIRED'
+
 export interface AcceptanceScenario {
   id: string
   title: string
   instruction: string
   expected: string
   component: 'WEB' | 'ELECTRON_RENDERER'
+  navigation: AcceptanceNavigationMode
+  targetPositioned: boolean
 }
 
 export interface AcceptancePrompt {
   sessionId: string
-  scenario: Pick<AcceptanceScenario, 'id' | 'title' | 'instruction' | 'expected'>
+  scenario: Pick<AcceptanceScenario, 'id' | 'title' | 'instruction' | 'expected' | 'navigation' | 'targetPositioned'>
   identity: { repositoryId: string; worktreeId: string; branch: string | null; head: string }
 }
 
@@ -19,9 +23,11 @@ export type AcceptanceObserver = (prompt: AcceptancePrompt) => Promise<PreviewAc
 export const ACCEPTANCE_SCENARIOS: readonly AcceptanceScenario[] = [{
   id: 'ACADEMY_DOWNLOAD_BUSY',
   title: 'Download de pacote na Academy',
-  instruction: 'Na instância de preview, abra Academy e acione uma vez "Baixar ZIP" ou "Baixar pacote".',
+  instruction: 'Na janela de preview (navegação manual pelo operador; o host não posiciona a tela automaticamente), abra Academy e acione uma vez "Baixar ZIP" ou "Baixar pacote".',
   expected: 'O botão mostra atividade, um segundo clique não duplica o trabalho e a ação termina em sucesso ou erro recuperável.',
-  component: 'ELECTRON_RENDERER'
+  component: 'ELECTRON_RENDERER',
+  navigation: 'GUIDED_MANUAL_NAVIGATION',
+  targetPositioned: false
 }]
 
 export const acceptanceScenario = (id: string) => ACCEPTANCE_SCENARIOS.find(scenario => scenario.id === id)

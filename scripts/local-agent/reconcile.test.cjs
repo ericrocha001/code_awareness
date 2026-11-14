@@ -13,7 +13,7 @@ function workspace(t) {
   return cwd
 }
 
-function writeReceipt(cwd, registration, extra = {}) {
+function writeReceipt(cwd, registration, extra = {}, mtimeMs) {
   const id = randomUUID()
   const directory = path.join(cwd, '.code-awareness', 'test-output', id)
   fs.mkdirSync(directory, { recursive: true })
@@ -21,8 +21,10 @@ function writeReceipt(cwd, registration, extra = {}) {
   receipt.digest = receiptDigest(receipt)
   receipt.registration = registration
   fs.writeFileSync(path.join(directory, 'stdout.log'), 'full log')
-  fs.writeFileSync(path.join(directory, 'receipt.json'), JSON.stringify(receipt, null, 2))
-  return { id, directory, file: path.join(directory, 'receipt.json'), digest: receipt.digest }
+  const file = path.join(directory, 'receipt.json')
+  fs.writeFileSync(file, JSON.stringify(receipt, null, 2))
+  if (mtimeMs !== undefined) { const at = new Date(mtimeMs); fs.utimesSync(file, at, at) }
+  return { id, directory, file, digest: receipt.digest }
 }
 
 const pendingTimeout = { state: 'REGISTRATION_PENDING', reason: 'IPC_TIMEOUT' }
@@ -113,4 +115,46 @@ test('explicit receipt reconciliation refuses tampered identity, traversal and s
   try { fs.symlinkSync(outside, path.join(cwd, '.code-awareness', 'test-output', link), 'junction') } catch { return }
   await assert.rejects(reconcileReceipts({ cwd, connection, id: link }), { code: 'INVALID_RECEIPT_PATH' })
   assert.equal(connection.calls.length, 0)
+})
+
+test('cursor pagination reconciles all pending pages after prior pages persist without INVALID_CURSOR, duplicates or omissions', async t => {
+  const cwd = workspace(t), connection = ledger(), base = 1790000000000
+  const pending = [0, 1, 2].map(offset => writeReceipt(cwd, pendingTimeout, {}, base + offset * 1000))
+  const page1 = await reconcileReceipts({ cwd, connection, limit: 2 })
+  assert.equal(page1.reconciled.length, 2)
+  assert.equal(page1.remaining, 1)
+  assert.ok(page1.nextCursor)
+  const page2 = await reconcileReceipts({ cwd, connection, limit: 2, cursor: page1.nextCursor })
+  assert.equal(page2.reconciled.length, 1)
+  assert.equal(page2.remaining, 0)
+  assert.equal(page2.nextCursor, undefined)
+  const processed = [...page1.reconciled, ...page2.reconciled].map(entry => entry.id)
+  assert.equal(new Set(processed).size, 3)
+  assert.deepEqual(new Set(processed), new Set(pending.map(item => item.id)))
+  assert.equal(connection.proofs.size, 3)
+  assert.deepEqual(pendingReceiptIds(cwd), { ids: [], pending: 0 })
+})
+
+test('bounded scan reports partialCoverage under scanLimit and reaches older pending receipts behind >200 healthy ones', async t => {
+  const base = 1790000000000
+  const cwdWindow = workspace(t), connWindow = ledger()
+  const oldWindow = writeReceipt(cwdWindow, pendingTimeout, {}, base)
+  for (let i = 1; i <= 205; i++) writeReceipt(cwdWindow, { state: 'PERSISTED', proofId: `proof-w-${i}` }, {}, base + i * 1000)
+  const firstWindow = await reconcileReceipts({ cwd: cwdWindow, connection: connWindow, limit: 2, scanLimit: 200 })
+  assert.deepEqual(firstWindow.reconciled, [])
+  assert.equal(firstWindow.partialCoverage, true)
+  assert.ok(firstWindow.nextCursor)
+  const secondWindow = await reconcileReceipts({ cwd: cwdWindow, connection: connWindow, limit: 2, scanLimit: 200, cursor: firstWindow.nextCursor })
+  assert.deepEqual(secondWindow.reconciled.map(entry => [entry.id, entry.state]), [[oldWindow.id, 'PERSISTED']])
+  assert.equal(secondWindow.remaining, 0)
+  assert.equal(secondWindow.partialCoverage, undefined)
+  assert.equal(fs.readFileSync(path.join(oldWindow.directory, 'stdout.log'), 'utf8'), 'full log')
+
+  const cwdMulti = workspace(t), connMulti = ledger()
+  const oldMulti = writeReceipt(cwdMulti, pendingTimeout, {}, base)
+  for (let i = 1; i <= 205; i++) writeReceipt(cwdMulti, { state: 'PERSISTED', proofId: `proof-m-${i}` }, {}, base + i * 1000)
+  const found = await reconcileReceipts({ cwd: cwdMulti, connection: connMulti })
+  assert.deepEqual(found.reconciled.map(entry => [entry.id, entry.state]), [[oldMulti.id, 'PERSISTED']])
+  assert.equal(found.remaining, 0)
+  assert.equal(connMulti.proofs.size, 1)
 })

@@ -66,6 +66,7 @@ function readReceipt(cwd, id) {
 }
 
 function persistRegistration(file, expected, registration) {
+  const stat = fs.statSync(file)
   const current = JSON.parse(fs.readFileSync(file, 'utf8'))
   if (current.id !== expected.id || current.digest !== expected.digest) throw invalid('INVALID_RECEIPT')
   const next = {
@@ -75,6 +76,8 @@ function persistRegistration(file, expected, registration) {
   const temporary = `${file}.${process.pid}.tmp`
   try {
     fs.writeFileSync(temporary, JSON.stringify(next, null, 2), { mode: 0o600, flag: 'wx' })
+    // Preserve receipt mtime so forward cursor order across reconciliation pages never shifts after persistence.
+    fs.utimesSync(temporary, stat.atime, stat.mtime)
     fs.renameSync(temporary, file)
   } finally { fs.rmSync(temporary, { force: true }) }
   return next.registration
@@ -119,39 +122,49 @@ async function reconcileReceipt(id, { cwd, connection, association }) {
   return { id, registration: persistRegistration(file, receipt, outcome), changed: true }
 }
 
-function pendingReceiptIds(cwd, { limit = 5, cursor, exclude, scanLimit = 200 } = {}) {
+function pendingReceiptIds(cwd, { limit = 5, cursor, exclude, scanLimit } = {}) {
+  if (cursor && !receiptIdPattern.test(cursor)) throw invalid('INVALID_CURSOR')
   const root = path.join(cwd, '.code-awareness', 'test-output')
   let entries
   try { entries = fs.readdirSync(root, { withFileTypes: true }) } catch (error) { if (error.code === 'ENOENT') return { ids: [], pending: 0 }; throw error }
   const candidates = entries
     .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && receiptIdPattern.test(entry.name) && entry.name !== exclude)
-    .map(entry => { try { return { id: entry.name, time: fs.statSync(path.join(root, entry.name, 'receipt.json')).mtimeMs } } catch { return null } })
+    .map(entry => { try { return { id: entry.name, time: Math.floor(fs.statSync(path.join(root, entry.name, 'receipt.json')).mtimeMs) } } catch { return null } })
     .filter(Boolean)
     .sort((a, b) => b.time - a.time || a.id.localeCompare(b.id))
-    .slice(0, scanLimit)
-  const pending = []
-  for (const { id } of candidates) {
+  const startIndex = cursor ? candidates.findIndex(entry => entry.id === cursor) + 1 : 0
+  if (cursor && startIndex === 0) throw invalid('INVALID_CURSOR')
+  const budget = scanLimit ?? 200
+  const maxBudget = scanLimit === undefined ? 1000 : budget
+  const slice = []
+  let extraPending = 0
+  let i = startIndex
+  for (; i < candidates.length; i++) {
+    const scanned = i - startIndex
+    if (scanned >= maxBudget) break
+    if (scanned >= budget && (slice.length >= limit || (slice.length > 0 && extraPending > 0))) break
     try {
-      const { receipt } = readReceipt(cwd, id)
+      const { receipt } = readReceipt(cwd, candidates[i].id)
       const registration = receipt.registration
       if ((registration?.state === 'REGISTRATION_PENDING' || registration?.state === 'UNAVAILABLE') &&
         registration.reason !== 'REGISTRATION_NOT_REQUESTED') {
-        pending.push(id)
+        if (slice.length < limit) slice.push(candidates[i].id)
+        else extraPending++
       }
     } catch { continue }
   }
-  const offset = cursor ? pending.indexOf(cursor) + 1 : 0
-  if (cursor && offset === 0) throw invalid('INVALID_CURSOR')
-  const slice = pending.slice(offset, offset + limit)
-  const remainingAfter = Math.max(0, pending.length - (offset + slice.length))
-  return { ids: slice, pending: pending.length - offset, ...(remainingAfter > 0 ? { nextCursor: slice[slice.length - 1] } : {}) }
+  const partialCoverage = i < candidates.length
+  const nextCursor = extraPending > 0 ? slice[slice.length - 1] : partialCoverage ? candidates[i - 1]?.id : undefined
+  return { ids: slice, pending: slice.length + extraPending, ...(nextCursor ? { nextCursor } : {}), ...(partialCoverage ? { partialCoverage: true } : {}) }
 }
 
-async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, cursor, association, connection, exclude } = {}) {
+async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, cursor, scanLimit, association, connection, exclude } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw invalid('INVALID_LIMIT')
+  if (scanLimit !== undefined && (!Number.isSafeInteger(scanLimit) || scanLimit < 1)) throw invalid('INVALID_LIMIT')
   if (id) readReceipt(cwd, id)
-  const selected = id ? { ids: [id], pending: 1, nextCursor: null } : pendingReceiptIds(cwd, { limit, cursor, exclude })
-  if (!selected.ids.length) return { reconciled: [], remaining: 0 }
+  const selected = id ? { ids: [id], pending: 1 } : pendingReceiptIds(cwd, { limit, cursor, exclude, scanLimit })
+  const tail = { ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}), ...(selected.partialCoverage ? { partialCoverage: true } : {}) }
+  if (!selected.ids.length) return { reconciled: [], remaining: 0, ...tail }
   const active = connection || await validationConnection(cwd, profile)
   const reconciled = []
   for (const receiptId of selected.ids) {
@@ -166,7 +179,7 @@ async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, 
   }
   const stillPending = reconciled.filter(entry => entry.state === 'REGISTRATION_PENDING' || entry.state === 'UNAVAILABLE').length
   const remaining = id ? (stillPending > 0 ? 1 : 0) : stillPending + Math.max(0, selected.pending - selected.ids.length)
-  return { reconciled, remaining, ...(selected.nextCursor ? { nextCursor: selected.nextCursor } : {}) }
+  return { reconciled, remaining, ...tail }
 }
 
 async function registerReceipt(id, { cwd = process.cwd(), profile, association } = {}) {

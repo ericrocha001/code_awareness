@@ -4,11 +4,15 @@ import { previewRequestSchema, RuntimePreviewOperations } from './operations'
 import { ACCEPTANCE_SCENARIOS } from './acceptance-scenarios'
 import { executeRuntimePreviewTool, RUNTIME_PREVIEW_TOOLS } from './mcp'
 
-const source = vi.hoisted(() => ({ fingerprints: [] as string[] }))
+const source = vi.hoisted(() => ({ fingerprints: [] as string[], overrideScenario: null as null | ((id: string) => any) }))
 vi.mock('../../validation-execution/validation-source', () => ({
   captureValidationSource: async () => ({ repositoryId: 'repo', worktreeId: 'tree', generation: 'generation', head: 'a'.repeat(40), branch: 'feature', indexRevision: 'index', worktreeRevision: 'source', cwd: 'checkout' }),
   validationSourceFingerprint: () => source.fingerprints.shift() ?? 'fp-1'
 }))
+vi.mock('./acceptance-scenarios', async importOriginal => {
+  const actual = await importOriginal<typeof import('./acceptance-scenarios')>()
+  return { ...actual, acceptanceScenario: (id: string) => source.overrideScenario?.(id) ?? actual.acceptanceScenario(id) }
+})
 
 const selection = { repositoryId: 'repo', worktreeId: 'tree', generation: 'generation', profileId: 'app', fingerprint: 'a'.repeat(64) }
 const sessionId = randomUUID()
@@ -33,17 +37,18 @@ function setup(options: { observer?: (...args: any[]) => Promise<string>; channe
 }
 
 describe('guided acceptance on an isolated preview session', () => {
-  beforeEach(() => { source.fingerprints.length = 0 })
+  beforeEach(() => { source.fingerprints.length = 0; source.overrideScenario = null })
 
   it('records only the operator answer as a USER proof bound to session, Worktree, head and criterion, then links it', async () => {
     const f = setup()
     const result = await f.accept()
-    expect(f.observer).toHaveBeenCalledWith({ sessionId, scenario: expect.objectContaining({ id: 'ACADEMY_DOWNLOAD_BUSY' }), identity: { repositoryId: 'repo', worktreeId: 'tree', branch: 'feature', head: 'a'.repeat(40) } })
+    expect(f.observer).toHaveBeenCalledWith({ sessionId, scenario: expect.objectContaining({ id: 'ACADEMY_DOWNLOAD_BUSY', navigation: 'GUIDED_MANUAL_NAVIGATION', targetPositioned: false }), identity: { repositoryId: 'repo', worktreeId: 'tree', branch: 'feature', head: 'a'.repeat(40) } })
     expect(f.ledger.recordProof).toHaveBeenCalledOnce()
     expect(f.ledger.recordProof.mock.calls[0][0]).toMatchObject({ kind: 'MANUAL_ACCEPTANCE', producer: 'USER', status: 'PASSED', scope: ['renderer/index.js'], sourceFingerprint: 'fp-1',
+      summary: expect.stringContaining('GUIDED_MANUAL_NAVIGATION, sem posicionamento automático'),
       evidenceFor: ['criterion', 'runtime-preview:' + sessionId, 'execution:execution'], commandProfile: { command: 'runtime-preview:guided-acceptance', cwd: 'checkout' } })
     expect(f.runner.linkValidation).toHaveBeenCalledWith(sessionId, expect.objectContaining({ proofId: 'proof-1', criterionId: 'criterion', executionId: 'execution' }), 3, expect.any(Function))
-    expect(result).toMatchObject({ success: true, data: { kind: 'ACCEPTANCE', outcome: 'APPROVED', proofId: 'proof-1', qualification: { status: 'PASSED' } } })
+    expect(result).toMatchObject({ success: true, data: { kind: 'ACCEPTANCE', outcome: 'APPROVED', navigation: 'GUIDED_MANUAL_NAVIGATION', targetPositioned: false, proofId: 'proof-1', qualification: { status: 'PASSED' } } })
   })
 
   it('records a rejection as FAILED behavior, never as success', async () => {
@@ -107,5 +112,21 @@ describe('guided acceptance on an isolated preview session', () => {
     const invoked = await executeRuntimePreviewTool(f.service, 'request_runtime_preview_acceptance', { sessionId, scenarioId: 'UNKNOWN', bindingId: 'b', criterionId: 'c', outcome: 'APPROVED' }, () => {})
     expect(invoked.isError).toBe(true)
     expect(f.observer).not.toHaveBeenCalled()
+  })
+
+  it('rejects a scenario contract requiring automated positioning with UNSUPPORTED_SCENARIO', async () => {
+    source.overrideScenario = () => ({ ...ACCEPTANCE_SCENARIOS[0], navigation: 'AUTOMATED_REQUIRED', targetPositioned: false })
+    const f = setup()
+    expect(await f.service.handle(request)).toEqual({ success: false, code: 'UNSUPPORTED_SCENARIO' })
+    expect(f.observer).not.toHaveBeenCalled()
+    expect(f.ledger.recordProof).not.toHaveBeenCalled()
+  })
+
+  it('rejects a READY session whose required target component is not VERIFIED before asking the operator', async () => {
+    const f = setup()
+    f.runner.inspect.mockResolvedValue({ ...running, coverage: [{ stage: 'LOADED_COMPONENT', component: 'ELECTRON_RENDERER', status: 'NOT_OBSERVED', fingerprint: null, evidenceRef: null, at: running.at, reasonCode: 'PENDING' }] } as any)
+    expect(await f.accept()).toEqual({ success: false, code: 'SESSION_NOT_READY' })
+    expect(f.observer).not.toHaveBeenCalled()
+    expect(f.ledger.recordProof).not.toHaveBeenCalled()
   })
 })

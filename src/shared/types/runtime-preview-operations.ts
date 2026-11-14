@@ -36,6 +36,7 @@ export interface RuntimePreviewStatus {
   observedAt: string | null
 }
 export type PreviewAcceptanceOutcome = 'APPROVED' | 'REJECTED' | 'NOT_VERIFIABLE' | 'CANCELLED'
+export type PreviewAcceptanceNavigation = 'GUIDED_MANUAL_NAVIGATION' | 'AUTOMATED_NAVIGATION'
 export type RuntimePreviewRequest =
   | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
@@ -58,5 +59,5 @@ export type RuntimePreviewData =
   | { kind: 'EVIDENCE'; sessionId: string; revision: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; entries: unknown[]; nextOffset: number | null }
   | { kind: 'BINDINGS'; bindings: Array<{ bindingId: string; executionId: string }>; reason: string | null }
   | { kind: 'QUALIFICATION'; session: PreviewSessionView; qualification: PreviewQualification }
-  | { kind: 'ACCEPTANCE'; scenarioId: string; outcome: PreviewAcceptanceOutcome; proofId: string | null; session: PreviewSessionView; qualification: PreviewQualification | null }
+  | { kind: 'ACCEPTANCE'; scenarioId: string; outcome: PreviewAcceptanceOutcome; navigation: PreviewAcceptanceNavigation; targetPositioned: boolean; proofId: string | null; session: PreviewSessionView; qualification: PreviewQualification | null }
 export type RuntimePreviewResult = { success: true; data: RuntimePreviewData } | { success: false; code: string }

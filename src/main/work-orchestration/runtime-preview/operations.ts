@@ -362,7 +362,7 @@ export class RuntimePreviewOperations {
       }
       if (request.action === 'ACCEPT') {
         const scenario = acceptanceScenario(request.scenarioId)
-        if (!scenario) return { success: false, code: 'UNSUPPORTED_SCENARIO' }
+        if (!scenario || scenario.navigation !== 'GUIDED_MANUAL_NAVIGATION' || scenario.targetPositioned) return { success: false, code: 'UNSUPPORTED_SCENARIO' }
         if (!this.observeAcceptance || !this.ledger) return { success: false, code: 'ACCEPTANCE_CHANNEL_UNAVAILABLE' }
         const observe = this.observeAcceptance, ledger = this.ledger
         return this.mutate('accept:' + previewFingerprint(request), record.operationId, async () => {
@@ -373,28 +373,30 @@ export class RuntimePreviewOperations {
           const before = await captureValidationSource(identity.record.path, record.selection.repositoryId)
           const ready = await this.runner.inspect(record.sessionId); guard()
           if (ready.state !== 'RUNNING' || ready.readiness !== 'READY' || ready.liveness !== 'VERIFIED') throw new Error('SESSION_NOT_READY')
+          const loaded = ready.coverage.find(entry => entry.stage === 'LOADED_COMPONENT' && entry.component === scenario.component)
+          if (loaded && loaded.status !== 'VERIFIED') throw new Error('SESSION_NOT_READY')
           const binding = await this.binding(ready, request.bindingId)
           const startedAt = new Date().toISOString()
-          const outcome = await observe({ sessionId: record.sessionId, scenario: { id: scenario.id, title: scenario.title, instruction: scenario.instruction, expected: scenario.expected },
+          const outcome = await observe({ sessionId: record.sessionId, scenario: { id: scenario.id, title: scenario.title, instruction: scenario.instruction, expected: scenario.expected, navigation: scenario.navigation, targetPositioned: false },
             identity: { repositoryId: record.selection.repositoryId, worktreeId: record.selection.worktreeId, branch: before.branch, head: before.head } })
           guard(); context.guard()
           const sourceFingerprint = validationSourceFingerprint(before)
           if (sourceFingerprint !== validationSourceFingerprint(await captureValidationSource(identity.record.path, record.selection.repositoryId))) throw new Error('VALIDATION_SOURCE_CHANGED')
           const current = await this.runner.inspect(record.sessionId); guard()
           if (current.state !== 'RUNNING' || current.readiness !== 'READY' || current.liveness !== 'VERIFIED') throw new Error('PREVIEW_SESSION_EXPIRED')
-          if (outcome !== 'APPROVED' && outcome !== 'REJECTED') return { success: true, data: { kind: 'ACCEPTANCE', scenarioId: scenario.id, outcome, proofId: null, session: await this.view(current, true), qualification: null } }
+          if (outcome !== 'APPROVED' && outcome !== 'REJECTED') return { success: true, data: { kind: 'ACCEPTANCE', scenarioId: scenario.id, outcome, navigation: 'GUIDED_MANUAL_NAVIGATION', targetPositioned: false, proofId: null, session: await this.view(current, true), qualification: null } }
           const finishedAt = new Date().toISOString()
           const source = await captureValidationSource(identity.record.path, record.selection.repositoryId)
           if (validationSourceFingerprint(source) !== sourceFingerprint) throw new Error('VALIDATION_SOURCE_CHANGED')
           const declared = profile.adapter.artifacts.map(artifact => artifact.path)
           const proof = ledger.recordProof({ kind: 'MANUAL_ACCEPTANCE', producer: 'USER', status: outcome === 'APPROVED' ? 'PASSED' : 'FAILED', startedAt, finishedAt, durationMs: Date.parse(finishedAt) - Date.parse(startedAt), scope: declared,
-            summary: `Aceitação guiada ${scenario.id}: ${outcome === 'APPROVED' ? 'aprovada' : 'reprovada'} pelo operador.`, sourceFingerprint, commandProfile: { command: 'runtime-preview:guided-acceptance', cwd: source.cwd, source },
+            summary: `Aceitação guiada ${scenario.id} (${scenario.navigation}, sem posicionamento automático): ${outcome === 'APPROVED' ? 'aprovada' : 'reprovada'} pelo operador.`, sourceFingerprint, commandProfile: { command: 'runtime-preview:guided-acceptance', cwd: source.cwd, source },
             evidenceFor: [request.criterionId, 'runtime-preview:' + record.sessionId, 'execution:' + binding.executionId] })
           const observed = await this.runner.inspect(record.sessionId); guard()
           const link = { ...binding, criterionId: request.criterionId, proofId: proof.proofId, evidenceRevision: observed.revision, sourceFingerprint }
           let qualification = await this.assess(observed, link); guard()
           const linked = await this.runner.linkValidation(record.sessionId, link, observed.revision, async () => { guard(); qualification = await this.assess(observed, link) })
-          return { success: true, data: { kind: 'ACCEPTANCE', scenarioId: scenario.id, outcome, proofId: proof.proofId, session: await this.view(linked, true, qualification), qualification } }
+          return { success: true, data: { kind: 'ACCEPTANCE', scenarioId: scenario.id, outcome, navigation: 'GUIDED_MANUAL_NAVIGATION', targetPositioned: false, proofId: proof.proofId, session: await this.view(linked, true, qualification), qualification } }
         })
       }
       return this.mutate('inspect:' + record.sessionId, record.operationId, async () => {

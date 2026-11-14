@@ -55,4 +55,44 @@ describe('Button busy state', () => {
     expect(css).toMatch(/\.btn-spinner\s*\{[^}]*border: 2px solid currentColor/)
     expect(css).not.toMatch(/\.btn-spinner[^{]*\{[^}]*#[0-9a-fA-F]{3,6}/)
   })
+
+  it('prevents native form submit via click and keyboard while busy, then allows submit again once ready', () => {
+    const onSubmit = vi.fn((event: React.FormEvent) => event.preventDefault())
+    const onClick = vi.fn()
+    const { rerender } = render(
+      <form onSubmit={onSubmit}>
+        <Button type="submit" busy busyLabel="Salvando" onClick={onClick}>Salvar</Button>
+      </form>
+    )
+    const button = screen.getByRole('button')
+    expect(fireEvent.click(button)).toBe(false)
+    expect(fireEvent.keyDown(button, { key: 'Enter' })).toBe(false)
+    expect(fireEvent.keyDown(button, { key: ' ' })).toBe(false)
+    expect(onClick).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    const Harness = () => {
+      const [pending, setPending] = React.useState(false)
+      return (
+        <form onSubmit={event => { event.preventDefault(); onSubmit(event); setPending(true) }}>
+          <Button type="submit" busy={pending} busyLabel="Salvando" onClick={onClick}>Enviar</Button>
+        </form>
+      )
+    }
+    rerender(<Harness />)
+    const submitButton = screen.getByRole('button')
+    fireEvent.click(submitButton)
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(fireEvent.click(submitButton)).toBe(false)
+    expect(fireEvent.keyDown(submitButton, { key: 'Enter' })).toBe(false)
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <form onSubmit={onSubmit}>
+        <Button type="submit" busy={false} onClick={onClick}>Enviar</Button>
+      </form>
+    )
+    fireEvent.click(screen.getByRole('button'))
+    expect(onSubmit).toHaveBeenCalledTimes(2)
+  })
 })
