@@ -7,14 +7,39 @@ import { sourceFingerprint, type SessionTargetSelection } from './target'
 import type { SessionStore } from './store'
 import type { EntireProvider, CommandRunner } from './entire-provider'
 import { observeCheckpoint } from './checkpoint-observation'
-import type { CaptureHealthObservation } from './capture-health-types'
+import { captureHealthSources, type CaptureHealthObservation } from './capture-health-types'
+import { nativeHookProviders, nativeHookSource, type NativeHookProvider } from './native-hooks'
+import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
+import { nativeHookReadiness } from './native-hook-readiness'
+import type { NativeTrustObservation } from './native-hook-preflight'
 
 export const captureHealthQuery = z.object({ worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  source: z.enum(captureHealthSources).optional(),
   inspectNativeTrust: z.boolean().default(false),
   cycleId: z.string().min(1).max(200).default('worktree'), trigger: z.enum(['INSPECT', 'RECHECK', 'BEGIN', 'LOCAL_COMMIT']).default('INSPECT'),
   agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/).optional() }).strict().refine(q => !q.worktreeId === !q.generation)
+  .refine(q => q.source !== 'native' || (!q.commitSha && (q.trigger === 'INSPECT' || q.trigger === 'RECHECK') &&
+    (!q.agent || nativeHookProviders.some(provider => provider === q.agent))))
 type Query = z.infer<typeof captureHealthQuery>
+export const nativeCaptureAgent = (query: Query): NativeHookProvider =>
+  query.agent === 'antigravity' ? 'antigravity' : 'codex'
+
+export function inspectNativeCaptureHealth(store: SessionStore, root: string, target: SessionTargetSelection, agent: NativeHookProvider, trust?: NativeTrustObservation) {
+  const { registry, repositoryId } = store
+  const readiness = nativeHookReadiness(registry, root, target, trust, agent)
+  const diagnostics = nativeCaptureDiagnostics(registry, root, agent, target)
+  const partial = diagnostics.historicalCoverage?.state === 'PARTIAL' || readiness.captureReadiness.state === 'PARTIAL'
+  const state = partial ? 'PARTIAL' : readiness.captureReadiness.state === 'OBSERVED' ? 'OBSERVED' :
+    readiness.installation.state === 'CONFIGURED' ? 'CONFIGURED' : readiness.installation.state === 'UNKNOWN' ? 'UNKNOWN' : 'UNAVAILABLE'
+  const reason = partial ? 'CAPTURE_PARTIAL' : readiness.installation.state === 'CONFIGURED'
+    ? readiness.captureReadiness.reasonCode : readiness.installation.reasonCode
+  const discovery = readiness.trust.loadedSource
+    ? { state: 'OBSERVED', loadedSource: readiness.trust.loadedSource }
+    : { state: 'UNKNOWN', reasonCode: readiness.trust.reasonCode }
+  return { feature: 'session_context', source: 'native', version: 1, repositoryId, ...target, agent, state, reason,
+    nativeCapture: { source: nativeHookSource(agent), independentOfEntire: true, ...diagnostics, readiness, discovery, causality: 'NOT_EVALUATED' } }
+}
 const pathsCache = new Map<string, { base: string; hooks: string[] }>()
 function smallText(path: string): string {
   const stat = lstatSync(path)
@@ -89,7 +114,7 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
     ...(prior?.checkpoint.checkpointId ? [marker(join(dirs.common, 'refs/entire/checkpoints', prior.checkpoint.checkpointId.slice(-2), prior.checkpoint.checkpointId))] : [])]))
   const source = sourceFingerprint(root), fingerprint = signature()
   const policyDigest = digest(JSON.stringify([base, ...cached.hooks.map(marker)]))
-  if (query.trigger === 'INSPECT' && !query.commitSha && prior?.configurationDigest === fingerprint && prior.sourceFingerprint === source) return { feature: 'session_context', ...prior, freshness: 'OBSERVED_SNAPSHOT', replay: true }
+  if (query.trigger === 'INSPECT' && !query.commitSha && prior?.configurationDigest === fingerprint && prior.sourceFingerprint === source) return { feature: 'session_context', ...prior, source: 'entire', freshness: 'OBSERVED_SNAPSHOT', replay: true }
   const head = await git(['rev-parse', 'HEAD'])
   const hooks = { git: 'READY' as CaptureHealthObservation['hooks']['git'], codex: codex.state }
   for (let index = 0; index < cached.hooks.length; index++) {
@@ -135,5 +160,5 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
     repairRequiresApproval: !configured,
     sourceFingerprint: source, observedAt: new Date().toISOString(), state: !configured ? 'UNAVAILABLE' : capture.providerSessionId && capture.agent === agent ? 'CAPTURE_OBSERVED' : 'READY_CONFIGURED',
     reason, hooks, capture: capture.providerSessionId && capture.agent === agent ? { state: 'OBSERVED', providerSessionId: capture.providerSessionId, agent } : { state: 'UNOBSERVED' }, checkpoint }
-  return { feature: 'session_context', ...store.recordCaptureHealth(observation, assertActive), freshness: 'OBSERVED_SNAPSHOT', replay: false }
+  return { feature: 'session_context', ...store.recordCaptureHealth(observation, assertActive), source: 'entire', freshness: 'OBSERVED_SNAPSHOT', replay: false }
 }

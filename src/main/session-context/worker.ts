@@ -2,13 +2,13 @@ import type { NativeTrustSnapshot } from './native-hook-preflight'
 import { parentPort, workerData } from 'node:worker_threads'
 import { SessionStore, sessionStorePath } from './store'
 import { EntireProvider, runReadOnly } from './entire-provider'
-import { executeSessionTool, executeLiveSessionTool, type SessionToolName } from './mcp'
+import { executeSessionTool, executeLiveSessionTool, parseCaptureHealth, type SessionToolName } from './mcp'
+import { nativeCaptureAgent } from './capture-health'
 import { isLiveSessionTool } from './entire-live'
 import { sourceFingerprint, type SessionTargetSelection, type LiveSessionTarget } from './target'
 import type { RegistryBatch, RegistryReader } from './checkpoint-registry'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
-import { readNativeBinding } from './native-hooks'
+import { nativeBindingPath, nativeHookProviders, readNativeBinding } from './native-hooks'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { correlateNativeGit } from './native-git-correlation'
 import { nativeInvocationWindow } from './native-capture-window'
@@ -95,19 +95,22 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       associate: association => publication<PublicationAssociationResult>({ action: 'associate', association }),
       invalidate: (invocationId, state) => publication<void>({ action: 'invalidate', invocationId, state })
     }
+    const health = message.name === 'inspect_capture_health' ? parseCaptureHealth(message.args) : undefined
+    const nativeAgent = health?.source === 'native' ? nativeCaptureAgent(health) : undefined
     if (store && message.nativeTargets?.length && !nativeIngesting) {
       parentPort?.postMessage({ id: message.id, phase: 'native-ingestion' })
       nativeIngesting = true
       try {
       for (const nativeTarget of message.nativeTargets) {
-        const candidates = ['.code-awareness/native-hooks/binding.json', '.code-awareness/native-hooks/antigravity/binding.json']
-          .map(rel => join(nativeTarget.root, rel))
+        const candidates = (nativeAgent ? [nativeAgent] : nativeHookProviders)
+          .map(agent => nativeBindingPath(nativeTarget.root, agent))
           .filter(path => existsSync(path))
-        const bindingFiles = candidates.length ? candidates : [join(nativeTarget.root, '.code-awareness/native-hooks/binding.json')]
+        const bindingFiles = candidates.length ? candidates : [nativeBindingPath(nativeTarget.root, nativeAgent)]
         for (const bindingFile of bindingFiles) {
           try {
             const binding = readNativeBinding(bindingFile)
-            if (binding.repositoryId !== repositoryId || binding.worktreeId !== nativeTarget.worktreeId || binding.generation !== nativeTarget.generation) throw new Error('WORKTREE_STALE')
+            if (binding.repositoryId !== repositoryId || binding.worktreeId !== nativeTarget.worktreeId || binding.generation !== nativeTarget.generation ||
+              nativeAgent && (binding.provider ?? 'codex') !== nativeAgent) throw new Error('WORKTREE_STALE')
             const observed = new Map<string, { git: boolean; artifact: boolean }>()
             await ingestNativeHooks(store.registry, binding, async selection => {
               const resolved = await validateTarget(message.id, selection)
@@ -162,7 +165,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       registryReads.set(token, { resolve, reject })
       parentPort?.postMessage({ id: message.id, registryRead: { token, request } })
     })
-    const provider = new EntireProvider(requestStore, target?.root ?? root, assertRequest,
+    const provider = nativeAgent ? {} : new EntireProvider(requestStore, target?.root ?? root, assertRequest,
       (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
       target || message.liveTargets ? async () => { await validateTarget(message.id) } : async () => {},
       phase => { if (!closing) parentPort?.postMessage({ id: message.id, phase }) }, target?.selection)

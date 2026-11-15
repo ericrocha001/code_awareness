@@ -1,3 +1,6 @@
+export const captureHealthSources = ['native', 'entire'] as const
+export type CaptureHealthSource = typeof captureHealthSources[number]
+
 export interface CaptureHealthObservation {
   version: 1
   repositoryId: string

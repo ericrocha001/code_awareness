@@ -121,7 +121,7 @@ export function persistNativeCapture(registry: CheckpointRegistry, binding: Nati
   return { currentOperationalCapture, historicalCoverage }
 }
 
-export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: string, provider?: NativeHookProvider): object {
+export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: string, provider?: NativeHookProvider, summaryTarget?: Pick<NativeHookBinding, 'worktreeId' | 'generation'>) {
   try {
     if (!root) return {}
     const order: readonly NativeHookProvider[] = provider ? [provider] : nativeHookProviders
@@ -131,10 +131,20 @@ export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: st
       catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT' || provider) throw error }
     }
     if (!binding || binding.repositoryId !== registry.repositoryId) return {}
+    if (summaryTarget && (binding.worktreeId !== summaryTarget.worktreeId || binding.generation !== summaryTarget.generation ||
+      (binding.provider ?? 'codex') !== provider)) return {}
     if (!binding.enabled) return { currentOperationalCapture: { state: 'DISABLED' } }
     const identity = nativeGitIdentity(root)
     if (identity.directoryIdentity !== binding.directoryIdentity || identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory) return { currentOperationalCapture: { state: 'UNAVAILABLE', reasonCode: 'WORKTREE_STALE' } }
     const value = JSON.parse(registry.source(nativeDiagnosticSource(binding))?.cursor ?? '{}')
+    if (summaryTarget && value.version === 1) {
+      const history = value.historicalCoverage
+      const diagnostics = history.diagnostics.slice(-3)
+      return { lastIngestion: value.currentOperationalCapture, historicalCoverage: {
+        state: history.state, count: history.count, countCoverage: history.countCoverage, acknowledgedCount: history.acknowledgedCount,
+        resolution: history.resolution, recoveredEvents: history.recoveredEvents, diagnostics, omittedDiagnostics: history.count - diagnostics.length
+      } }
+    }
     return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, historicalCoverage: value.historicalCoverage,
       pipeline: { ...value.pipeline, expected: null, coverage: 'COVERAGE_UNKNOWN', scope: 'INGEST_ATTEMPTS', countCoverage: 'COMPLETED_ROUNDS', lostBeforeIngest: 'UNKNOWN' },
       windows: registry.nativeCaptureWindows(binding.worktreeId, binding.generation).map(window => ({ ...window,

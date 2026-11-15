@@ -10,7 +10,11 @@ MAP retorna nós, contagens limitadas, relações diretas e caminhos de até qua
 
 ## Capture Health
 
-`get_system_health({feature:"session_context"})` inspeciona configuração, captura observada e checkpoint do checkout governado; `worktreeId` e `generation` selecionam uma Worktree irmã. `refresh:true` solicita uma rechecagem limitada e `commitSha` seleciona um commit explícito. Nenhum hook, login ou configuração é alterado. O estado e os recibos compactos ficam no mesmo SessionStore, fora da retenção de transcrições.
+`get_system_health({feature:"session_context"})` retorna a projeção nativa v1 do checkout governado. Use `worktreeId` e `generation` juntos para selecionar uma Worktree e `agent:"codex"` (padrão) ou `agent:"antigravity"` para escolher o coletor. `refresh:true` solicita uma rechecagem limitada.
+
+Na projeção nativa, `CONFIGURED` confirma instalação. `OBSERVED` exige evidência da janela atual. `PARTIAL` indica lacunas históricas ou na janela atual e tem precedência no sumário. `UNKNOWN` indica configuração indeterminada e `UNAVAILABLE` identifica uma instalação ausente, desativada ou incompatível. A descoberta do manifesto, o trust e a execução histórica aparecem separadamente. `CURRENT_CAPTURE_UNPROVEN` indica evidência insuficiente para a janela atual. `historicalCoverage` informa a contagem retida, até três diagnósticos recentes e quantos ficaram fora da resposta. Use `list_agent_sessions({source:"NATIVE_HOOK"})` e `discover_execution_context` para consultar evidência indexada.
+
+`get_system_health({feature:"session_context",source:"entire"})` consulta a integração Entire e preserva o esquema v1, o histórico e os checkpoints. Use `commitSha` para selecionar um commit explícito. Nesse modo, `agent:"antigravity"` identifica a integração CLI do Entire. As chamadas internas legadas `BEGIN` e `LOCAL_COMMIT` continuam no fluxo Entire. As duas fontes compartilham o SessionStore por repositório. A leitura de saúde preserva hooks, configuração e trust.
 
 `READY_CONFIGURED` confirma somente configuração pinada e hooks Git/Codex compatíveis. `CAPTURE_OBSERVED` requer identidade do chamador no Entire e progresso metadata-only da sessão na Worktree correta. Sessão ativa, arquivo de hook ou resolução por Worktree isolados não provam captura; ausência de evidência é `SESSION_UNOBSERVED`. O resultado conserva timestamp e `OBSERVED_SNAPSHOT`, nunca promete atividade atual sem rechecagem.
 

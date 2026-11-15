@@ -13,7 +13,7 @@ import { inspectEntireCheckpoint } from './checkpoint'
 import { declaredAssociation, historicalSelectors } from './associations'
 import { sourceTimestamp } from './source-time'
 import type { SessionFilter } from './associations'
-import { captureHealthQuery, inspectCaptureHealth } from './capture-health'
+import { captureHealthQuery, inspectCaptureHealth, inspectNativeCaptureHealth, nativeCaptureAgent } from './capture-health'
 import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
 import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
@@ -158,7 +158,7 @@ export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvid
 }
 export async function executeSessionTool(
   store: SessionStore | Pick<SessionStore, 'path' | 'repositoryId'>,
-  provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive' | 'inspectCapture' | 'readEvent'>>,
+  provider: Partial<Pick<EntireProvider, 'refresh' | 'queryLive' | 'inspectCapture' | 'readEvent'>>,
   name: SessionToolName,
   raw: unknown,
   assertActive: () => void,
@@ -187,19 +187,34 @@ export async function executeSessionTool(
     } else if (name === 'reconcile_checkpoint_registry') {
       data = await reconcileRegistry(store as SessionStore, runner, root!, registrySelector(q as z.infer<typeof schemas.reconcile_checkpoint_registry>), assertActive, registryReader)
     } else if (name === 'inspect_capture_health') {
-      if (!selectedTarget || !root || !provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
-      data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
-      const observation = data as CaptureHealthObservation
-      await reconcileRegistry(store as SessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
-      const requested = (q as ReturnType<typeof parseCaptureHealth>).inspectNativeTrust
-      const trustTarget = { repositoryId: store.repositoryId, ...selectedTarget }
-      const nativeTrust = requested && nativeTrustSnapshot
-        ? nativeTrustSnapshot.repositoryId === trustTarget.repositoryId && nativeTrustSnapshot.worktreeId === trustTarget.worktreeId && nativeTrustSnapshot.generation === trustTarget.generation
+      if (!selectedTarget || !root) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+      const request = q as ReturnType<typeof parseCaptureHealth>
+      if (request.worktreeId && (request.worktreeId !== selectedTarget.worktreeId || request.generation !== selectedTarget.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
+      const sessionStore = store as SessionStore
+      async function codexTrust() {
+        const requested = request.inspectNativeTrust
+        if (requested && nativeTrustSnapshot) return nativeTrustSnapshot.repositoryId === store.repositoryId &&
+          nativeTrustSnapshot.worktreeId === selectedTarget!.worktreeId && nativeTrustSnapshot.generation === selectedTarget!.generation
           ? nativeTrustSnapshot.observation : unknownNativeTrust('SESSION_SCOPE_CHANGED')
-        : await inspectNativeTrust(root, trustTarget, requested, nativeClient, assertActive)
-      const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) || existsSync(join(root, '.agents/hooks.json'))
-      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true, ...nativeCaptureDiagnostics((store as SessionStore).registry, root, 'codex'), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, nativeTrust, 'codex'),
-        ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics((store as SessionStore).registry, root, 'antigravity'), readiness: nativeHookReadiness((store as SessionStore).registry, root, selectedTarget, { state: 'UNKNOWN', reasonCode: 'CLIENT_TRUST_UNSUPPORTED', freshness: 'UNAVAILABLE' }, 'antigravity') } } } : {}) } }
+        return inspectNativeTrust(root!, { repositoryId: store.repositoryId, ...selectedTarget! }, requested, nativeClient, assertActive)
+      }
+      if (request.source === 'native') {
+        const agent = nativeCaptureAgent(request)
+        const trust = agent === 'codex' ? await codexTrust() :
+          { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' as const }
+        data = inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust)
+      } else {
+        if (!provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+        data = await inspectCaptureHealth(sessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, request, assertActive)
+        const observation = data as CaptureHealthObservation
+        await reconcileRegistry(sessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
+        if (!request.source) {
+          const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) || existsSync(join(root, '.agents/hooks.json'))
+          data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: sessionStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true,
+            ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex'),
+            ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity') } } } : {}) } }
+        }
+      }
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
@@ -250,7 +265,10 @@ export async function executeSessionTool(
         if (request.association) {
           if (!selectedTarget || !request.sessionId) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
           data = { ...(store as SessionStore).declareAssociation(request.sessionId, selectedTarget, request.association, assertActive), state: 'PERSISTED', evidence: 'HANDOFF_DECLARED', transcriptImported: false }
-        } else data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
+        } else {
+          if (!provider.refresh) throw new Error('PROVIDER_UNAVAILABLE')
+          data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
+        }
       }
     } else if (name === 'list_agent_sessions') {
       const actualStore = store as SessionStore
