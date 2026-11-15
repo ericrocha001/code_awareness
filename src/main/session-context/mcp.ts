@@ -24,6 +24,7 @@ import { nativeSessionProjection, nativeSessionSelector } from './native-session
 import { nativeHookEvents } from './native-hooks'
 import { codexSourceSnapshot } from './native-codex-source'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
+import { antigravityAppSourceSnapshot } from './native-antigravity-app-source'
 import { searchReferencedEvents } from './session-event-search'
 import { executionContextQuery, executionSelector, executionEntity, discoverExecutionContext, EXECUTION_SELECTOR_SCHEMA } from './execution-context'
 
@@ -186,15 +187,35 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   target: NonNullable<ReturnType<typeof nativeLiteralTarget>>, root: string, assertCurrent: () => void, budget: number, accountHash?: string) {
   const { nativeSession, expectedRevision, cursor, sourceSessionId } = query
   const observation = nativeSessionProjection(store, { nativeSession, limit: 1 }, 'MAP', accountHash)
-  if (nativeSession.provider === 'antigravity-native') {
+  const app = nativeSession.provider === 'antigravity-native'
+  const appObservations = app ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
+  const locators = [...new Set(appObservations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []))]
+  if (appObservations && locators.length && (appObservations.bounded || appObservations.events.some(event =>
+    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) throw new Error('ORIGIN_UNVERIFIED')
+  if (app && !locators.length) {
     const sourceDiagnostic = antigravitySourceDiagnostic(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent)
     if (expectedRevision !== undefined && expectedRevision !== observation.revision) throw new Error('REVISION_CONFLICT')
     if (name === 'inspect_agent_session') return { ...observation, sourceDiagnostic }
     throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic })
   }
   if ('hookEvents' in query && query.hookEvents || 'after' in query && (query.after || query.before)) throw new Error('INVALID_ARGUMENT')
-  const snapshot = codexSourceSnapshot({ storePath: store.path, repositoryId: store.repositoryId, worktreeRoot: root, nativeHash: nativeSession.id,
-    sourceSessionId: sourceSessionId!, assertCurrent })
+  const source = { storePath: store.path, repositoryId: store.repositoryId, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!, assertCurrent }
+  const snapshot = (() => {
+    if (!app) return codexSourceSnapshot({ ...source, worktreeRoot: root })
+    if (locators.length !== 1) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: 'IDENTITY_MISMATCH' })
+    try { return antigravityAppSourceSnapshot({ ...source, locatorDigest: locators[0] }) }
+    catch (error) {
+      if (error instanceof Error && ['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE'].includes(error.message)) {
+        if (expectedRevision !== undefined && error.message === 'SOURCE_STALE') throw new Error('REVISION_CONFLICT')
+        return { sourceDiagnostic: error.message }
+      }
+      throw error
+    }
+  })()
+  if ('sourceDiagnostic' in snapshot) {
+    if (name === 'inspect_agent_session') return { ...observation, sourceDiagnostic: snapshot.sourceDiagnostic }
+    throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: snapshot.sourceDiagnostic })
+  }
   const revision = parseInt(digest(JSON.stringify([observation.revision, snapshot.fingerprint])).slice(0, 13), 16) || 1
   if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
   const scope = { name, repositoryId: store.repositoryId, nativeSession, target, revision, accountHash, event: 'eventId' in query ? query.eventId : null,
@@ -202,8 +223,9 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     filters: name === 'list_agent_session_events' ? { query: (query as z.infer<typeof nativeSessionEvents>).query, file: (query as z.infer<typeof nativeSessionEvents>).file,
       turnId: (query as z.infer<typeof nativeSessionEvents>).turnId } : undefined }
   const offset = store.offset(cursor, scope)
-  const base = { repositoryId: store.repositoryId, nativeSession, revision, source: 'CODEX_LOCAL_TRANSCRIPT_V1', contentAvailability: 'AVAILABLE',
-    identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED', origin: 'WORKTREE_REVALIDATED', causalEvidence: 'NOT_INFERRED',
+  const base = { repositoryId: store.repositoryId, nativeSession, revision,
+    source: app ? 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1' : 'CODEX_LOCAL_TRANSCRIPT_V1', contentAvailability: 'AVAILABLE',
+    identityEvidence: app ? 'HASH_AND_HOOK_LOCATOR_VERIFIED' : 'HASH_AND_PROVIDER_HEADER_VERIFIED', origin: 'WORKTREE_REVALIDATED', causalEvidence: 'NOT_INFERRED',
     sourceCoverage: 'SUPPORTED_ASSISTANT_OUTPUT_ONLY', transcriptImported: false, untrusted: true, claimsVerified: false }
   if (name === 'inspect_agent_session') {
     if (cursor || 'mapView' in query && query.mapView === 'TURNS' || !('events' in observation)) throw new Error('INVALID_ARGUMENT')
@@ -215,7 +237,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     const options = query as z.infer<typeof nativeSessionEvents>
     const events = options.file || options.turnId ? [] : snapshot.events.flatMap(({ content, ...event }) => {
       if (!options.query) return [event]
-      const searchable = sanitize(content), position = searchable.indexOf(options.query)
+      const searchable = app ? content : sanitize(content), position = searchable.indexOf(options.query)
       return position < 0 ? [] : [{ ...event, match: { startByte: Buffer.byteLength(searchable.slice(0, position)) } }]
     })
     if (offset > events.length) throw new Error('CURSOR_STALE')
@@ -232,7 +254,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     const content = utf8Prefix(raw.subarray(offset).toString('utf8'), size)
     const end = offset + Buffer.byteLength(content)
     const result = { ...base, eventId: event.eventId, content, range: { startByte: offset, endByte: end }, payloadDigest: event.payloadDigest,
-      provenance: 'OBSERVED_FROM_PROVIDER', omission: null, sanitized: false, complete: end === raw.length, partial: end < raw.length,
+      provenance: 'OBSERVED_FROM_PROVIDER', omission: null, sanitized: 'sanitized' in event && event.sanitized, complete: end === raw.length, partial: end < raw.length,
       ...(end < raw.length ? { nextCursor: store.cursor(scope, end) } : {}) }
     if (fits(result, budget, true)) return result
   }

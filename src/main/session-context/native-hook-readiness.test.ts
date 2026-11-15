@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
-import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
+import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, parseNativeEnvelope, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { SessionStore, sessionStorePath } from './store'
 import { nativeHookReadiness } from './native-hook-readiness'
@@ -18,6 +18,7 @@ import { ingestNativeHooks } from './native-hook-ingestion'
 import { executeSessionTool } from './mcp'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
+import { antigravityAppTranscriptPath } from './antigravity-app-locator'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
@@ -43,6 +44,56 @@ function fixture() {
   return { root, target, install, bindingPath, configPath, snapshotPath, change, store: () => store,
     restart: () => { store.close(); store = new SessionStore(storePath, 'repo') } }
 }
+
+it('reads only a hook-selected Antigravity App reply and replays sanitized byte pages after restart', async () => {
+  const f = fixture()
+  f.install()
+  const id = '019ba000-0000-7000-8000-000000000001'
+  const profile = join(f.root, '.gemini', 'antigravity')
+  const path = antigravityAppTranscriptPath(profile, id)
+  const binding = { ...readNativeBinding(f.bindingPath), provider: 'antigravity' as const }
+  const input = { conversationId: id, workspacePaths: [f.root], hookEventName: 'Stop', transcriptPath: path }
+  const captured = normalizeNativeHook(input, binding)
+  expect(parseNativeEnvelope(JSON.stringify(captured)).appTranscriptDigest).toMatch(/^[a-f0-9]{64}$/)
+  expect(JSON.stringify(captured)).not.toContain('transcript_full')
+  expect(normalizeNativeHook({ ...input, transcriptPath: path.replace('antigravity', 'antigravity-ide') }, binding).appTranscriptDigest).toBeUndefined()
+  f.store().registry.apply(nativeObservationBatch(captured), undefined)
+  mkdirSync(dirname(path), { recursive: true })
+  const text = 'output 🧪 '.repeat(900) + ' token=private-sentinel'
+  const sanitized = text.replace('private-sentinel', '[REDACTED]')
+  const write = (answer: string) => writeFileSync(path, [
+    { step_index: 0, type: 'USER_INPUT', source: 'USER', created_at: '2026-11-15T20:00:00Z', content: 'private-user-message' },
+    { step_index: 1, type: 'PLANNER_RESPONSE', source: 'MODEL', created_at: '2026-11-15T20:01:00Z', content: answer }
+  ].map(record => JSON.stringify(record)).join('\n') + '\n')
+  const args = { sourceSessionId: id, nativeSession: { id: captured.sessionId, provider: 'antigravity-native',
+    worktreeId: f.target.worktreeId, generation: f.target.generation } }
+  const call = async (name: Parameters<typeof executeSessionTool>[2], input: object) =>
+    JSON.parse((await executeSessionTool(f.store(), {}, name, { ...args, ...input }, () => {}, f.target, [], undefined, f.root)).content[0].text)
+  expect(await call('inspect_agent_session', {})).toMatchObject({ sourceDiagnostic: 'PROFILE_UNAVAILABLE' })
+  const config = join(dirname(f.store().path), 'session-context.provider.json')
+  writeFileSync(config, JSON.stringify({ repositoryId: 'repo', nativeSources: { antigravityApp: { profile } } }))
+  expect(await call('inspect_agent_session', {})).toMatchObject({ sourceDiagnostic: 'SOURCE_NOT_FOUND' })
+  write(text)
+  const map = await call('inspect_agent_session', {})
+  expect(map).toMatchObject({ source: 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1', sourceEventCount: 1, omittedSourceEvents: 1 })
+  const eventPage = await call('list_agent_session_events', { expectedRevision: map.revision })
+  expect(JSON.stringify(eventPage)).not.toContain('output')
+  const select = { eventId: eventPage.events[0].eventId, expectedRevision: map.revision }
+  const first = await call('read_agent_session_event', select)
+  expect(first).toMatchObject({ sanitized: true, partial: true, payloadDigest: nativeDigest(sanitized) })
+  expect(first.nextCursor).toBeDefined()
+  f.restart()
+  const last = await call('read_agent_session_event', { ...select, cursor: first.nextCursor })
+  expect(last).toMatchObject({ complete: true, transcriptImported: false, payloadDigest: first.payloadDigest })
+  expect(first.content + last.content).toBe(sanitized)
+  expect(f.store().count()).toBe(0)
+  write(text + ' updated')
+  expect(await call('read_agent_session_event', select)).toEqual({ code: 'REVISION_CONFLICT' })
+  const conflicting = normalizeNativeHook(input, { ...binding, worktreeId: '3'.repeat(64) })
+  f.store().registry.apply(nativeObservationBatch(conflicting), undefined)
+  expect(await call('inspect_agent_session', {})).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+}, 60000)
+
 it('U1 verifies all seven native handlers and exact installation without granting trust or changing files', () => {
   const f = fixture()
   expect(inspectNativeInstallation(f.root, f.target)).toMatchObject({ state: 'MISSING', installed: 0 })
@@ -374,4 +425,4 @@ it('diagnoses only the selected Antigravity IDE source and never reads an unqual
   writeFileSync(path, 'synthetic format sentinel')
   expect(diagnose()).toBe('FORMAT_UNSUPPORTED')
   expect(diagnose(() => writeFileSync(path, 'source changed'))).toBe('SOURCE_STALE')
-})
+}, 20000)
