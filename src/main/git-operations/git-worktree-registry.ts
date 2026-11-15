@@ -31,7 +31,7 @@ export class GitWorktreeRegistry {
   private readonly observed = new Map<string, { common: string; admin: string; physical: string; record: WorktreeRecord }>()
   private readonly observedPaths = new Map<string, string>()
 
-  constructor(private readonly root: string, private readonly git: GitService, private readonly identity: WorktreeIdentity) {}
+  constructor(private readonly root: string, private readonly git: Pick<GitService, 'getCommonDirectory' | 'getRepositoryDirectories' | 'getWorktreeRoot' | 'getCurrentCommitHash' | 'getCurrentBranch' | 'listWorktreeRecords'>, private readonly identity: WorktreeIdentity) {}
 
   private async commonDirectory(): Promise<string> {
     if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')

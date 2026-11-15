@@ -1,6 +1,6 @@
 # Captura nativa de proveniência
 
-O adaptador foi exercitado com Codex CLI `0.166.0-alpha.6`. Outras versões exigem qualificação do protocolo antes da instalação. Entire permanece independente.
+O instalador e a inspeção de trust usam a mesma lista de versões qualificadas. O status informa a versão encontrada no PATH da execução, se disponível. O schema gerado pelo executável ajuda a qualificar uma versão. O aceite também exige inspeção autorizada da thread ativa e prova de execução.
 
 Execute no checkout governado e vinculado ao Code Awareness:
 
@@ -8,15 +8,33 @@ Execute no checkout governado e vinculado ao Code Awareness:
 node scripts/session-context/native-hooks.cjs status
 ```
 
-Somente após autorização explícita do operador para alterar os hooks desse checkout:
+Rode `status` também em Worktrees criadas fora do aplicativo, depois de vinculá-las ao repositório ativo. `INSTALLATION_OWNERSHIP_UNPROVEN` indica que o snapshot não comprova a propriedade dos handlers. Em conflito, preserve a configuração e investigue sua origem antes de reparar.
+
+Antes de abrir a sessão Codex, selecione o caminho absoluto do executável que será usado para iniciá-la. Após autorização explícita do operador para alterar os hooks do checkout, execute a preparação na própria Worktree:
 
 ```powershell
-node scripts/session-context/native-hooks.cjs install --authorized --git-commit-tool=mcp__code_awareness_local__commit_git_changes
+node scripts/session-context/native-hooks.cjs status "--codex=$codexExecutable"
+node scripts/session-context/native-hooks.cjs install --authorized "--codex=$codexExecutable" --git-commit-tool=mcp__code_awareness_local__commit_git_changes
 node scripts/session-context/native-hooks.cjs disable --authorized
 ```
 
-Use o nome exato da ferramenta MCP autorizado naquele ambiente. A instalação acrescenta handlers, conserva os existentes e guarda o estado para restauração. Revise e confie nos novos hooks pela interface do Codex; configuração não comprova captura. Se houver edição concorrente do arquivo, o desligamento preserva essa edição e informa `restored:false`.
+Use o nome exato da ferramenta MCP autorizado naquele ambiente. A instalação acrescenta handlers, conserva os existentes e guarda o estado para restauração. Inicie a sessão com o executável selecionado e revise os hashes pela interface nativa do Codex. Confirme a captura com eventos dessa sessão e recibos verificados. Se houver edição concorrente do arquivo, o desligamento preserva essa edição e informa `restored:false`.
 
 O comando coleta apenas campos estruturais permitidos em spool limitado, sem rede ou SQLite próprio. A ativação do projeto e consultas de Session Context ingerem pequenas rodadas no Store existente. `list_agent_sessions` com `source:NATIVE_HOOK` lista identidades pseudonimizadas; `discover_execution_context` aprofunda as relações.
 
 Somente o caminho MCP configurado de `commit_git_changes`, com Pre/Post correspondentes, recibo concluído e objeto Git compatível, admite relação causal verificada. Shell, replay e eventos incompletos não demonstram autoria. Os aliases Entire permanecem não conciliados quando não houver evidência positiva. Nenhuma instalação de hook Git global ou alteração de `core.hooksPath` é realizada.
+
+### Repositórios do Catalog e captura offline
+
+Execute o CLI empacotado a partir da raiz física da Worktree alvo, usando o Node exigido pelo projeto. O build de desenvolvimento gera `out/session-context/native-hooks-catalog.cjs`. No Desktop empacotado, o CLI está em `resources/app.asar.unpacked/out/session-context/`.
+
+```powershell
+node <caminho-do-cli> install --repository=<id-do-catalog> --provider=codex --codex=<codex.exe> --authorized
+node <caminho-do-cli> install --repository=<id-do-catalog> --provider=antigravity --antigravity=<Antigravity.exe> --authorized
+node <caminho-do-cli> status --repository=<id-do-catalog> --provider=codex
+node <caminho-do-cli> disable --repository=<id-do-catalog> --provider=codex --authorized
+```
+
+Autorize o alvo antes de usar `--authorized`. No Codex, instalar em linked Worktree também prepara o manifesto e o binding do checkout principal daquele repositório. No Antigravity, a instalação prepara apenas a Worktree selecionada. Para delegar a preparação das futuras Worktrees gerenciadas criadas pelo fluxo Git do Code Awareness, acrescente `--authorize-managed-worktrees` à instalação autorizada. Para Worktrees externas, execute a instalação a partir do checkout vinculado. O comando aceita `--profile=<diretório>` para perfis isolados de validação.
+
+O helper fica no perfil do Code Awareness, com nome derivado do digest. O repositório pode produzir eventos com o Desktop fechado. A seleção posterior do projeto aciona o fluxo de ingestão existente no SQLite daquele repositório. `status` informa instalação e autorização no Catalog. Origem carregada, trust do cliente e eventos são verificações independentes. `disable` nesta modalidade revoga imediatamente o provedor para o repositório, preservando arquivos de terceiros e a evidência já capturada. A revogação não apaga manifests nem concede trust.

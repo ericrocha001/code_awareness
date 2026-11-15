@@ -251,6 +251,10 @@ export class GitOperationsService {
   private commitCorrelation: GitCommitCorrelation | undefined
   private commitObservation?: (target: { worktreeId: string; generation: string }, sha: string) => Promise<unknown>
   bindCommitObservation(observe: (target: { worktreeId: string; generation: string }, sha: string) => Promise<unknown>): void { this.commitObservation = observe }
+  private nativeHookPreparation?: (record: WorktreeRecord, registry: GitWorktreeRegistry) => Promise<unknown>
+  bindNativeHookPreparation(prepare: (record: WorktreeRecord, registry: GitWorktreeRegistry) => Promise<unknown>): void {
+    this.nativeHookPreparation = prepare
+  }
   private pendingCorrelation: Promise<unknown> = Promise.resolve()
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport, identity?: WorktreeIdentity, private readonly readOnlyWorktree = false, approval?: WorktreeApprovalPort, private readonly transactionAlreadyHeld = false, private readonly worktreeValidation?: WorktreeValidationPort) {
     this.worktreeRepositoryId = identity?.repositoryId
@@ -374,7 +378,8 @@ export class GitOperationsService {
         const created = (await this.worktrees!.discover()).worktrees.find(w => w.path === destination)
         if (!created) fail('OPERATION_OUTCOME_UNKNOWN')
         lifecycle.save({ ...created, repositoryId: observed.repositoryId, startPoint, createdAt: new Date().toISOString() })
-        return { result: 'CREATED', managed: true, worktree: created, projectChanged: false }
+        const nativeHooks = await this.nativeHookPreparation?.(created, this.worktrees!)
+        return { result: 'CREATED', managed: true, worktree: created, projectChanged: false, ...(nativeHooks ? { nativeHooks } : {}) }
       }
       const managed = lifecycle.get(record)
       if (!managed || managed.repositoryId !== observed.repositoryId) fail('WORKTREE_NOT_MANAGED')

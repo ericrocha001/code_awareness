@@ -9,6 +9,7 @@
     "assets/**/*",
     "package.json"
   ],
+  "asarUnpack": ["out/session-context/native-hooks-catalog.cjs"],
   "win": {
     "target": "nsis",
     "icon": "assets/app-icon-1024x1024.png"

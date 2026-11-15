@@ -1,30 +1,81 @@
-import { nativeEventType, nativeGapReason, nativeHookLimits, normalizeNativeHook, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeGapPhase, type NativeGap } from './native-hooks'
+import { isAbsolute, resolve } from 'node:path'
+import { nativeEventType, nativeGapReason, nativeHookLimits, normalizeNativeHook, readNativeBinding, resolveNativeHookBinding, sameNativePath, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeGapPhase, type NativeGap } from './native-hooks'
 import { stampNativeCapture } from './native-capture-window'
+import { authorizeDistributedBinding } from './native-hook-catalog'
 
-const timer = setTimeout(() => { if (binding?.enabled) recordNativeGap(binding.spool, 'TIMEOUT', 'READ'); process.exit(0) }, nativeHookLimits.timeoutMs)
+declare const __CODE_AWARENESS_DISTRIBUTED_CAPTURE__: boolean
+const distributed = typeof __CODE_AWARENESS_DISTRIBUTED_CAPTURE__ !== 'undefined' && __CODE_AWARENESS_DISTRIBUTED_CAPTURE__
+
+const bindingArgument = (process.argv[2] ?? '').replaceAll('\\', '/')
+const provider = bindingArgument.endsWith('/native-hooks/antigravity/binding.json') ? 'antigravity' : 'codex'
+let legacyAntigravity = false
+function executionBinding(): NativeHookBinding | undefined {
+  try {
+    const path = process.argv[2]
+    if (!path) return
+    if (!distributed) {
+      const legacy = readNativeBinding(path)
+      if (legacy.provider === 'antigravity') { legacyAntigravity = true; return legacy }
+    }
+    return resolveNativeHookBinding(path, process.cwd(), provider, distributed ? binding => authorizeDistributedBinding(__filename, binding) : undefined)
+  } catch {}
+}
+function recordReadGap(reason: 'TIMEOUT' | 'READ_FAILURE' | 'INPUT_LIMIT') {
+  const binding = executionBinding()
+  if (binding) recordNativeGap(binding.spool, reason, 'READ')
+}
+let responded = false
 let bytes = 0
 const chunks: Buffer[] = []
-let binding: NativeHookBinding | undefined
-try { if (process.argv.length === 3) binding = readNativeBinding(process.argv[2]) } catch {}
-process.stdin.on('error', () => { if (binding?.enabled) recordNativeGap(binding.spool, 'READ_FAILURE', 'READ'); process.exit(0) })
+const isAntigravity = (rawText?: string) => {
+  if (provider === 'antigravity' || legacyAntigravity) return true
+  if (bindingArgument.endsWith('/native-hooks/binding.json')) return false
+  return rawText !== undefined && /"hookEventName"\s*:/.test(rawText)
+}
+const respond = (eventType?: string, rawText?: string): boolean => {
+  if (responded) return false
+  const candidate = rawText ?? Buffer.concat(chunks).toString('utf8')
+  if (!isAntigravity(candidate)) return false
+  responded = true
+  const preTool = eventType === 'PreToolUse' || (eventType === undefined && /"hookEventName"\s*:\s*"PreToolUse"/.test(candidate))
+  process.stdout.write(preTool ? '{"decision":"allow"}\n' : '{}\n')
+  return true
+}
+const exitAfterRespond = () => {
+  if (!respond()) process.exit(0)
+  process.stdout.once('drain', () => process.exit(0))
+  setTimeout(() => process.exit(0), 25).unref()
+}
+
+const timer = setTimeout(() => { recordReadGap('TIMEOUT'); exitAfterRespond() }, nativeHookLimits.timeoutMs)
+process.stdin.on('error', () => { recordReadGap('READ_FAILURE'); exitAfterRespond() })
 process.stdin.on('data', (chunk: Buffer) => {
   bytes += chunk.length
   if (bytes > nativeHookLimits.inputBytes) {
-    if (binding?.enabled) recordNativeGap(binding.spool, 'INPUT_LIMIT')
-    process.exit(0)
+    recordReadGap('INPUT_LIMIT')
+    exitAfterRespond()
+    return
   }
   chunks.push(chunk)
 })
 process.stdin.on('end', () => {
-  let phase: NativeGapPhase = 'PARSE', eventType: NativeGap['eventType'] = 'UNKNOWN'
+  const binding = executionBinding()
+  const rawText = Buffer.concat(chunks).toString('utf8')
+  let phase: NativeGapPhase = 'PARSE', eventType: NativeGap['eventType'] = 'UNKNOWN', parsed = false
   try {
     if (!binding?.enabled) return
-    const payload: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
-    eventType = nativeEventType(payload)
+    const payload: unknown = JSON.parse(rawText)
+    const cwd = (payload as { cwd?: unknown } | null)?.cwd
+    if ((binding.provider ?? 'codex') === 'codex' && typeof cwd === 'string' && (!isAbsolute(cwd) || !sameNativePath(resolve(cwd), binding.root))) return
+    parsed = true
+    eventType = nativeEventType(payload, binding.provider)
     phase = 'NORMALIZE'
     const envelope = stampNativeCapture(normalizeNativeHook(payload, binding), binding)
     phase = 'WRITE'
     if (spoolNativeHook(envelope, binding.spool) === 'FULL') recordNativeGap(binding.spool, 'SPOOL_FULL', phase, eventType)
   } catch (error) { if (binding?.enabled) recordNativeGap(binding.spool, phase === 'PARSE' ? 'JSON_SYNTAX' : nativeGapReason(error), phase, eventType) }
-  finally { clearTimeout(timer) }
+  finally {
+    clearTimeout(timer)
+    respond(parsed ? eventType : undefined, rawText)
+  }
 })

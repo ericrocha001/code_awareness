@@ -1,22 +1,30 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { SessionStore, sessionStorePath } from './store'
 import { nativeHookReadiness } from './native-hook-readiness'
-import { inspectNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
+import { buildSync } from 'esbuild'
+import { execFileSync } from 'node:child_process'
+import { SessionContextClient } from './client'
+import { sourceFingerprint, type SessionTargetResolver } from './target'
+import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
 import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
 import { ingestNativeHooks } from './native-hook-ingestion'
+import { executeSessionTool } from './mcp'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hook-readiness-'))
-  cleanup.push(() => rmSync(root, { recursive: true, force: true, maxRetries: 5 }))
+  cleanup.push(() => {
+    if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5 })", root], { windowsHide: true })
+    else rmSync(root, { recursive: true, force: true, maxRetries: 5 })
+  })
   mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/test\n')
   const commandPath = join(root, 'native-hook.cjs'); writeFileSync(commandPath, '')
   const target = { repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64) }
@@ -66,7 +74,7 @@ it('U1 keeps observed envelopes historical and isolated by generation after rest
   expect(nativeHookReadiness(f.store().registry, f.root, { ...f.target, generation: '3'.repeat(64) }).execution.state).toBe('UNOBSERVED')
 })
 function clientFixture(f: ReturnType<typeof fixture>) {
-  let scope: NativeClientScope | undefined = { ...f.target, clientId: 'private-client', threadId: 'private-thread', sessionId: 'PRIVATE_SESSION', protocolVersion: 'codex-app-server/v2', clientVersion: '0.166.0-alpha.6', connectedAt: new Date(Date.now() - 5000).toISOString() }
+  let scope: NativeClientScope | undefined = { ...f.target, workspaceRoot: f.root, projectTrusted: true, clientId: 'private-client', threadId: 'private-thread', sessionId: 'PRIVATE_SESSION', protocolVersion: 'codex-app-server/v2', clientVersion: '0.166.0-alpha.6', connectedAt: new Date(Date.now() - 5000).toISOString() }
   const hooks = inspectNativeInstallation(f.root, f.target).handlers.map(handler => ({ key: handler.key, eventName: handler.event[0].toLowerCase() + handler.event.slice(1),
     currentHash: 'sha256:' + nativeDigest(handler.key), enabled: true, trustStatus: 'trusted', command: 'PRIVATE_COMMAND', sourcePath: f.configPath, displayOrder: 0 }))
   const calls: unknown[] = []
@@ -122,7 +130,18 @@ it('U2 distinguishes untrusted, changed hash, missing/ambiguous hooks, unsupport
   c.client.authorized = false; c.calls.length = 0
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'CLIENT_AUTHORIZATION_REQUIRED' })
   expect(c.calls).toEqual([])
-  c.client.authorized = true; c.client.request = async () => { throw Object.assign(new Error('PRIVATE_FAILURE'), { code: -32601 }) }
+  c.client.authorized = true
+  const qualified = c.scope()
+  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.11.1' })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNTRUSTED', clientVersion: '0.169.0-alpha.11.1' })
+  c.calls.length = 0
+  c.changeScope({ ...qualified, projectTrusted: false })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'PROJECT_TRUST_UNAVAILABLE' })
+  c.changeScope({ ...qualified, clientVersion: '0.169.0-alpha.99' })
+  expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'VERSION_UNSUPPORTED' })
+  expect(c.calls).toEqual([])
+  c.changeScope(qualified)
+  c.client.request = async () => { throw Object.assign(new Error('PRIVATE_FAILURE'), { code: -32601 }) }
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'PROTOCOL_UNSUPPORTED' })
   expect(await inspectNativeTrust(f.root, f.target, true)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' })
 })
@@ -178,3 +197,74 @@ it('U3 retains legacy coverage as historical UNKNOWN rather than inventing a cur
   f.store().registry.apply({ repositoryId: 'repo', source: `NATIVE_CAPTURE:${f.target.worktreeId}:${f.target.generation}`, revision: 'legacy', status: 'OBSERVED', edges: [] }, undefined)
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ execution: { state: 'UNKNOWN', reasonCode: 'EVENT_DETAIL_UNAVAILABLE', freshness: 'HISTORICAL' } })
 })
+
+
+it('sends only host-observed trust through the real worker and rejects a changed session at readback', async () => {
+  const f = fixture()
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: f.root, windowsHide: true, stdio: 'pipe' })
+  git('init', '-b', 'test')
+  git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture')
+  f.install()
+  const live = clientFixture(f)
+  const worker = join(f.root, 'worker.cjs')
+  const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
+  writeFileSync(worker, 'require = require("node:module").createRequire(' + JSON.stringify(resolve('package.json')) + ');\n' + code)
+  let changeAtReadback = false
+  const validate = vi.fn(async () => {
+    if (changeAtReadback && validate.mock.calls.length > 1) live.changeScope({ ...live.scope(), threadId: 'other-thread' })
+  })
+  const target: SessionTargetResolver = async () => ({ root: f.root, fingerprint: sourceFingerprint(f.root), validate })
+  const client = new SessionContextClient(f.root, 'repo', f.root, () => true, worker, target, 20000, undefined, undefined, undefined, live.client)
+  try {
+    const query = { worktreeId: f.target.worktreeId, generation: f.target.generation, inspectNativeTrust: true }
+    const result = await client.call('inspect_capture_health', query)
+    expect(result.isError, result.content[0].text).toBeFalsy()
+    expect(JSON.parse(result.content[0].text).nativeCapture.readiness).toMatchObject({
+      installation: { installed: 7 }, trust: { state: 'TRUSTED', trusted: 7 }, captureReadiness: { state: 'NOT_VERIFIED' }
+    })
+    expect(result.content[0].text).not.toContain('private-thread')
+    expect(result.content[0].text).not.toContain('PRIVATE_COMMAND')
+    validate.mockClear()
+    changeAtReadback = true
+    const changed = await client.call('inspect_capture_health', query)
+    expect(changed.isError).toBe(true)
+    expect(JSON.parse(changed.content[0].text)).toMatchObject({ code: 'SESSION_SCOPE_CHANGED' })
+  } finally { await client.dispose() }
+}, 60000)
+
+it('Antigravity ingests ANTIGRAVITY_NATIVE_HOOK envelopes, exposes readiness and serves MCP context without fake causal edges', async () => {
+  const f = fixture()
+  const commandPath = join(f.root, 'native-hook.cjs')
+  const record = { path: f.root, ...f.target, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }
+  installNativeHooks({ repositoryId: 'repo', record, commandPath, nodePath: process.execPath, provider: 'antigravity', authorized: true })
+  const binding = readNativeBinding(join(f.root, '.code-awareness/native-hooks/antigravity/binding.json'))
+
+  for (const payload of [
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'SessionStart', lastUserInput: 'PRIVATE_PROMPT' },
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'call-ag-1', name: 'run_command', args: { CommandLine: 'PRIVATE_CMD' } } },
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'PostToolUse', toolCall: { id: 'call-ag-1', name: 'run_command', args: { CommandLine: 'PRIVATE_CMD' } } }
+  ]) {
+    spoolNativeHook(stampNativeCapture(normalizeNativeHook(payload, binding), binding), binding.spool)
+  }
+
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  f.restart()
+
+  const readiness = nativeHookReadiness(f.store().registry, f.root, f.target, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity')
+  expect(readiness).toMatchObject({
+    installation: { state: 'CONFIGURED', installed: 6, expected: 6 },
+    execution: { state: 'OBSERVED', eventType: 'PostToolUse' },
+    captureReadiness: { state: 'OBSERVED', reasonCode: 'CURRENT_WINDOW_INGESTED' }
+  })
+  expect(JSON.stringify(readiness)).not.toContain('PRIVATE_AG_CONV')
+
+  const provider = { refresh: async () => ({}) }
+  const listed = JSON.parse((await executeSessionTool(f.store(), provider, 'list_agent_sessions', { source: 'NATIVE_HOOK', limit: 10 }, () => {}, f.target, [], undefined, f.root)).content[0].text)
+  expect(listed.sessions).toHaveLength(1)
+  expect(listed.sessions[0]).toMatchObject({ provider: 'antigravity-native', agent: 'antigravity', origin: 'NATIVE_HOOK' })
+
+  const context = JSON.parse((await executeSessionTool(f.store(), provider, 'discover_execution_context', { selector: { type: 'SESSION', provider: 'antigravity-native', id: listed.sessions[0].providerSessionId } }, () => {}, f.target, [], undefined, f.root)).content[0].text)
+  expect(context.counts).toMatchObject({ SESSION: 1, WORKTREE: 1 })
+  expect(context.counts.EXECUTION).toBeGreaterThanOrEqual(3)
+  expect(context.edges.every((edge: { evidenceKind: string }) => !edge.evidenceKind.startsWith('NATIVE_GIT_') && !edge.evidenceKind.startsWith('NATIVE_ARTIFACT_'))).toBe(true)
+}, 30000)

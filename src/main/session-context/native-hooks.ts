@@ -1,24 +1,34 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { nativeArtifactFact, validNativeArtifactFact, type NativeArtifactFact } from './native-artifact-facts'
 
-export const nativeHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd'] as const
+export const nativeHookProviders = ['codex', 'antigravity'] as const
+export type NativeHookProvider = typeof nativeHookProviders[number]
+export const codexHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd'] as const
+export const antigravityHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'PreInvocation', 'PostInvocation', 'Stop'] as const
+export const nativeHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreInvocation', 'PostInvocation', 'Stop', 'SessionEnd'] as const
 export type NativeHookEvent = typeof nativeHookEvents[number]
 export const nativeHookLimits = { inputBytes: 65536, envelopeBytes: 4096, slots: 1024, retentionMs: 86400000, timeoutMs: 750 }
 export const nativeDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
 export const nativeCaptureRuntimeId = nativeDigest(randomUUID())
 export const nativeCaptureRuntimeStartedAt = Date.now()
 export const nativeGapReasons = ['JSON_SYNTAX', 'JSON_STRUCTURE', 'EVENT_UNSUPPORTED', 'REQUIRED_ID_MISSING', 'INVALID_ID', 'CWD_MISSING', 'INVOCATION_ID_MISSING',
-  'WORKTREE_MISMATCH', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
+  'WORKTREE_MISMATCH', 'WORKTREE_SCOPE_AMBIGUOUS', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
 export type NativeGapReason = typeof nativeGapReasons[number]
 export type NativeGapPhase = 'READ' | 'PARSE' | 'NORMALIZE' | 'WRITE' | 'INGEST'
 export interface NativeGap {
   schema: 2; reasonCode: NativeGapReason; phase: NativeGapPhase; eventType: NativeHookEvent | 'UNKNOWN'; observedAt: string
 }
-export function nativeEventType(payload: unknown): NativeGap['eventType'] {
-  return object(payload) && nativeHookEvents.includes(payload.hook_event_name as NativeHookEvent) ? payload.hook_event_name as NativeHookEvent : 'UNKNOWN'
+export function nativeEventType(payload: unknown, provider?: NativeHookProvider): NativeGap['eventType'] {
+  if (!object(payload)) return 'UNKNOWN'
+  if (provider === 'antigravity' || (provider === undefined && typeof payload.hookEventName === 'string')) {
+    return antigravityHookEvents.includes(payload.hookEventName as typeof antigravityHookEvents[number])
+      ? payload.hookEventName as NativeHookEvent : 'UNKNOWN'
+  }
+  return codexHookEvents.includes(payload.hook_event_name as typeof codexHookEvents[number])
+    ? payload.hook_event_name as NativeHookEvent : 'UNKNOWN'
 }
 export function nativeGapReason(error: unknown): NativeGapReason {
   const code = error instanceof Error ? error.message : ''
@@ -30,6 +40,7 @@ const object = (value: unknown): value is Record<string, unknown> => !!value && 
 
 export interface NativeHookBinding {
   schema: 1
+  provider?: NativeHookProvider
   enabled: boolean
   repositoryId: string
   worktreeId: string
@@ -42,7 +53,7 @@ export interface NativeHookBinding {
 }
 export interface NativeHookEnvelope {
   schema: 1
-  source: 'CODEX_NATIVE_HOOK'
+  source: 'CODEX_NATIVE_HOOK' | 'ANTIGRAVITY_NATIVE_HOOK'
   repositoryId: string
   worktreeId: string
   generation: string
@@ -59,6 +70,15 @@ export interface NativeHookEnvelope {
   eventId: string
   digest: string
 }
+export function nativeHookSource(provider: NativeHookProvider = 'codex'): NativeHookEnvelope['source'] {
+  return provider === 'antigravity' ? 'ANTIGRAVITY_NATIVE_HOOK' : 'CODEX_NATIVE_HOOK'
+}
+export function nativeSessionPrefix(providerOrSource: NativeHookProvider | NativeHookEnvelope['source'] = 'codex'): 'codex-native' | 'antigravity-native' {
+  return providerOrSource === 'antigravity' || providerOrSource === 'ANTIGRAVITY_NATIVE_HOOK' ? 'antigravity-native' : 'codex-native'
+}
+export function nativeSessionEntityId(eventOrBinding: { source?: NativeHookEnvelope['source']; provider?: NativeHookProvider }, sessionId: string): string {
+  return `${nativeSessionPrefix(eventOrBinding.source ?? eventOrBinding.provider ?? 'codex')}:${sessionId}`
+}
 
 export function boundedFile(path: string, maxBytes: number): string {
   if (lstatSync(path).isSymbolicLink()) throw new Error('UNSAFE_FILE')
@@ -70,8 +90,9 @@ export function boundedFile(path: string, maxBytes: number): string {
   } finally { closeSync(fd) }
 }
 
-export function nativeGitIdentity(root: string): { root: string; commonDirectory: string; directoryIdentity: string } {
+function gitDirectories(root: string, strict = false) {
   const physical = realpathSync(root), pointer = join(physical, '.git')
+  if (strict && (!isAbsolute(root) || !sameNativePath(resolve(root), physical))) throw new Error('WORKTREE_MISMATCH')
   if (lstatSync(pointer).isSymbolicLink()) throw new Error('UNSAFE_GIT_DIRECTORY')
   let admin = pointer
   if (!lstatSync(pointer).isDirectory()) {
@@ -79,20 +100,51 @@ export function nativeGitIdentity(root: string): { root: string; commonDirectory
     if (!match) throw new Error('INVALID_GIT_DIRECTORY')
     admin = resolve(physical, match[1])
   }
-  admin = realpathSync(admin)
+  const resolvedAdmin = realpathSync(admin)
+  if (strict && !sameNativePath(admin, resolvedAdmin)) throw new Error('UNSAFE_GIT_DIRECTORY')
+  admin = resolvedAdmin
   let commonDirectory = admin
-  try { commonDirectory = realpathSync(resolve(admin, boundedFile(join(admin, 'commondir'), 4096).trim())) }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-  const identity = [physical, admin, commonDirectory].map(path => {
+  const commonPointer = join(admin, 'commondir')
+  if (lstatSync(commonPointer, { throwIfNoEntry: false })) {
+    const value = readGitPath(commonPointer)
+    const expectedCommon = resolve(admin, value)
+    commonDirectory = realpathSync(expectedCommon)
+    if (strict && !sameNativePath(expectedCommon, commonDirectory)) throw new Error('UNSAFE_GIT_DIRECTORY')
+  }
+  if (strict && admin !== pointer) {
+    const backlink = resolve(admin, readGitPath(join(admin, 'gitdir')))
+    if (dirname(admin) !== join(commonDirectory, 'worktrees') || !sameNativePath(backlink, pointer)) throw new Error('WORKTREE_MISMATCH')
+  } else if (strict && commonDirectory !== admin) throw new Error('WORKTREE_MISMATCH')
+  return { physical, admin, commonDirectory }
+}
+
+function readGitPath(path: string): string {
+  const value = boundedFile(path, 4096).replace(/\r?\n$/, '')
+  if (!value || /[\r\n\0]/.test(value)) throw new Error('INVALID_GIT_DIRECTORY')
+  return value
+}
+
+export const sameNativePath = (first: string, second: string): boolean =>
+  process.platform === 'win32' ? first.toLowerCase() === second.toLowerCase() : first === second
+
+function gitDirectoryFingerprint(paths: string[]) {
+  return paths.map(path => {
     const stat = lstatSync(path, { bigint: true })
+    if (!stat.isDirectory()) throw new Error('UNSAFE_GIT_DIRECTORY')
     return [path, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]
   })
+}
+
+export function nativeGitIdentity(root: string): { root: string; commonDirectory: string; directoryIdentity: string } {
+  const { physical, admin, commonDirectory } = gitDirectories(root)
+  const identity = gitDirectoryFingerprint([physical, admin, commonDirectory])
   return { root: physical, commonDirectory, directoryIdentity: nativeDigest(JSON.stringify(identity)) }
 }
 
 export function readNativeBinding(path: string): NativeHookBinding {
   const value: unknown = JSON.parse(boundedFile(path, 8192))
   if (!object(value) || value.schema !== 1 || typeof value.enabled !== 'boolean' ||
+    (value.provider !== undefined && !nativeHookProviders.includes(value.provider as NativeHookProvider)) ||
     typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) ||
     !['worktreeId', 'generation', 'directoryIdentity'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
     !['root', 'commonDirectory', 'spool'].every(k => typeof value[k] === 'string' && (value[k] as string).length <= 4096) ||
@@ -100,18 +152,117 @@ export function readNativeBinding(path: string): NativeHookBinding {
   return value as unknown as NativeHookBinding
 }
 
+export const nativeBindingPath = (root: string, provider: NativeHookProvider = 'codex') =>
+  join(root, '.code-awareness/native-hooks', ...(provider === 'antigravity' ? ['antigravity', 'binding.json'] : ['binding.json']))
+export const nativeDispatchMismatch = 'NATIVE_DISPATCH_SCOPE_MISMATCH'
+
+function scopedBinding(root: string, provider: NativeHookProvider): NativeHookBinding {
+  const { physical, admin, commonDirectory } = gitDirectories(root, true)
+  const path = nativeBindingPath(physical, provider)
+  if (!sameNativePath(realpathSync(path), path) || lstatSync(path).nlink !== 1) throw new Error('WORKTREE_MISMATCH')
+  const binding = readNativeBinding(path)
+  const identity = gitDirectoryFingerprint([physical, admin, commonDirectory])
+  const [[, , rootInode, rootBirth], adminIdentity] = identity
+  const generation = nativeDigest(JSON.stringify([...adminIdentity, physical, rootInode, rootBirth]))
+  const gitPaths = process.platform === 'win32'
+    ? [physical, realpathSync.native(physical)].map(path => path.replaceAll('\\', '/'))
+    : [physical]
+  const hasWorktreeId = gitPaths.some(path => binding.worktreeId === nativeDigest(JSON.stringify([binding.repositoryId, commonDirectory, generation, path])))
+  const spool = join(dirname(path), 'spool')
+  if (!binding.enabled || (binding.provider ?? 'codex') !== provider || binding.root !== physical || binding.commonDirectory !== commonDirectory ||
+      binding.directoryIdentity !== nativeDigest(JSON.stringify(identity)) || binding.generation !== generation ||
+      !hasWorktreeId || binding.spool !== spool ||
+      !lstatSync(spool).isDirectory() || !sameNativePath(realpathSync(spool), spool)) throw new Error('WORKTREE_MISMATCH')
+  return binding
+}
+
+export function resolveNativeHookBinding(anchorPath: string, cwd: string, provider: NativeHookProvider = 'codex', authorize?: (binding: NativeHookBinding) => void): NativeHookBinding {
+  if (!isAbsolute(anchorPath)) throw new Error('WORKTREE_MISMATCH')
+  const base = dirname(dirname(dirname(resolve(anchorPath))))
+  const anchorRoot = provider === 'antigravity' ? dirname(base) : base
+  if (!sameNativePath(resolve(anchorPath), nativeBindingPath(anchorRoot, provider))) throw new Error('WORKTREE_MISMATCH')
+  const anchor = scopedBinding(anchorRoot, provider)
+  // Antigravity starts handlers outside the checkout. Its payload scope is verified during normalization.
+  const target = provider === 'antigravity' || cwd === anchor.root ? anchor : scopedBinding(cwd, provider)
+  if (target.commonDirectory !== anchor.commonDirectory || target.repositoryId !== anchor.repositoryId ||
+      (target.root !== anchor.root && (provider !== 'codex' || anchor.commonDirectory !== join(anchor.root, '.git')))) throw new Error(nativeDispatchMismatch)
+  authorize?.(anchor)
+  if (target !== anchor) authorize?.(target)
+  return target
+}
+
+function verifyBindingWorktree(identity: ReturnType<typeof nativeGitIdentity>, binding: NativeHookBinding): void {
+  if (identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory || identity.directoryIdentity !== binding.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
+}
+
+// The IDE can emit a lowercase drive letter even when the binding uses the filesystem's casing.
+const antigravityGitIdentity = (root: string) => nativeGitIdentity(realpathSync.native(root))
+
+function normalizeAntigravityHook(payload: Record<string, unknown>, binding: NativeHookBinding, now: Date): NativeHookEnvelope {
+  if (!antigravityHookEvents.includes(payload.hookEventName as typeof antigravityHookEvents[number])) throw new Error('EVENT_UNSUPPORTED')
+  if (payload.conversationId === undefined || payload.conversationId === null || payload.conversationId === '') throw new Error('REQUIRED_ID_MISSING')
+  if (typeof payload.conversationId !== 'string' || !idPattern.test(payload.conversationId)) throw new Error('INVALID_ID')
+  let identity: ReturnType<typeof nativeGitIdentity>
+  if (payload.workspacePaths !== undefined) {
+    if (!Array.isArray(payload.workspacePaths) || !payload.workspacePaths.length || payload.workspacePaths.some(p => typeof p !== 'string' || !p.trim())) throw new Error('CWD_MISSING')
+    const identities: ReturnType<typeof nativeGitIdentity>[] = []
+    for (const rootPath of payload.workspacePaths as string[]) {
+      try { identities.push(antigravityGitIdentity(rootPath)) }
+      catch { throw new Error(payload.workspacePaths.length > 1 ? 'WORKTREE_SCOPE_AMBIGUOUS' : 'WORKTREE_STALE') }
+    }
+    const distinct = new Map(identities.map(item => [`${item.root}:${item.directoryIdentity}`, item]))
+    if (distinct.size > 1) throw new Error('WORKTREE_SCOPE_AMBIGUOUS')
+    identity = identities[0]
+    if (payload.cwd !== undefined) {
+      if (typeof payload.cwd !== 'string' || !payload.cwd.trim()) throw new Error('CWD_MISSING')
+      let cwdIdentity: ReturnType<typeof nativeGitIdentity>
+      try { cwdIdentity = antigravityGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_MISMATCH') }
+      if (cwdIdentity.root !== identity.root || cwdIdentity.commonDirectory !== identity.commonDirectory || cwdIdentity.directoryIdentity !== identity.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
+    }
+  } else {
+    if (typeof payload.cwd !== 'string' || !payload.cwd.trim()) throw new Error('CWD_MISSING')
+    try { identity = antigravityGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_STALE') }
+  }
+  verifyBindingWorktree(identity, binding)
+  const sessionId = nativeDigest(JSON.stringify([binding.repositoryId, 'antigravity', payload.conversationId]))
+  const event = payload.hookEventName as typeof antigravityHookEvents[number]
+  let turnId: string | undefined
+  if (payload.invocationNum !== undefined && payload.invocationNum !== null) {
+    if (!Number.isSafeInteger(payload.invocationNum) || Number(payload.invocationNum) < 0) throw new Error('INVALID_ID')
+    turnId = nativeDigest(JSON.stringify([sessionId, 'invocationNum', String(payload.invocationNum)]))
+  }
+  const toolEvent = event === 'PreToolUse' || event === 'PostToolUse'
+  const toolCall = object(payload.toolCall) ? payload.toolCall : undefined
+  if (toolCall?.id !== undefined && toolCall.id !== null && (typeof toolCall.id !== 'string' || !idPattern.test(toolCall.id))) throw new Error('INVALID_ID')
+  if (payload.stepIdx !== undefined && payload.stepIdx !== null && (!Number.isSafeInteger(payload.stepIdx) || Number(payload.stepIdx) < 0)) throw new Error('INVALID_ID')
+  const rawInvocationId = typeof toolCall?.id === 'string' ? toolCall.id : (typeof payload.stepIdx === 'number' ? 'step:' + String(payload.stepIdx) : undefined)
+  if (toolEvent && !rawInvocationId) throw new Error('INVOCATION_ID_MISSING')
+  const invocationId = rawInvocationId ? nativeDigest(JSON.stringify([sessionId, 'tool_call_id', rawInvocationId])) : undefined
+  const toolName = typeof toolCall?.name === 'string' ? toolCall.name : ''
+  const tool: NativeHookEnvelope['tool'] = toolEvent
+    ? (toolName === 'run_command' || toolName === 'Bash' || toolName === 'bash' ? 'SHELL' : (toolName === 'call_mcp_tool' || toolName.startsWith('mcp_') || toolName.startsWith('mcp__')) ? 'MCP' : 'OTHER')
+    : undefined
+  const facts = {
+    schema: 1 as const, source: 'ANTIGRAVITY_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
+    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(tool ? { tool } : {})
+  }
+  const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
+  return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
+}
+
 export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding, now = new Date()): NativeHookEnvelope {
   if (!binding.enabled) throw new Error('DISABLED')
   if (!object(payload)) throw new Error('JSON_STRUCTURE')
-  if (!nativeHookEvents.includes(payload.hook_event_name as NativeHookEvent)) throw new Error('EVENT_UNSUPPORTED')
+  if ((binding.provider ?? 'codex') === 'antigravity') return normalizeAntigravityHook(payload, binding, now)
+  if (!codexHookEvents.includes(payload.hook_event_name as typeof codexHookEvents[number])) throw new Error('EVENT_UNSUPPORTED')
   if (payload.session_id === undefined || payload.session_id === null || payload.session_id === '') throw new Error('REQUIRED_ID_MISSING')
   if (typeof payload.session_id !== 'string' || !idPattern.test(payload.session_id)) throw new Error('INVALID_ID')
   if (typeof payload.cwd !== 'string') throw new Error('CWD_MISSING')
   let identity: ReturnType<typeof nativeGitIdentity>
   try { identity = nativeGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_STALE') }
-  if (identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory || identity.directoryIdentity !== binding.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
+  verifyBindingWorktree(identity, binding)
   const sessionId = nativeDigest(JSON.stringify([binding.repositoryId, 'codex', payload.session_id]))
-  const event = payload.hook_event_name as NativeHookEvent
+  const event = payload.hook_event_name as typeof codexHookEvents[number]
   const optionalId = (key: string): string | undefined => {
     const value = payload[key]
     if (value === undefined || value === null) return
@@ -161,10 +312,16 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
   const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'capture', 'observedAt', 'eventId', 'digest']
-  if (Object.keys(value).some(k => !keys.includes(k)) || value.schema !== 1 || value.source !== 'CODEX_NATIVE_HOOK' ||
-    typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) || !nativeHookEvents.includes(value.event as NativeHookEvent) ||
+  const validEvent = value.source === 'CODEX_NATIVE_HOOK'
+    ? codexHookEvents.includes(value.event as typeof codexHookEvents[number])
+    : value.source === 'ANTIGRAVITY_NATIVE_HOOK'
+      ? antigravityHookEvents.includes(value.event as typeof antigravityHookEvents[number])
+      : false
+  if (Object.keys(value).some(k => !keys.includes(k)) || value.schema !== 1 || !validEvent ||
+    typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) ||
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
     ['turnId','invocationId','subagentId'].some(k => value[k] !== undefined && (typeof value[k] !== 'string' || !hashPattern.test(value[k] as string))) ||
+    (value.source === 'ANTIGRAVITY_NATIVE_HOOK' && (value.git !== undefined || value.artifact !== undefined || value.subagentId !== undefined)) ||
     (value.tool !== undefined && !['SHELL','MCP','OTHER'].includes(String(value.tool))) ||
     typeof value.observedAt !== 'string' || !Number.isFinite(Date.parse(value.observedAt))) throw new Error('INVALID_ENVELOPE')
   if (value.git !== undefined) {
