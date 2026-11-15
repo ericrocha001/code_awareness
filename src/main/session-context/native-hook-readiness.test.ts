@@ -198,6 +198,32 @@ it('U3 retains legacy coverage as historical UNKNOWN rather than inventing a cur
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ execution: { state: 'UNKNOWN', reasonCode: 'EVENT_DETAIL_UNAVAILABLE', freshness: 'HISTORICAL' } })
 })
 
+it('investigates native hook observations by provider and generation without inferring a transcript', async () => {
+  const f = fixture()
+  f.install()
+  const binding = readNativeBinding(f.bindingPath)
+  const first = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'SessionStart' }, binding)
+  const last = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'Stop' }, binding)
+  for (const event of [first, last]) f.store().registry.apply(nativeObservationBatch(event), undefined)
+  const call = async (name: Parameters<typeof executeSessionTool>[2], args: unknown) =>
+    JSON.parse((await executeSessionTool(f.store(), {}, name, args, () => {})).content[0].text)
+  const listed = await call('list_agent_sessions', { source: 'NATIVE_HOOK' })
+  const selected = listed.sessions[0].deepen.arguments
+  expect(selected.nativeSession).toEqual({ provider: 'codex-native', id: first.sessionId })
+  const map = await call('inspect_agent_session', selected)
+  expect(map).toMatchObject({ observedEventCount: 2, transcriptImported: false, identityEvidence: 'NATIVE_HASH_OBSERVED', contentAvailability: 'SOURCE_UNAVAILABLE' })
+  expect(JSON.stringify(map)).not.toContain('selected-private-id')
+  const args = { ...selected, expectedRevision: map.revision, limit: 1 }
+  const page = await call('list_agent_session_events', args)
+  const following = await call('list_agent_session_events', { ...args, cursor: page.nextCursor })
+  expect([page.events[0].eventId, following.events[0].eventId].sort()).toEqual([first.eventId, last.eventId].sort())
+  expect(await call('list_agent_session_events', { ...args, hookEvents: ['Stop'], cursor: page.nextCursor })).toMatchObject({ code: expect.stringMatching(/^CURSOR_/) })
+  expect(await call('inspect_agent_session', { nativeSession: { ...selected.nativeSession, provider: 'antigravity-native' } })).toEqual({ code: 'SESSION_UNAVAILABLE' })
+  expect(await call('inspect_agent_session', { nativeSession: { ...selected.nativeSession, worktreeId: f.target.worktreeId, generation: '3'.repeat(64) } })).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+  expect(await call('read_agent_session_event', { ...selected, expectedRevision: map.revision, eventId: first.eventId })).toEqual({ code: 'SOURCE_UNAVAILABLE' })
+  f.restart()
+  expect(await call('inspect_agent_session', { ...selected, expectedRevision: map.revision })).toMatchObject({ revision: map.revision, observedEventCount: 2 })
+})
 
 it('sends only host-observed trust through the real worker and rejects a changed session at readback', async () => {
   const f = fixture()
