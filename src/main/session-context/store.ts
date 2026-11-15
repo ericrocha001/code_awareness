@@ -47,10 +47,19 @@ export class SessionStore {
   readonly references: SessionReferences
   private readonly db: Database.Database
   private readonly key: string
-  constructor(readonly path: string, readonly repositoryId: string) {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    this.db = new Database(path)
+  constructor(readonly path: string, readonly repositoryId: string, readOnly = false) {
+    if (!readOnly) mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    this.db = new Database(path, readOnly ? { readonly: true, fileMustExist: true, timeout: 1000 } : {})
     try {
+      if (readOnly) {
+        if (Number(this.db.pragma('user_version', { simple: true })) !== 8) throw new Error('SCHEMA_UNSUPPORTED')
+        const rows = this.db.prepare('SELECT repositoryId,cursorKey FROM identity').all() as { repositoryId: string; cursorKey: string }[]
+        if (rows.length !== 1 || rows[0].repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
+        this.key = rows[0].cursorKey
+        this.registry = new CheckpointRegistry(this.db, repositoryId)
+        this.references = new SessionReferences(this.db, true)
+        return
+      }
       if (process.platform !== 'win32') chmodSync(path, 0o600)
       this.db.pragma('auto_vacuum = INCREMENTAL')
       this.db.pragma('journal_mode = WAL')

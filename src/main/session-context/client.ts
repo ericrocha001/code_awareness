@@ -39,7 +39,7 @@ export class SessionContextClient implements SessionContextPort {
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
     private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort,
-    private readonly nativeHookClient?: NativeHookClient) {}
+    private readonly nativeHookClient?: NativeHookClient, private readonly readOnlyStore = false) {}
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -62,7 +62,7 @@ export class SessionContextClient implements SessionContextPort {
     }
     const key = JSON.stringify(args ?? {})
     if (name === 'refresh_agent_sessions' && this.refresh) return this.refresh.key === key ? this.refresh.task : Promise.resolve(failure('BACKPRESSURE'))
-    const task = this.dispatch(name, args)
+    const task = this.dispatch(name, args, { captureNative: !this.readOnlyStore })
     if (name === 'refresh_agent_sessions') {
       const refresh = { key, task }
       this.refresh = refresh
@@ -80,7 +80,7 @@ export class SessionContextClient implements SessionContextPort {
   }
   private createGeneration(): Generation {
     const cancellation = new Int32Array(new SharedArrayBuffer(4))
-    const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
+    const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer, readOnlyStore: this.readOnlyStore }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
     const generation = { worker, cancellation, closing: false }
     this.generation = generation
     worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] }; publication?: { token: number; action: 'read' | 'associate' | 'invalidate'; receiptId?: string; association?: PublicationAssociation; invocationId?: string; state?: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS' } }) => {
@@ -275,7 +275,14 @@ export class SessionContextClient implements SessionContextPort {
           if (literalTarget) {
             if (!this.resolveTarget) throw new Error('ORIGIN_UNVERIFIED')
             request.phase = 'target-resolution'
-            target = { ...await this.resolveTarget(literalTarget), selection: literalTarget }
+            let literalWorktree
+            try { literalWorktree = await this.resolveTarget(literalTarget) }
+            catch (error) {
+              if (!(error instanceof Error) || error.message !== 'WORKTREE_NOT_DISCOVERED' || !this.resolveTarget.discover) throw error
+              await this.resolveTarget.discover()
+              literalWorktree = await this.resolveTarget(literalTarget)
+            }
+            target = { ...literalWorktree, selection: literalTarget }
             request.validate = target.validate
           }
           if ((name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') && args && typeof args === 'object' && 'worktreeId' in args && (args as any).worktreeId) {

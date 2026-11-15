@@ -48,8 +48,8 @@ export function nativeSessionProjection(store: SessionStore, request: NativeSess
           counts[event.event] = (counts[event.event] ?? 0) + 1
           return counts
         }, {})).map(([type, count]) => ({ type, count })),
-        events: { tool: 'list_agent_session_events', arguments: { nativeSession, expectedRevision: revision } },
-        context: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider: nativeSession.provider, id: nativeSession.id } } } }
+        events: { tool: 'list_agent_session_events', arguments: { repositoryId: store.repositoryId, nativeSession, expectedRevision: revision } },
+        context: { tool: 'discover_execution_context', arguments: { repositoryId: store.repositoryId, selector: { type: 'SESSION', provider: nativeSession.provider, id: nativeSession.id } } } }
     }
     if (!nativeSession.worktreeId && (roots.length > 1 || bounded)) throw new Error('ORIGIN_UNVERIFIED')
     const selected = events.filter(event => (!hookEvents || hookEvents.includes(event.event)) &&

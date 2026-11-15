@@ -16,6 +16,7 @@ import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { executeSessionTool } from './mcp'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
@@ -205,10 +206,17 @@ it('investigates native hook observations by provider and generation without inf
   const first = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'SessionStart' }, binding)
   const last = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'Stop' }, binding)
   for (const event of [first, last]) f.store().registry.apply(nativeObservationBatch(event), undefined)
-  const call = async (name: Parameters<typeof executeSessionTool>[2], args: unknown) =>
-    JSON.parse((await executeSessionTool(f.store(), {}, name, args, () => {})).content[0].text)
+  const channel = new ChannelMcpAdapter({ projectId: 'fixture', repoRoot: f.root, navigation: {} as never,
+    continuum: { repositoryId: f.target.repositoryId } as never,
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), {}, name, args, () => {}) } })
+  const call = async (name: Parameters<typeof executeSessionTool>[2], args: unknown) => {
+    const [result] = (await channel.callTool(name, args)).content
+    if (result?.type !== 'text') throw new Error('MCP_TEXT_RESULT_REQUIRED')
+    return JSON.parse(result.text)
+  }
   const listed = await call('list_agent_sessions', { source: 'NATIVE_HOOK' })
   const selected = listed.sessions[0].deepen.arguments
+  expect(selected.repositoryId).toBe(f.target.repositoryId)
   expect(selected.nativeSession).toEqual({ provider: 'codex-native', id: first.sessionId })
   const map = await call('inspect_agent_session', selected)
   expect(map).toMatchObject({ observedEventCount: 2, transcriptImported: false, identityEvidence: 'NATIVE_HASH_OBSERVED', contentAvailability: 'SOURCE_UNAVAILABLE' })

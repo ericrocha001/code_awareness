@@ -44,6 +44,7 @@ import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
 import { sessionTargetResolver } from './session-context/target'
+import { sessionRepositoryReader } from './session-context/session-repository-read'
 import { registrySources } from './session-context/registry-sources'
 import { SessionProjectionCoordinator } from './session-context/projection-coordinator'
 import { registerApplicationShutdown } from './application-shutdown'
@@ -785,6 +786,9 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       navigation,
       sessionContext: activeSessionContext,
+      ...(repositoryCatalog && gitRepositoryId ? { readSessionRepository: sessionRepositoryReader(
+        repositoryCatalog, gitService, continuumSession.getStorageBaseDir(), gitRepositoryId
+      ) } : {}),
       sessionMemoryCentral,
       unitflowRuntime,
       assertActiveProject: () => {

@@ -8,7 +8,8 @@ import type { Coverage } from './types'
 
 export interface ReferenceSource { locator: EntireSource; sourceDigest: string; sourceBytes: number; normalizer: string; revision: number }
 export class SessionReferences {
-  constructor(readonly db: Database.Database) {
+  constructor(readonly db: Database.Database, readOnly = false) {
+    if (readOnly) return
     db.exec(`
       CREATE TABLE IF NOT EXISTS session_sources(sessionId TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,locator TEXT NOT NULL,sourceDigest TEXT NOT NULL,sourceBytes INTEGER NOT NULL,normalizer TEXT NOT NULL,revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS event_locators(eventId TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,sessionId TEXT NOT NULL,fields TEXT NOT NULL);

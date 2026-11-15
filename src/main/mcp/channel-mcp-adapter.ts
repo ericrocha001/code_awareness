@@ -59,7 +59,7 @@ import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../rep
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orchestration/runtime-preview/mcp'
-import { SESSION_CONTEXT_TOOLS, type SessionToolName } from '../session-context/mcp'
+import { nativeLiteralTarget, SESSION_CONTEXT_TOOLS, scopedSessionReadTools, type SessionToolName } from '../session-context/mcp'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
 import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
@@ -122,6 +122,7 @@ export class ChannelMcpAdapter {
   private readonly repositoryFileEditing?: RepositoryFileEditing
   private readonly runtimePreview?: McpProjectContext['runtimePreview']
   private readonly sessionContext?: McpProjectContext['sessionContext']
+  private readonly readSessionRepository?: McpProjectContext['readSessionRepository']
   private readonly cliExecution?: CliExecutionService
   private readonly sessionMemoryCentral?: SessionMemoryCentralService
   private readonly unitflowRuntime?: UnitFlowRuntimeFacade
@@ -180,6 +181,7 @@ export class ChannelMcpAdapter {
       this.repositoryFileEditing = context.repositoryFileEditing
       this.runtimePreview = context.runtimePreview
       this.sessionContext = context.sessionContext
+      this.readSessionRepository = context.readSessionRepository
       this.cliExecution = context.cliExecution
       this.sessionMemoryCentral = context.sessionMemoryCentral
       this.unitflowRuntime = context.unitflowRuntime
@@ -376,9 +378,28 @@ export class ChannelMcpAdapter {
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) {
       if (!this.sessionContext) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
+      if (scopedSessionReadTools.has(name) && args && typeof args === 'object' && 'repositoryId' in args) {
+        const { repositoryId, ...selected } = args
+        if (typeof repositoryId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(repositoryId)) {
+          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
+        }
+        if (repositoryId !== this.repositoryId) {
+          try {
+            assertArtifactAgent(authority, this.repositoryId ?? '')
+            if (!this.readSessionRepository) throw new Error('REPOSITORY_NOT_AUTHORIZED')
+            const result = await this.readSessionRepository(repositoryId, name as SessionToolName, selected, authority)
+            assertArtifactAgent(authority, this.repositoryId ?? '')
+            return result
+          } catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'REPOSITORY_NOT_AUTHORIZED' }) }] } }
+        }
+        args = selected
+      }
       if (args && typeof args === 'object' && 'sourceSessionId' in args) {
         try {
           assertArtifactAgent(authority, this.repositoryId ?? '')
+          if (authority.worktreeId && nativeLiteralTarget(name as SessionToolName, args)?.worktreeId !== authority.worktreeId) {
+            throw new Error('SOURCE_NOT_AUTHORIZED')
+          }
           const result = await this.sessionContext.call(name as SessionToolName, args)
           assertArtifactAgent(authority, this.repositoryId ?? '')
           return result

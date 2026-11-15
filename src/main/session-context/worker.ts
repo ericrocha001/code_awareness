@@ -16,7 +16,7 @@ import { correlateNativeArtifact } from './native-artifact-correlation'
 import type { PublicationProvenancePort, PublicationReceipt, PublicationAssociationResult } from '../../shared/types/publication-provenance-types'
 import { GitService } from '../core/git-service'
 
-const { storageBase, repositoryId, root, cancellation } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer }
+const { storageBase, repositoryId, root, cancellation, readOnlyStore } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer; readOnlyStore?: boolean }
 const cancelled = new Int32Array(cancellation)
 const abort = new AbortController()
 const assertActive = () => { if (Atomics.load(cancelled, 0)) throw new Error('PROJECT_CONTEXT_CHANGED') }
@@ -83,7 +83,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       }
     }
     parentPort?.postMessage({ id: message.id, phase: isLiveSessionTool(message.name) ? 'live-metadata' : 'store-open' })
-    const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId))
+    const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId, readOnlyStore))
     const publication = <T>(request: object): Promise<T> => new Promise((resolve, reject) => {
       assertRequest()
       const token = ++validationId

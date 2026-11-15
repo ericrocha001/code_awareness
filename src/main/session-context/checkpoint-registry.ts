@@ -230,7 +230,7 @@ export class CheckpointRegistry {
     const { provider, id } = sessionSelector(externalId)
     const agent = provider === 'antigravity-native' ? 'antigravity' : 'codex'
     return { provider, providerSessionId: id, agent, origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
-      deepen: { tool: 'inspect_agent_session', arguments: { nativeSession: { provider, id } } } }
+      deepen: { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider, id } } } }
   }
   readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {

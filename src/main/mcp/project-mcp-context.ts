@@ -12,6 +12,8 @@ import type { CliExecutionService } from '../cli-execution/cli-execution-service
 
 export interface McpProjectContext {
   sessionContext?: import('../session-context/mcp').SessionContextPort
+  readSessionRepository?: (repositoryId: string, name: import('../session-context/mcp').SessionToolName, args: unknown,
+    authority: import('../continuum/agent-authority').AgentAuthority) => Promise<import('./mcp-types').McpToolResult>
   executionClosure?: import('./execution-closure').ClosureContext
   projectId: string
   repoRoot: string
