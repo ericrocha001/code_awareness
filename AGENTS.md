@@ -28,6 +28,17 @@ Você deve:
 
 As Skills disponíveis no projeto podem ser descobertas em `.skills/`, pelo caminho `.skills/<nome-da-skill>/SKILL.md`. Quando a IDE não oferecer descoberta automática, consulte os nomes e a `description` das Skills nessa pasta e carregue somente as aplicáveis à tarefa. A pasta é uma projeção local da Academy, não uma fonte canônica independente; não duplique o conteúdo das Skills neste kernel.
 
+### CLI antes de solicitar intervenção humana
+
+**Regra obrigatória:** antes de pedir ao responsável que execute qualquer ação manual (por exemplo, abrir o File Explorer, criar/mover arquivos, consultar estado, executar comandos ou iniciar ferramentas), **verifique primeiro se consegue realizar essa mesma ação via CLI local, comando do projeto, ferramenta especializada ou CLI remota autorizada**. Se o canal estiver disponível, o alvo for correto e a operação estiver dentro da autorização concedida, **execute, verifique o resultado e reporte apenas o necessário**. Não transfira trabalho mecânico ao usuário por hábito.
+
+- **Agente local com terminal autorizado:** use diretamente a CLI no checkout/Worktree correto; não envolva o usuário nem use CLI Execution MCP como intermediário.
+- **Agente remoto:** verifique ferramenta especializada ou CLI Execution MCP quando habilitado e aprovado para o host de destino. Terminal em sandbox/nuvem não equivale a acesso ao computador do responsável.
+- **Intervenção humana legítima:** peça-a somente quando exigir decisão, consentimento específico, aprovação nativa, MFA, credencial, presença física ou capacidade realmente indisponível. Explique o bloqueio constatado e a menor ação necessária, em vez de repassar um procedimento extenso.
+- **Limites:** a preferência por CLI **não** autoriza alterar permissões, instalar software, ampliar grants, contornar recusas, executar ações destrutivas ou criar PR/realizar merge sem aprovação específica. Não repita sondagens quando a capacidade já foi comprovadamente negada.
+
+Consulte `cli-execution` para escolher o canal e preservar as aprovações exigidas. Essa verificação é **sob demanda antes de solicitar ação**, não um preflight universal em toda tarefa.
+
 ## 2. Plano Final e Escopo
 
 O **Plano Final Executável** é a fonte de verdade arquitetural da implementação.
@@ -113,6 +124,8 @@ Priorize:
 - manutenção simples.
 
 Não introduza complexidade para demonstrar sofisticação.
+
+Organize cada funcionalidade com código próprio em um diretório identificável de seu domínio, nas camadas em que atuar. Agrupe seus subsistemas por responsabilidades reais, respeitando fronteiras e contratos definidos no Plano. Componentes de infraestrutura compartilhada permanecem em seus módulos próprios. Não crie diretórios por necessidades hipotéticas nem migre código existente fora do escopo autorizado.
 
 ### SOLID
 
