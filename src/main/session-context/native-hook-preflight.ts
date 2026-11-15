@@ -1,12 +1,13 @@
-import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
+import { summarizeHookList, isQualifiedCodexHookVersion, matchesHookKey, sameHookPath } from '../../shared/native-hook-preflight.cjs'
 import { nativeDigest } from './native-hooks'
-import { inspectNativeInstallation } from './native-hook-installation'
+import { inspectNativeInstallation, inspectSharedNativeInstallation, type NativeInstallationInspection } from './native-hook-installation'
 
 export interface NativeClientScope {
   repositoryId: string; worktreeId: string; generation: string
   clientId: string; threadId: string; sessionId: string
   protocolVersion: string; clientVersion: string
   connectedAt: string
+  workspaceRoot: string; projectTrusted: boolean
 }
 export interface NativeHookClient {
   authorized: boolean
@@ -19,15 +20,32 @@ export interface NativeTrustObservation {
   reasonCode: string; freshness: string
   clientId?: string; threadId?: string; sessionId?: string; protocolVersion?: string; clientVersion?: string
   observedAt?: string; expiresAt?: string; hashDigest?: string; installationDigest?: string
+  loadedSource?: 'WORKTREE' | 'MAIN'
+  sharedSourceDigest?: string
   connectedAt?: string
   expected?: number; matched?: number; trusted?: number; issues?: { eventType: string; reasonCode: string }[]
   execution?: NativeExecutionObservation
 }
+export interface NativeTrustSnapshot {
+  repositoryId: string; worktreeId: string; generation: string
+  observation: NativeTrustObservation
+}
+
+export function matchesNativeClient(client: NativeHookClient, observation: NativeTrustObservation, target: { repositoryId: string; worktreeId: string; generation: string }, root: string): boolean {
+  const scope = client.scope()
+  return !!scope && client.authorized && scope.projectTrusted === true && scope.workspaceRoot === root && scope.repositoryId === target.repositoryId && scope.worktreeId === target.worktreeId &&
+    scope.generation === target.generation && observation.connectedAt === scope.connectedAt &&
+    observation.clientVersion === scope.clientVersion && observation.protocolVersion === scope.protocolVersion &&
+    observation.clientId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex-client', scope.clientId])) &&
+    observation.threadId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex-thread', scope.threadId])) &&
+    observation.sessionId === nativeDigest(JSON.stringify([scope.repositoryId, 'codex', scope.sessionId]))
+}
+
 export interface NativeExecutionObservation {
   state: 'OBSERVED' | 'FAILED'; reasonCode: string; freshness: string
   eventId: string; eventType: string; sessionId: string; observedAt: string
 }
-function hookCompletion(response: unknown, notifications: unknown[], scope: NativeClientScope, handlers: { key: string; event: string }[]): NativeExecutionObservation | undefined {
+function hookCompletion(response: unknown, notifications: unknown[], scope: NativeClientScope, handlers: NativeInstallationInspection['handlers']): NativeExecutionObservation | undefined {
   if (!Array.isArray(notifications) || notifications.length > 64) return
   const listed = (response as { data?: { hooks: { key: string; sourcePath: string; displayOrder: number }[] }[] }).data?.flatMap(entry => entry.hooks) ?? []
   const observations = notifications.flatMap((notification): NativeExecutionObservation[] => {
@@ -37,8 +55,8 @@ function hookCompletion(response: unknown, notifications: unknown[], scope: Nati
       !Number.isSafeInteger(run.completedAt) || !Number.isSafeInteger(run.startedAt) || Number(run.startedAt) > Number(run.completedAt) || Number(run.completedAt) * 1000 > Date.now() + 60000 ||
       Number(run.startedAt) * 1000 < Date.parse(scope.connectedAt)) return []
     const matched = handlers.filter(handler => {
-      const hook = listed.find(item => item.key === handler.key)
-      return hook && hook.sourcePath === run.sourcePath && hook.displayOrder === run.displayOrder && handler.event[0].toLowerCase() + handler.event.slice(1) === run.eventName
+      const hook = listed.find(item => matchesHookKey(item?.key, handler))
+      return hook && sameHookPath(hook.sourcePath, run.sourcePath) && hook.displayOrder === run.displayOrder && handler.event[0].toLowerCase() + handler.event.slice(1) === run.eventName
     })
     if (matched.length !== 1) return []
     const observedAt = new Date(Number(run.completedAt) * 1000).toISOString()
@@ -56,9 +74,13 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
   const scope = client.scope()
   if (!scope || scope.repositoryId !== target.repositoryId || scope.worktreeId !== target.worktreeId || scope.generation !== target.generation ||
     ![scope.clientId, scope.threadId, scope.sessionId].every(value => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(value)) || !/^[A-Za-z0-9.+_-]{1,80}$/.test(scope.clientVersion) || !Number.isFinite(Date.parse(scope.connectedAt)) || Date.parse(scope.connectedAt) > Date.now()) return unknownNativeTrust('SESSION_SCOPE_UNAVAILABLE')
+  if (scope.workspaceRoot !== root) return unknownNativeTrust('SESSION_SCOPE_UNAVAILABLE')
+  if (scope.projectTrusted !== true) return unknownNativeTrust('PROJECT_TRUST_UNAVAILABLE')
   if (scope.protocolVersion !== 'codex-app-server/v2') return { ...unknownNativeTrust('PROTOCOL_UNSUPPORTED'), state: 'UNSUPPORTED' }
+  if (!isQualifiedCodexHookVersion(scope.clientVersion)) return { ...unknownNativeTrust('VERSION_UNSUPPORTED'), state: 'UNSUPPORTED' }
   const installation = inspectNativeInstallation(root, target)
   if (installation.state !== 'CONFIGURED') return unknownNativeTrust(installation.reasonCode)
+  const shared = scope.clientVersion === '0.169.0-alpha.11.1' ? inspectSharedNativeInstallation(root, target) : undefined
   const scopeDigest = nativeDigest(JSON.stringify(scope))
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
@@ -68,16 +90,29 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
     const currentScope = client.scope()
     if (!client.authorized || !currentScope || nativeDigest(JSON.stringify(currentScope)) !== scopeDigest) return unknownNativeTrust('SESSION_SCOPE_CHANGED')
     if (inspectNativeInstallation(root, target).digest !== installation.digest) return unknownNativeTrust('HOOK_CONFIG_DRIFT')
-    const summary = summarizeHookList(response, installation.handlers)
+    let handlers = installation.handlers
+    let summary = summarizeHookList(response, handlers)
+    let sharedSourceDigest: string | undefined
+    if (shared) {
+      const sharedSummary = summarizeHookList(response, shared.handlers)
+      if (summary.matched > 0 && sharedSummary.matched > 0) return unknownNativeTrust('HOOK_SCOPE_AMBIGUOUS')
+      if (summary.reasonCode === 'HOOK_SCOPE_UNAVAILABLE' && summary.matched === 0) {
+        if (inspectSharedNativeInstallation(root, target)?.digest !== shared.digest) return unknownNativeTrust('HOOK_CONFIG_DRIFT')
+        handlers = shared.handlers
+        summary = sharedSummary
+        if (summary.matched === 7) sharedSourceDigest = shared.digest
+      }
+    }
     const { stale, ...safe } = summary
-    const execution = summary.matched === 7 && client.readCompletions ? hookCompletion(response, client.readCompletions(), scope, installation.handlers) : undefined
+    const execution = summary.matched === 7 && client.readCompletions ? hookCompletion(response, client.readCompletions(), scope, handlers) : undefined
     assertCurrent()
     if (!client.authorized || nativeDigest(JSON.stringify(client.scope() ?? null)) !== scopeDigest) return unknownNativeTrust('SESSION_SCOPE_CHANGED')
     const observedAt = new Date(), expiresAt = new Date(observedAt.getTime() + 30000)
     return { ...safe, freshness: stale ? 'STALE' : 'OBSERVED_SNAPSHOT', observedAt: observedAt.toISOString(), expiresAt: expiresAt.toISOString(),
       clientId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-client', scope.clientId])), threadId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-thread', scope.threadId])),
       sessionId: nativeDigest(JSON.stringify([target.repositoryId, 'codex', scope.sessionId])), protocolVersion: scope.protocolVersion, clientVersion: scope.clientVersion, installationDigest: installation.digest,
-      connectedAt: scope.connectedAt,
+      connectedAt: scope.connectedAt, ...(summary.matched === 7 ? { loadedSource: sharedSourceDigest ? 'MAIN' as const : 'WORKTREE' as const } : {}),
+      ...(sharedSourceDigest ? { sharedSourceDigest } : {}),
       ...(execution ? { execution } : {}) }
   } catch (error) {
     assertCurrent()

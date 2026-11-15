@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { nativeArtifactFact, validNativeArtifactFact, type NativeArtifactFact } from './native-artifact-facts'
 
@@ -70,8 +70,9 @@ export function boundedFile(path: string, maxBytes: number): string {
   } finally { closeSync(fd) }
 }
 
-export function nativeGitIdentity(root: string): { root: string; commonDirectory: string; directoryIdentity: string } {
+function gitDirectories(root: string, strict = false) {
   const physical = realpathSync(root), pointer = join(physical, '.git')
+  if (strict && (!isAbsolute(root) || !sameNativePath(resolve(root), physical))) throw new Error('WORKTREE_MISMATCH')
   if (lstatSync(pointer).isSymbolicLink()) throw new Error('UNSAFE_GIT_DIRECTORY')
   let admin = pointer
   if (!lstatSync(pointer).isDirectory()) {
@@ -79,14 +80,44 @@ export function nativeGitIdentity(root: string): { root: string; commonDirectory
     if (!match) throw new Error('INVALID_GIT_DIRECTORY')
     admin = resolve(physical, match[1])
   }
-  admin = realpathSync(admin)
+  const resolvedAdmin = realpathSync(admin)
+  if (strict && !sameNativePath(admin, resolvedAdmin)) throw new Error('UNSAFE_GIT_DIRECTORY')
+  admin = resolvedAdmin
   let commonDirectory = admin
-  try { commonDirectory = realpathSync(resolve(admin, boundedFile(join(admin, 'commondir'), 4096).trim())) }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-  const identity = [physical, admin, commonDirectory].map(path => {
+  const commonPointer = join(admin, 'commondir')
+  if (lstatSync(commonPointer, { throwIfNoEntry: false })) {
+    const value = readGitPath(commonPointer)
+    const expectedCommon = resolve(admin, value)
+    commonDirectory = realpathSync(expectedCommon)
+    if (strict && !sameNativePath(expectedCommon, commonDirectory)) throw new Error('UNSAFE_GIT_DIRECTORY')
+  }
+  if (strict && admin !== pointer) {
+    const backlink = resolve(admin, readGitPath(join(admin, 'gitdir')))
+    if (dirname(admin) !== join(commonDirectory, 'worktrees') || !sameNativePath(backlink, pointer)) throw new Error('WORKTREE_MISMATCH')
+  } else if (strict && commonDirectory !== admin) throw new Error('WORKTREE_MISMATCH')
+  return { physical, admin, commonDirectory }
+}
+
+function readGitPath(path: string): string {
+  const value = boundedFile(path, 4096).replace(/\r?\n$/, '')
+  if (!value || /[\r\n\0]/.test(value)) throw new Error('INVALID_GIT_DIRECTORY')
+  return value
+}
+
+export const sameNativePath = (first: string, second: string): boolean =>
+  process.platform === 'win32' ? first.toLowerCase() === second.toLowerCase() : first === second
+
+function gitDirectoryFingerprint(paths: string[]) {
+  return paths.map(path => {
     const stat = lstatSync(path, { bigint: true })
+    if (!stat.isDirectory()) throw new Error('UNSAFE_GIT_DIRECTORY')
     return [path, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)]
   })
+}
+
+export function nativeGitIdentity(root: string): { root: string; commonDirectory: string; directoryIdentity: string } {
+  const { physical, admin, commonDirectory } = gitDirectories(root)
+  const identity = gitDirectoryFingerprint([physical, admin, commonDirectory])
   return { root: physical, commonDirectory, directoryIdentity: nativeDigest(JSON.stringify(identity)) }
 }
 
@@ -98,6 +129,40 @@ export function readNativeBinding(path: string): NativeHookBinding {
     !['root', 'commonDirectory', 'spool'].every(k => typeof value[k] === 'string' && (value[k] as string).length <= 4096) ||
     (value.gitCommitTool !== undefined && (typeof value.gitCommitTool !== 'string' || !/^mcp__[a-zA-Z0-9_-]+__commit_git_changes$/.test(value.gitCommitTool)))) throw new Error('INVALID_BINDING')
   return value as unknown as NativeHookBinding
+}
+
+export const nativeBindingPath = (root: string) => join(root, '.code-awareness/native-hooks/binding.json')
+export const nativeDispatchMismatch = 'NATIVE_DISPATCH_SCOPE_MISMATCH'
+
+function scopedBinding(root: string): NativeHookBinding {
+  const { physical, admin, commonDirectory } = gitDirectories(root, true)
+  const path = nativeBindingPath(physical)
+  if (!sameNativePath(realpathSync(path), path) || lstatSync(path).nlink !== 1) throw new Error('WORKTREE_MISMATCH')
+  const binding = readNativeBinding(path)
+  const identity = gitDirectoryFingerprint([physical, admin, commonDirectory])
+  const [[, , rootInode, rootBirth], adminIdentity] = identity
+  const generation = nativeDigest(JSON.stringify([...adminIdentity, physical, rootInode, rootBirth]))
+  const gitPaths = process.platform === 'win32'
+    ? [physical, realpathSync.native(physical)].map(path => path.replaceAll('\\', '/'))
+    : [physical]
+  const hasWorktreeId = gitPaths.some(path => binding.worktreeId === nativeDigest(JSON.stringify([binding.repositoryId, commonDirectory, generation, path])))
+  const spool = join(dirname(path), 'spool')
+  if (!binding.enabled || binding.root !== physical || binding.commonDirectory !== commonDirectory ||
+      binding.directoryIdentity !== nativeDigest(JSON.stringify(identity)) || binding.generation !== generation ||
+      !hasWorktreeId || binding.spool !== spool ||
+      !lstatSync(spool).isDirectory() || !sameNativePath(realpathSync(spool), spool)) throw new Error('WORKTREE_MISMATCH')
+  return binding
+}
+
+export function resolveNativeHookBinding(anchorPath: string, cwd: string): NativeHookBinding {
+  if (!isAbsolute(anchorPath)) throw new Error('WORKTREE_MISMATCH')
+  const anchorRoot = dirname(dirname(dirname(resolve(anchorPath))))
+  if (!sameNativePath(resolve(anchorPath), nativeBindingPath(anchorRoot))) throw new Error('WORKTREE_MISMATCH')
+  const anchor = scopedBinding(anchorRoot)
+  const target = cwd === anchor.root ? anchor : scopedBinding(cwd)
+  if (target.commonDirectory !== anchor.commonDirectory || target.repositoryId !== anchor.repositoryId ||
+      (target.root !== anchor.root && anchor.commonDirectory !== join(anchor.root, '.git'))) throw new Error(nativeDispatchMismatch)
+  return target
 }
 
 export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding, now = new Date()): NativeHookEnvelope {

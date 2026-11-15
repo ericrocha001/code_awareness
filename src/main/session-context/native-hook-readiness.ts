@@ -1,4 +1,4 @@
-import { inspectNativeInstallation } from './native-hook-installation'
+import { inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
 import type { CheckpointRegistry } from './checkpoint-registry'
 import { unknownNativeTrust, type NativeTrustObservation } from './native-hook-preflight'
 import { nativeCaptureConfiguration } from './native-capture-window'
@@ -10,6 +10,8 @@ export function nativeHookReadiness(registry: CheckpointRegistry, root: string, 
   const { handlers: _handlers, ...installation } = inspectNativeInstallation(root, { repositoryId: registry.repositoryId, ...target })
   if (trust.expiresAt && Date.parse(trust.expiresAt) <= Date.now()) trust = unknownNativeTrust('TRUST_EXPIRED')
   if (trust.installationDigest && trust.installationDigest !== installation.digest) trust = unknownNativeTrust('HOOK_CONFIG_DRIFT')
+  if (trust.loadedSource === 'MAIN' && (!trust.sharedSourceDigest ||
+    inspectSharedNativeInstallation(root, { repositoryId: registry.repositoryId, ...target })?.digest !== trust.sharedSourceDigest)) trust = unknownNativeTrust('HOOK_CONFIG_DRIFT')
   const { execution: completion, ...authorization } = trust
   const events = registry.nativeHookEvidence(target.worktreeId, target.generation, trust.sessionId).sort((a, b) => b.observedAt.localeCompare(a.observedAt))
   const event = events[0]

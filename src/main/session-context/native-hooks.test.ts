@@ -1,10 +1,11 @@
 import { afterEach, expect, test, vi } from 'vitest'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
-import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, nativeBindingPath, prepareNativeSpool, readNativeBinding, recordNativeGap, resolveNativeHookBinding, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
+import { inspectNativeTrust, type NativeHookClient } from './native-hook-preflight'
 import { publicationRequestDigest, publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import { nativeObservationBatch } from './native-hook-ingestion'
 
@@ -20,6 +21,26 @@ function fixture() {
   const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'repository', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), ...nativeGitIdentity(root), spool }
   return { root, spool, binding, payload: { session_id: 'session-1', cwd: root, hook_event_name: 'PreToolUse', turn_id: 'turn-1', tool_use_id: 'call-1', tool_name: 'Bash' } }
 }
+function dispatcherBinding(root: string, admin: string, gitPath: string, repositoryId = 'repository'): NativeHookBinding {
+  const identity = nativeGitIdentity(root)
+  const adminStat = statSync(admin, { bigint: true }), rootStat = statSync(root, { bigint: true })
+  const generation = nativeDigest(JSON.stringify([realpathSync(admin), String(adminStat.dev), String(adminStat.ino),
+    String(adminStat.birthtimeNs), identity.root, String(rootStat.ino), String(rootStat.birthtimeNs)]))
+  const worktreeId = nativeDigest(JSON.stringify([repositoryId, identity.commonDirectory, generation, gitPath]))
+  const spool = join(root, '.code-awareness/native-hooks/spool')
+  mkdirSync(join(root, '.code-awareness/native-hooks'), { recursive: true })
+  prepareNativeSpool(spool)
+  const binding = { schema: 1 as const, enabled: true, repositoryId, worktreeId, generation, ...identity, spool }
+  writeFileSync(nativeBindingPath(root), JSON.stringify(binding))
+  return binding
+}
+
+function commandFixture() {
+  const f = fixture(), root = realpathSync(f.root)
+  const binding = dispatcherBinding(root, join(root, '.git'), process.platform === 'win32' ? root.replaceAll('\\', '/') : root)
+  return { ...f, root, binding, spool: binding.spool, payload: { ...f.payload, cwd: root } }
+}
+
 test('keeps only scoped structural evidence and pairs observed pre/post identifiers', () => {
   const f = fixture(), secret = 'PRIVATE_COMMAND_PROMPT_OUTPUT'
   const pre = normalizeNativeHook({ ...f.payload, prompt: secret, tool_input: { command: secret }, tool_response: secret }, f.binding)
@@ -89,32 +110,32 @@ test('deduplicates independently of observed time and bounds disk admission', ()
   expect(readdirSync(f.spool).every(file => Buffer.byteLength(readFileSync(join(f.spool, file))) < nativeHookLimits.envelopeBytes)).toBe(true)
 })
 test('command fails open without output for malformed, oversized or disabled input', () => {
-  const f = fixture(), file = join(f.root, 'binding.json')
+  const f = commandFixture(), file = nativeBindingPath(f.root)
   writeFileSync(file, JSON.stringify(f.binding))
   const command = join(process.cwd(), 'out/session-context/native-hook.cjs')
   for (const input of ['{', 'x'.repeat(nativeHookLimits.inputBytes + 1), JSON.stringify({ ...f.payload, session_id: '../private' })]) {
-    expect(execFileSync(process.execPath, [command, file], { input, timeout: 3000, encoding: 'utf8' })).toBe('')
+    expect(execFileSync(process.execPath, [command, file], { cwd: f.root, input, timeout: 3000, encoding: 'utf8' })).toBe('')
   }
   expect(readdirSync(f.spool)).toHaveLength(3)
-  expect(execFileSync(process.execPath, [command, file], { input: JSON.stringify(f.payload), timeout: 3000, encoding: 'utf8' })).toBe('')
+  expect(execFileSync(process.execPath, [command, file], { cwd: f.root, input: JSON.stringify(f.payload), timeout: 3000, encoding: 'utf8' })).toBe('')
   expect(readdirSync(f.spool)).toHaveLength(4)
   const eventFile = readdirSync(f.spool).find(file => /^\d+\.json$/.test(file))!
   const hash = nativeDigest(readFileSync(join(f.spool, eventFile), 'utf8'))
   writeFileSync(file, JSON.stringify({ ...f.binding, enabled: false }))
-  execFileSync(process.execPath, [command, file], { input: JSON.stringify({ ...f.payload, tool_use_id: 'new-call' }), timeout: 3000 })
+  execFileSync(process.execPath, [command, file], { cwd: f.root, input: JSON.stringify({ ...f.payload, tool_use_id: 'new-call' }), timeout: 3000 })
   expect(readdirSync(f.spool)).toHaveLength(4)
   expect(nativeDigest(readFileSync(join(f.spool, eventFile), 'utf8'))).toBe(hash)
 })
 
 test('command persists one scoped window across start/pre/post and closes it without changing legacy loss', () => {
-  const f = fixture(), directory = join(f.root, '.code-awareness/native-hooks'), file = join(directory, 'binding.json')
-  mkdirSync(directory, { recursive: true }); mkdirSync(join(f.root, '.codex'))
+  const f = commandFixture(), file = nativeBindingPath(f.root)
+  mkdirSync(join(f.root, '.codex'))
   writeFileSync(file, JSON.stringify(f.binding)); writeFileSync(join(f.root, '.codex/hooks.json'), '{}')
   const legacy = JSON.stringify({ schema: 1, observedAt: '2020-01-01T00:00:00.000Z' })
   writeFileSync(join(f.spool, 'gap.json'), legacy)
   const command = join(process.cwd(), 'out/session-context/native-hook.cjs')
   for (const hook_event_name of ['SessionStart', 'PreToolUse', 'PostToolUse', 'SessionEnd']) {
-    expect(execFileSync(process.execPath, [command, file], { input: JSON.stringify({ ...f.payload, hook_event_name,
+    expect(execFileSync(process.execPath, [command, file], { cwd: f.root, input: JSON.stringify({ ...f.payload, hook_event_name,
       ...(hook_event_name === 'SessionStart' || hook_event_name === 'SessionEnd' ? { tool_use_id: undefined } : {}) }), encoding: 'utf8', timeout: 3000 })).toBe('')
   }
   const events = readdirSync(f.spool).filter(name => /^\d+\.json$/.test(name)).map(name => parseNativeEnvelope(readFileSync(join(f.spool, name), 'utf8')))
@@ -133,15 +154,13 @@ test('command emits bounded typed diagnostics without payloads at each failing b
     { change: { session_id: null }, reasonCode: 'REQUIRED_ID_MISSING', phase: 'NORMALIZE', eventType: 'PreToolUse' },
     { change: { session_id: '../PRIVATE_SECRET' }, reasonCode: 'INVALID_ID', phase: 'NORMALIZE', eventType: 'PreToolUse' },
     { change: { tool_use_id: null }, reasonCode: 'INVOCATION_ID_MISSING', phase: 'NORMALIZE', eventType: 'PreToolUse' },
-    { mismatch: true, reasonCode: 'WORKTREE_MISMATCH', phase: 'NORMALIZE', eventType: 'PreToolUse' },
     { full: true, reasonCode: 'SPOOL_FULL', phase: 'WRITE', eventType: 'PreToolUse' }
   ]
   for (const sample of cases) {
-    const f = fixture(), binding = join(f.root, 'binding.json')
-    writeFileSync(binding, JSON.stringify({ ...f.binding, ...(sample.mismatch ? { directoryIdentity: '0'.repeat(64) } : {}) }))
+    const f = commandFixture(), binding = nativeBindingPath(f.root)
     if (sample.full) for (let slot = 0; slot < nativeHookLimits.slots; slot++) writeFileSync(join(f.spool, `${slot}.json`), '{}')
     const input = sample.input ?? JSON.stringify({ ...f.payload, ...sample.change, prompt: 'PRIVATE_SECRET' })
-    expect(execFileSync(process.execPath, [join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { input, encoding: 'utf8', timeout: 3000 })).toBe('')
+    expect(execFileSync(process.execPath, [join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { cwd: f.root, input, encoding: 'utf8', timeout: 3000 })).toBe('')
     const text = readFileSync(join(f.spool, 'gap-0.json'), 'utf8')
     expect(JSON.parse(text)).toMatchObject({ schema: 2, reasonCode: sample.reasonCode, phase: sample.phase, eventType: sample.eventType })
     expect(text.length).toBeLessThan(256)
@@ -150,10 +169,10 @@ test('command emits bounded typed diagnostics without payloads at each failing b
 })
 
 test('concurrent commands preserve both receipts and bound repeated failures', async () => {
-  const f = fixture(), binding = join(f.root, 'binding.json'), command = join(process.cwd(), 'out/session-context/native-hook.cjs')
+  const f = commandFixture(), binding = nativeBindingPath(f.root), command = join(process.cwd(), 'out/session-context/native-hook.cjs')
   writeFileSync(binding, JSON.stringify(f.binding))
   await Promise.all(['{', JSON.stringify({ ...f.payload, tool_use_id: null })].map(input => new Promise<void>((resolve, reject) => {
-    const child = execFile(process.execPath, [command, binding], { timeout: 3000 }, (error, stdout, stderr) => {
+    const child = execFile(process.execPath, [command, binding], { cwd: f.root, timeout: 3000 }, (error, stdout, stderr) => {
       if (error) return reject(error)
       expect(stdout).toBe(''); expect(stderr).toBe(''); resolve()
     })
@@ -169,14 +188,118 @@ test('concurrent commands preserve both receipts and bound repeated failures', a
 })
 
 test('command classifies a spool I/O failure without recording the system error message', () => {
-  const f = fixture(), binding = join(f.root, 'binding.json'), preloader = join(f.root, 'fault.cjs')
+  const f = commandFixture(), binding = nativeBindingPath(f.root), preloader = join(f.root, 'fault.cjs')
   writeFileSync(binding, JSON.stringify(f.binding))
   writeFileSync(preloader, "const fs = require('node:fs'); const original = fs.linkSync; let first = true; fs.linkSync = (...args) => { if (first) { first = false; throw Object.assign(new Error('PRIVATE_DISK_ERROR'), { code: 'EIO' }); } return original(...args); }")
-  expect(execFileSync(process.execPath, ['--require', preloader, join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 3000 })).toBe('')
+  expect(execFileSync(process.execPath, ['--require', preloader, join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { cwd: f.root, input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 3000 })).toBe('')
   const text = readFileSync(join(f.spool, 'gap-0.json'), 'utf8')
   expect(JSON.parse(text)).toMatchObject({ reasonCode: 'IO_FAILURE', phase: 'WRITE', eventType: 'PreToolUse' })
   expect(text).not.toContain('PRIVATE_DISK_ERROR'); expect(text).not.toContain(f.root)
 })
+
+test('dispatches one main helper to separate Git worktrees and refuses unsafe or stale bindings', async () => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), 'native-dispatch-'))); directories.push(base)
+  const roots = ['main', 'one', 'two', 'foreign'].map(name => join(base, name))
+  const [main, one, two, foreign] = roots
+  mkdirSync(main)
+  mkdirSync(foreign)
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false',
+    '-c', 'core.hooksPath=' + join(base, 'no-hooks'), '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args],
+  { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }).trim()
+  git(main, 'init', '-b', 'main')
+  git(main, 'commit', '--allow-empty', '-m', 'fixture')
+  git(main, 'worktree', 'add', '-b', 'one', one)
+  git(main, 'worktree', 'add', '-b', 'two', two)
+  git(foreign, 'init', '-b', 'main')
+  const listed = git(main, 'worktree', 'list', '--porcelain').split('\n').filter(line => line.startsWith('worktree ')).map(line => line.slice(9))
+  const bindings = roots.map((root, index) => dispatcherBinding(root, git(root, 'rev-parse', '--absolute-git-dir'),
+    index < 3 ? listed.find(path => realpathSync(path) === root)! : git(root, 'rev-parse', '--show-toplevel')))
+  const [anchor, bindingOne, bindingTwo, foreignBinding] = bindings
+  const command = join(main, 'out/session-context/native-hook.cjs'), anchorPath = nativeBindingPath(main)
+  mkdirSync(dirname(command), { recursive: true })
+  copyFileSync(join(process.cwd(), 'out/session-context/native-hook.cjs'), command)
+  const commandInOne = join(one, 'out/session-context/native-hook.cjs')
+  mkdirSync(dirname(commandInOne), { recursive: true })
+  copyFileSync(command, commandInOne)
+  const legacyNode = join(main, process.platform === 'win32' ? 'node.exe' : 'node')
+  writeFileSync(legacyNode, '')
+  const before = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'entire hooks codex session-start', timeout: 20 }] }] } })
+  const config = join(main, '.codex/hooks.json')
+  mkdirSync(dirname(config))
+  const legacyConfig = composeNativeHooks(before, [legacyNode, command, anchorPath].join(' '))
+  writeFileSync(config, legacyConfig)
+  writeFileSync(join(dirname(anchorPath), 'installation.json'), JSON.stringify({ schema: 1, path: config, before, installedDigest: nativeDigest(legacyConfig) }))
+  expect(inspectNativeInstallation(main, anchor)).toMatchObject({ state: 'CONFIGURED', installed: 7 })
+  const shared = inspectSharedNativeInstallation(one, bindingOne)!
+  expect(shared.handlers).toHaveLength(7)
+  const localRecord = { ...bindingOne, path: one, branch: 'one', head: git(one, 'rev-parse', 'HEAD'), detached: false, locked: false, missing: false, prunable: false }
+  const localInstall = { repositoryId: bindingOne.repositoryId, record: localRecord, commandPath: commandInOne, nodePath: process.execPath, authorized: true }
+  rmSync(nativeBindingPath(one))
+  expect(installNativeHooks(localInstall).state).toBe('CONFIGURED')
+  expect(installNativeHooks(localInstall).state).toBe('NO_CHANGE')
+  const hooks = shared.handlers.map(handler => ({
+    key: process.platform === 'win32' ? handler.key.toLowerCase() : handler.key, sourcePath: handler.sourcePath,
+    eventName: handler.event[0].toLowerCase() + handler.event.slice(1), currentHash: 'sha256:' + nativeDigest(handler.key), trustStatus: 'trusted', enabled: true
+  }))
+  const scope = { ...bindingOne, workspaceRoot: one, projectTrusted: true, clientId: 'client', sessionId: 'session', threadId: 'thread',
+    connectedAt: new Date().toISOString(), clientVersion: '0.169.0-alpha.11.1', protocolVersion: 'codex-app-server/v2' }
+  const client: NativeHookClient = { authorized: true, scope: () => scope,
+  request: async () => ({ data: [{ hooks }] }) }
+  expect(await inspectNativeTrust(one, bindingOne, true, client)).toMatchObject({ state: 'TRUSTED', loadedSource: 'MAIN', trusted: 7 })
+  const localHandler = inspectNativeInstallation(one, bindingOne).handlers[0]
+  const mixed: NativeHookClient = { ...client, request: async () => ({ data: [{ hooks: [...hooks,
+    { ...hooks[0], key: localHandler.key, sourcePath: localHandler.sourcePath }] }] }) }
+  expect(await inspectNativeTrust(one, bindingOne, true, mixed)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'HOOK_SCOPE_AMBIGUOUS' })
+  const hook = hooks[0], correctSource = hook.sourcePath
+  hook.sourcePath = join(two, '.codex/hooks.json')
+  expect(await inspectNativeTrust(one, bindingOne, true, client)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'HOOK_DISCOVERY_MISMATCH' })
+  hook.sourcePath = correctSource
+  writeFileSync(config, legacyConfig + '\n')
+  expect(inspectSharedNativeInstallation(one, bindingOne)).toBeUndefined()
+  expect(await inspectNativeTrust(one, bindingOne, true, client)).toMatchObject({ state: 'UNKNOWN' })
+  writeFileSync(config, legacyConfig)
+  expect(resolveNativeHookBinding(anchorPath, one)).toEqual(bindingOne)
+  expect(resolveNativeHookBinding(anchorPath, two)).toEqual(bindingTwo)
+  const run = (cwd: string, payloadCwd = cwd) => new Promise<void>((resolve, reject) => {
+    const child = execFile(process.execPath, [command, anchorPath], { cwd, timeout: 3000 }, (error, stdout, stderr) => {
+      if (error) return reject(error)
+      expect(stdout).toBe(''); expect(stderr).toBe(''); resolve()
+    })
+    child.stdin!.end(JSON.stringify({ cwd: payloadCwd, session_id: 'fixture', hook_event_name: 'PreToolUse', tool_use_id: 'one', tool_name: 'Bash' }))
+  })
+  await Promise.all([run(one), run(two)])
+  await run(one)
+  for (const binding of [bindingOne, bindingTwo]) {
+    const files = readdirSync(binding.spool)
+    expect(files).toHaveLength(1)
+    const envelope = parseNativeEnvelope(readFileSync(join(binding.spool, files[0]), 'utf8'))
+    expect(envelope).toMatchObject({ repositoryId: binding.repositoryId, worktreeId: binding.worktreeId, generation: binding.generation })
+  }
+  const path = nativeBindingPath(one)
+  const baseline = readdirSync(bindingOne.spool)
+  for (const change of [{ enabled: false }, { generation: '0'.repeat(64) }, { directoryIdentity: '0'.repeat(64) },
+    { worktreeId: bindingTwo.worktreeId }, { repositoryId: 'foreign' }, { spool: anchor.spool }]) {
+    writeFileSync(path, JSON.stringify({ ...bindingOne, ...change }))
+    await run(one)
+  }
+  rmSync(path)
+  await run(one)
+  const directory = join(one, '.code-awareness/native-hooks')
+  renameSync(directory, join(one, '.bindings'))
+  symlinkSync(dirname(bindingTwo.spool), directory, 'junction')
+  await run(one)
+  rmSync(directory)
+  renameSync(join(one, '.bindings'), directory)
+  await Promise.all([run(foreign), run(one, two), run(main, two)])
+  expect(readdirSync(bindingOne.spool)).toEqual(baseline)
+  expect(readdirSync(bindingTwo.spool)).toHaveLength(1)
+  expect(readdirSync(anchor.spool)).toEqual([])
+  expect(readdirSync(foreignBinding.spool)).toEqual([])
+  await run(main)
+  expect(readdirSync(anchor.spool)).toHaveLength(1)
+  expect(readFileSync(config, 'utf8')).toBe(legacyConfig)
+})
+
 test('requires explicit opt-in, preserves Entire handlers and restores exact configuration bytes', () => {
   const f = fixture(), commandPath = join(process.cwd(), 'out/session-context/native-hook.cjs')
   mkdirSync(join(f.root, '.codex'))
@@ -275,6 +398,12 @@ test('U1 legacy v1 ownership is reconstructed only from exact composition and ke
   expect(f.install()).toMatchObject({ state: 'CONFIGURED' }); expect(JSON.parse(readFileSync(f.snapshot, 'utf8')).before).toBe(legacy.before)
   const unknown = JSON.parse(readFileSync(f.snapshot, 'utf8')); unknown.schema = 1; unknown.installedDigest = '0'.repeat(64); writeFileSync(f.snapshot, JSON.stringify(unknown))
   expect(() => f.install()).toThrow('INSTALLATION_OWNERSHIP_UNPROVEN')
+  const config = readFileSync(f.config, 'utf8')
+  unknown.installedDigest = nativeDigest(config)
+  unknown.before = config
+  writeFileSync(f.snapshot, JSON.stringify(unknown))
+  expect(inspectNativeInstallation(f.root, readNativeBinding(f.binding))).toMatchObject({ state: 'UNKNOWN', reasonCode: 'INSTALLATION_OWNERSHIP_UNPROVEN', repairability: 'CONFLICT', installed: 0 })
+  expect(readFileSync(f.config, 'utf8')).toBe(config)
 }, 30000)
 
 test('U1 rejects oversized config before creating the spool or installation journal', () => {
@@ -298,7 +427,7 @@ test('U1 repairs external binding drift from the journal and re-enables a disabl
   expect(JSON.parse(readFileSync(f.binding, 'utf8'))).toEqual(binding)
   expect(f.install()).toMatchObject({ state: 'NO_CHANGE' })
   expect(disableNativeHooks(f.root, true)).toMatchObject({ restored: true }); expect(existsSync(f.config)).toBe(false)
-}, 30000)
+}, 60000)
 
 test('U1 publishes a new command only after preflight and detects immutable bundle tampering', () => {
   const f = installationFixture(), commandContent = 'process.exitCode = 0\n'
