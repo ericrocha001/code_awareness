@@ -348,8 +348,8 @@ export class EntireProvider {
       return { ...result, imported: 1, provider: 'entire', importState: 'TRANSCRIPT_REFERENCED', coverage: 'COMPLETE', transcriptImported: false, sourceBytes: parsed.sourceBytes, peakScalarBytes: parsed.peakScalarBytes, sourceCoverage: 'SOURCE_VERIFIED' }
     } catch (error) { store.references.discard(runId); throw error }
   }
-  async readEvent(session: SessionRow, event: EventRow, offset: number, pageBytes = 8192): Promise<Awaited<ReturnType<typeof readLiteralPage>>> {
-    this.deadline = Date.now() + 12_000
+  async readEvent(session: SessionRow, event: EventRow, offset: number, pageBytes = 8192, deadline?: number): Promise<Awaited<ReturnType<typeof readLiteralPage>>> {
+    this.deadline = Math.min(Date.now() + 12_000, deadline ?? Infinity)
     if (!('references' in this.store)) throw new Error('SOURCE_UNAVAILABLE')
     const store = this.store, source = store.references.source(session.id), fields = store.references.fields(event.id)
     if (!source || !fields) throw new Error('SOURCE_UNAVAILABLE')

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
@@ -16,6 +16,8 @@ import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { executeSessionTool } from './mcp'
+import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
@@ -198,6 +200,90 @@ it('U3 retains legacy coverage as historical UNKNOWN rather than inventing a cur
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ execution: { state: 'UNKNOWN', reasonCode: 'EVENT_DETAIL_UNAVAILABLE', freshness: 'HISTORICAL' } })
 })
 
+it('investigates native hook observations by provider and generation without inferring a transcript', async () => {
+  const f = fixture()
+  f.install()
+  const binding = readNativeBinding(f.bindingPath)
+  const first = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'SessionStart' }, binding)
+  const last = normalizeNativeHook({ session_id: 'selected-private-id', cwd: f.root, hook_event_name: 'Stop' }, binding)
+  for (const event of [first, last]) f.store().registry.apply(nativeObservationBatch(event), undefined)
+  const channel = new ChannelMcpAdapter({ projectId: 'fixture', repoRoot: f.root, navigation: {} as never,
+    continuum: { repositoryId: f.target.repositoryId } as never,
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), {}, name, args, () => {}) } })
+  const call = async (name: Parameters<typeof executeSessionTool>[2], args: unknown) => {
+    const [result] = (await channel.callTool(name, args)).content
+    if (result?.type !== 'text') throw new Error('MCP_TEXT_RESULT_REQUIRED')
+    return JSON.parse(result.text)
+  }
+  const listed = await call('list_agent_sessions', { source: 'NATIVE_HOOK' })
+  const selected = listed.sessions[0].deepen.arguments
+  expect(selected.repositoryId).toBe(f.target.repositoryId)
+  expect(selected.nativeSession).toEqual({ provider: 'codex-native', id: first.sessionId })
+  const map = await call('inspect_agent_session', selected)
+  expect(map).toMatchObject({ observedEventCount: 2, transcriptImported: false, identityEvidence: 'NATIVE_HASH_OBSERVED', contentAvailability: 'SOURCE_UNAVAILABLE' })
+  expect(JSON.stringify(map)).not.toContain('selected-private-id')
+  const args = { ...selected, expectedRevision: map.revision, limit: 1 }
+  const page = await call('list_agent_session_events', args)
+  const following = await call('list_agent_session_events', { ...args, cursor: page.nextCursor })
+  expect([page.events[0].eventId, following.events[0].eventId].sort()).toEqual([first.eventId, last.eventId].sort())
+  expect(await call('list_agent_session_events', { ...args, hookEvents: ['Stop'], cursor: page.nextCursor })).toMatchObject({ code: expect.stringMatching(/^CURSOR_/) })
+  expect(await call('inspect_agent_session', { nativeSession: { ...selected.nativeSession, provider: 'antigravity-native' } })).toEqual({ code: 'SESSION_UNAVAILABLE' })
+  expect(await call('inspect_agent_session', { nativeSession: { ...selected.nativeSession, worktreeId: f.target.worktreeId, generation: '3'.repeat(64) } })).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+  expect(await call('read_agent_session_event', { ...selected, expectedRevision: map.revision, eventId: first.eventId })).toEqual({ code: 'SOURCE_UNAVAILABLE' })
+  f.restart()
+  expect(await call('inspect_agent_session', { ...selected, expectedRevision: map.revision })).toMatchObject({ revision: map.revision, observedEventCount: 2 })
+})
+
+it('revalidates an authorized Codex transcript and exposes only its selected literal field', async () => {
+  const f = fixture()
+  f.install()
+  const providerId = '01a1dff8-0000-7000-8000-000000000001'
+  const event = normalizeNativeHook({ session_id: providerId, cwd: f.root, hook_event_name: 'SessionEnd' }, readNativeBinding(f.bindingPath))
+  const store = f.store()
+  store.registry.apply(nativeObservationBatch(event), undefined)
+  const profile = join(f.root, 'provider-profile')
+  const directory = join(profile, 'sessions', '2026', '11', '15')
+  mkdirSync(directory, { recursive: true })
+  const rollout = join(directory, 'rollout-pilot-' + providerId + '.jsonl')
+  const config = join(dirname(store.path), 'session-context.provider.json')
+  const grant = (creatorAccountHash = nativeDigest(JSON.stringify(['pilot-user', 'pilot-account']))) =>
+    writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { codex: { profile, creatorAccountHash } } }))
+  const content = 'Exact literal 🧪 "sample"\n'.repeat(600)
+  const rows = [{ type: 'session_meta', payload: { id: providerId, session_id: providerId, account_scoped: true, creator_user_id: 'pilot-user',
+    creator_account_id: 'pilot-account', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.169.0-alpha.11.1' } },
+    { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'output_text', text: 'PRIVATE_INSTRUCTIONS' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: content }] } }]
+  const write = () => writeFileSync(rollout, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  write()
+  const nativeSession = { provider: 'codex-native', id: event.sessionId, worktreeId: f.target.worktreeId, generation: f.target.generation }
+  const args = { nativeSession, sourceSessionId: providerId }
+  const call = async (name: Parameters<typeof executeSessionTool>[2], input: unknown, target = f.target) =>
+    JSON.parse((await executeSessionTool(store, {}, name, input, () => {}, target, [], undefined, f.root)).content[0].text)
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'SOURCE_NOT_AUTHORIZED' })
+  grant('9'.repeat(64))
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'SOURCE_IDENTITY_CONFLICT' })
+  grant()
+  const map = await call('inspect_agent_session', args)
+  expect(map).toMatchObject({ source: 'CODEX_LOCAL_TRANSCRIPT_V1', sourceEventCount: 1, identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED' })
+  const events = await call('list_agent_session_events', { ...args, expectedRevision: map.revision })
+  expect(JSON.stringify(events)).not.toContain('Exact literal')
+  expect(JSON.stringify(events)).not.toContain('PRIVATE_INSTRUCTIONS')
+  let cursor: string | undefined, reconstructed = ''
+  do {
+    const page = await call('read_agent_session_event', { ...args, expectedRevision: map.revision, eventId: events.events[0].eventId, cursor })
+    expect(page).toMatchObject({ payloadDigest: nativeDigest(content), transcriptImported: false, untrusted: true })
+    reconstructed += page.content
+    cursor = page.nextCursor
+  } while (cursor)
+  expect(reconstructed).toBe(content)
+  expect(store.count()).toBe(0)
+  rows[0].payload.runtime_workspace_roots!.push(profile)
+  write()
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+  rows[0].payload.runtime_workspace_roots!.pop()
+  write()
+  expect(await call('inspect_agent_session', { ...args, expectedRevision: map.revision })).toEqual({ code: 'REVISION_CONFLICT' })
+}, 60000)
 
 it('sends only host-observed trust through the real worker and rejects a changed session at readback', async () => {
   const f = fixture()
@@ -269,3 +355,23 @@ it('Antigravity ingests ANTIGRAVITY_NATIVE_HOOK envelopes, exposes readiness and
   expect(context.counts.EXECUTION).toBeGreaterThanOrEqual(3)
   expect(context.edges.every((edge: { evidenceKind: string }) => !edge.evidenceKind.startsWith('NATIVE_GIT_') && !edge.evidenceKind.startsWith('NATIVE_ARTIFACT_'))).toBe(true)
 }, 30000)
+
+it('diagnoses only the selected Antigravity IDE source and never reads an unqualified transcript', () => {
+  const f = fixture()
+  const store = f.store()
+  const id = '019ba000-0000-7000-8000-000000000001'
+  const hash = nativeDigest(JSON.stringify([store.repositoryId, 'antigravity', id]))
+  const profile = join(f.root, 'ide-profile')
+  const config = join(dirname(store.path), 'session-context.provider.json')
+  const diagnose = (assertCurrent = () => {}) => antigravitySourceDiagnostic(store.path, store.repositoryId, hash, id, assertCurrent)
+  expect(diagnose()).toBe('PROFILE_UNAVAILABLE')
+  mkdirSync(profile)
+  writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { antigravityIde: { profile } } }))
+  expect(antigravitySourceDiagnostic(store.path, store.repositoryId, '0'.repeat(64), id, () => {})).toBe('IDENTITY_MISMATCH')
+  expect(diagnose()).toBe('SOURCE_NOT_FOUND')
+  const path = join(profile, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, 'synthetic format sentinel')
+  expect(diagnose()).toBe('FORMAT_UNSUPPORTED')
+  expect(diagnose(() => writeFileSync(path, 'source changed'))).toBe('SOURCE_STALE')
+})

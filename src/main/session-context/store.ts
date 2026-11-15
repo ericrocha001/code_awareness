@@ -47,10 +47,19 @@ export class SessionStore {
   readonly references: SessionReferences
   private readonly db: Database.Database
   private readonly key: string
-  constructor(readonly path: string, readonly repositoryId: string) {
-    mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
-    this.db = new Database(path)
+  constructor(readonly path: string, readonly repositoryId: string, readOnly = false) {
+    if (!readOnly) mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
+    this.db = new Database(path, readOnly ? { readonly: true, fileMustExist: true, timeout: 1000 } : {})
     try {
+      if (readOnly) {
+        if (Number(this.db.pragma('user_version', { simple: true })) !== 8) throw new Error('SCHEMA_UNSUPPORTED')
+        const rows = this.db.prepare('SELECT repositoryId,cursorKey FROM identity').all() as { repositoryId: string; cursorKey: string }[]
+        if (rows.length !== 1 || rows[0].repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
+        this.key = rows[0].cursorKey
+        this.registry = new CheckpointRegistry(this.db, repositoryId)
+        this.references = new SessionReferences(this.db, true)
+        return
+      }
       if (process.platform !== 'win32') chmodSync(path, 0o600)
       this.db.pragma('auto_vacuum = INCREMENTAL')
       this.db.pragma('journal_mode = WAL')
@@ -319,13 +328,14 @@ export class SessionStore {
         sourceObservation: '{}', importState: 'UNKNOWN', coverageReasons: '{}', historicalState: 'SESSION_EVICTED' }
     })
   }
-  events(sessionId: string, filter: { types?: string[]; tool?: string; from?: number; to?: number; after?: string; before?: string }, offset: number, limit: number): EventRow[] {
+  events(sessionId: string, filter: { types?: string[]; tool?: string; from?: number; to?: number; after?: string; before?: string; file?: string }, offset: number, limit: number): EventRow[] {
     const where = ['sessionId = ?'], params: (string | number)[] = [sessionId]
     if (filter.types?.length) { where.push(`type IN (${filter.types.map(() => '?').join(',')})`); params.push(...filter.types) }
     for (const [key, column, op] of [['tool', 'tool', '='], ['from', 'ordinal', '>='], ['to', 'ordinal', '<='], ['after', 'timestamp', '>='], ['before', 'timestamp', '<=']] as const) {
       const value = filter[key]
       if (value !== undefined) { where.push(key === 'after' || key === 'before' ? `julianday(${column}) ${op} julianday(?)` : `${column} ${op} ?`); params.push(value) }
     }
+    if (filter.file) { where.push('EXISTS (SELECT 1 FROM json_each(events.files) WHERE value = ?)'); params.push(filter.file) }
     return this.db.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY ordinal LIMIT ? OFFSET ?`).all(...params, limit, offset) as EventRow[]
   }
   event(sessionId: string, id: string): EventRow & { text: string | null } {
@@ -341,6 +351,19 @@ export class SessionStore {
     const segments = this.db.prepare(`SELECT CAST((ordinal-1)/100 AS INTEGER) AS segment, MIN(ordinal) AS first, MAX(ordinal) AS last,
       COUNT(*) AS count, MIN(timestamp) AS firstObserved, MAX(timestamp) AS lastObserved FROM events WHERE sessionId=? GROUP BY segment ORDER BY segment LIMIT ? OFFSET ?`).all(id, limit, offset) as { segment: number; first: number; last: number; count: number; firstObserved: string | null; lastObserved: string | null }[]
     return { types, tools, files, segments: segments.map(segment => ({ ...segment, id: `S${segment.segment + 1}`, label: `Eventos ${segment.first}–${segment.last}`, types: this.db.prepare('SELECT type, COUNT(*) AS count FROM events WHERE sessionId=? AND ordinal BETWEEN ? AND ? GROUP BY type').all(id, segment.first, segment.last) })) }
+  }
+  fileCoverage(sessionId: string) {
+    const row = this.db.prepare("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE json_array_length(files)>0) AS observed FROM events WHERE sessionId=?").get(sessionId) as { total: number; observed: number }
+    return { ...row, state: row.observed ? 'INDEXED_REFERENCES_ONLY' : 'NOT_OBSERVED' }
+  }
+  turns(sessionId: string, offset: number, limit: number) {
+    const rows = this.db.prepare("SELECT ordinal FROM events WHERE sessionId=? AND type='INPUT' ORDER BY ordinal LIMIT ? OFFSET ?").all(sessionId, limit, offset) as { ordinal: number }[]
+    return rows.map(({ ordinal }) => ({ id: 'T' + ordinal, firstOrdinal: ordinal, boundaryEvidence: 'INDEXED_INPUT_CANDIDATE', coverage: 'PARTIAL' }))
+  }
+  turnEnd(sessionId: string, ordinal: number): number {
+    if (!this.db.prepare("SELECT 1 FROM events WHERE sessionId=? AND ordinal=? AND type='INPUT'").get(sessionId, ordinal)) throw new Error('TURN_UNAVAILABLE')
+    const next = this.db.prepare("SELECT ordinal FROM events WHERE sessionId=? AND ordinal>? AND type='INPUT' ORDER BY ordinal LIMIT 1").get(sessionId, ordinal) as { ordinal: number } | undefined
+    return next ? next.ordinal - 1 : Number.MAX_SAFE_INTEGER
   }
   diagnostics() {
     const size = (path: string) => { try { return statSync(path).size } catch { return 0 } }

@@ -8,18 +8,21 @@ import type { Coverage } from './types'
 
 export interface ReferenceSource { locator: EntireSource; sourceDigest: string; sourceBytes: number; normalizer: string; revision: number }
 export class SessionReferences {
-  constructor(readonly db: Database.Database) {
+  constructor(readonly db: Database.Database, readOnly = false) {
+    if (readOnly) return
     db.exec(`
       CREATE TABLE IF NOT EXISTS session_sources(sessionId TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,locator TEXT NOT NULL,sourceDigest TEXT NOT NULL,sourceBytes INTEGER NOT NULL,normalizer TEXT NOT NULL,revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS event_locators(eventId TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE,sessionId TEXT NOT NULL,fields TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS reference_runs(id TEXT PRIMARY KEY,sessionId TEXT NOT NULL,locator TEXT NOT NULL,normalizer TEXT NOT NULL,expectedRevision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS reference_staging(runId TEXT NOT NULL,ordinal INTEGER NOT NULL,event TEXT NOT NULL,PRIMARY KEY(runId,ordinal));
       CREATE TABLE IF NOT EXISTS reference_tools(runId TEXT NOT NULL,callId TEXT NOT NULL,tool TEXT NOT NULL,PRIMARY KEY(runId,callId));
-      CREATE TABLE IF NOT EXISTS literal_spans(eventId TEXT NOT NULL,revision INTEGER NOT NULL,start INTEGER NOT NULL,end INTEGER NOT NULL,replacement TEXT NOT NULL,rule INTEGER NOT NULL);
-      CREATE INDEX IF NOT EXISTS literal_span_order ON literal_spans(eventId,revision,start,end);
-      CREATE TABLE IF NOT EXISTS literal_anchors(eventId TEXT NOT NULL,revision INTEGER NOT NULL,fieldIndex INTEGER NOT NULL,decodedByte INTEGER NOT NULL,rawByte INTEGER NOT NULL,PRIMARY KEY(eventId,revision,fieldIndex,decodedByte));
-      CREATE TABLE IF NOT EXISTS literal_projection(eventId TEXT PRIMARY KEY,revision INTEGER NOT NULL,payloadDigest TEXT NOT NULL,outputBytes INTEGER NOT NULL);
     `)
+    db.transaction(() => db.exec(`
+      DROP TABLE IF EXISTS main.literal_spans;
+      DROP TABLE IF EXISTS main.literal_anchors;
+      DROP TABLE IF EXISTS main.literal_ranges;
+      DROP TABLE IF EXISTS main.literal_projection;
+    `)).immediate()
   }
   begin(sessionId: string, locator: EntireSource, normalizer: string): string {
     const id = randomUUID()

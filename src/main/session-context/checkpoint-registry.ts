@@ -139,6 +139,27 @@ export class CheckpointRegistry {
     return rows.filter(row => this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)).map(row => this.nativeSession(row.externalId))
   }
 
+  nativeSessionObservations(selector: { provider: 'codex-native' | 'antigravity-native'; id: string; worktreeId?: string; generation?: string }, accountHash?: string) {
+    const entity = { kind: 'SESSION' as const, id: selector.provider + ':' + selector.id }
+    const key = this.key(entity)
+    if (!this.visible(entity, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(key)) throw new Error('SESSION_UNAVAILABLE')
+    const target = selector.worktreeId ? this.key({ kind: 'WORKTREE', id: selector.worktreeId + ':' + selector.generation }) : null
+    const rows = this.db.prepare(`SELECT DISTINCT s.source,s.cursor FROM registry_edges e JOIN registry_sources s ON e.source=s.source
+      WHERE e.toId=? AND e.state='OBSERVED' AND s.status='COMPLETE' AND s.source LIKE 'NATIVE_HOOK:%'
+      AND (? IS NULL OR EXISTS (SELECT 1 FROM registry_edges w WHERE w.fromId=e.fromId AND w.toId=?
+        AND w.source=e.source AND w.state='OBSERVED'))
+      ORDER BY s.observedAt, s.source LIMIT 257`).all(key, target, target) as { source: string; cursor: string }[]
+    const providerSource = selector.provider === 'codex-native' ? 'CODEX_NATIVE_HOOK' : 'ANTIGRAVITY_NATIVE_HOOK'
+    const events = rows.slice(0, 256).map(row => {
+      const event = parseNativeEnvelope(row.cursor)
+      if (event.repositoryId !== this.repositoryId || event.sessionId !== selector.id || event.source !== providerSource ||
+        row.source !== 'NATIVE_HOOK:' + event.eventId ||
+        target && (event.worktreeId !== selector.worktreeId || event.generation !== selector.generation)) throw new Error('REGISTRY_INTEGRITY_FAILED')
+      return event
+    })
+    return { events, bounded: rows.length > 256 }
+  }
+
   nativeDeliverySessions(selector: RegistryEntity, accountHash?: string) {
     if (selector.kind !== 'PR' && selector.kind !== 'COMMIT') throw new Error('INVALID_ARGUMENT')
     const target = this.key(selector)
@@ -209,7 +230,7 @@ export class CheckpointRegistry {
     const { provider, id } = sessionSelector(externalId)
     const agent = provider === 'antigravity-native' ? 'antigravity' : 'codex'
     return { provider, providerSessionId: id, agent, origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
-      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider, id } } } }
+      deepen: { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider, id } } } }
   }
   readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {
