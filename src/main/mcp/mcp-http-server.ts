@@ -2,10 +2,11 @@ import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { MCP_REQUEST_BUDGET_MS } from './operational-guidance'
 import type { ChannelMcpAdapter } from './channel-mcp-adapter'
+import { MCP_SKILLS_EXTENSION_ID, MCP_SKILLS_PROTOCOL_REVISION, McpProtocolError } from '../academy/academy-mcp-skills'
 import { SESSION_RESPONSE_BUDGETS, type SessionToolName } from '../session-context/mcp'
 import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 
-const supportedProtocolVersions = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
+const supportedProtocolVersions = new Set([MCP_SKILLS_PROTOCOL_REVISION, '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
 const defaultProtocolVersion = '2025-11-25'
 
 export interface McpOperationalLogEntry {
@@ -130,59 +131,108 @@ export function createMcpHttpServer(
         return
       }
 
+      const serverCapabilities = () => ({
+        tools: { listChanged: false },
+        ...(adapter.hasSkillsExtension()
+          ? { resources: { directoryRead: false }, extensions: { [MCP_SKILLS_EXTENSION_ID]: {} } }
+          : {})
+      })
+      const serverInfo = { name: 'code-awareness-context-navigation', version: '1.0.0' }
       let rpcResult: unknown
       emit('mcp-dispatch-started', 'started')
-      if (method === 'initialize') {
-        const requestedVersion = params?.protocolVersion
-        rpcResult = {
-          protocolVersion: typeof requestedVersion === 'string' && supportedProtocolVersions.has(requestedVersion)
-            ? requestedVersion
-            : defaultProtocolVersion,
-          capabilities: { tools: { listChanged: false } },
-          serverInfo: { name: 'code-awareness-context-navigation', version: '1.0.0' }
-        }
-      } else if (method === 'tools/list') {
-        rpcResult = { tools: adapter.listTools() }
-      } else if (method === 'tools/call' && typeof params?.name === 'string') {
-        if (Object.hasOwn(SESSION_RESPONSE_BUDGETS, params.name) && Buffer.byteLength(JSON.stringify(id)) > 256) {
-          responseSize = writeJson(response, 400, error(null, -32600, 'INVALID_REQUEST_ID'))
-          return
-        }
-        emit('codescope-request-started', 'started')
-        emit('codescope-handler-started', 'started')
-        const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
-        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
-        const { postResponse, ...publicResult } = toolResult
-        rpcResult = publicResult
-        const sessionBudget = SESSION_RESPONSE_BUDGETS[params.name as SessionToolName]
-        if (sessionBudget && Buffer.byteLength(JSON.stringify(result(id, rpcResult))) > sessionBudget) {
-          rpcResult = { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'RESPONSE_LIMIT_REACHED' }) }] }
-        }
-        emit('codescope-response-produced', 'success')
-        emit('codescope-handler-completed', 'success')
-        if (postResponse) {
-          emit('mcp-response-produced', 'success')
-          const finished = new Promise<void>((resolve) => response.once('finish', resolve))
-          responseSize = writeJson(response, 200, result(id, rpcResult))
-          success = true
-          await finished
-          emit('mcp-response-sent', 'success')
-          responseSent = true
-          try {
-            await postResponse()
-          } catch {
-            log({
-              timestamp: new Date().toISOString(), requestId: correlationId, sessionId: relaySessionId,
-              method, tool, stage: 'mcp-response-sent', durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
-              responseSize, success: false, status: 'error', error: 'POST_RESPONSE_ACTION_FAILED'
-            })
+      try {
+        if (method === 'initialize') {
+          const requestedVersion = params?.protocolVersion
+          rpcResult = {
+            protocolVersion: typeof requestedVersion === 'string' && supportedProtocolVersions.has(requestedVersion)
+              ? requestedVersion
+              : defaultProtocolVersion,
+            capabilities: serverCapabilities(),
+            serverInfo
           }
+        } else if (method === 'server/discover') {
+          const requestedVersion = params?.protocolVersion
+          rpcResult = {
+            protocolVersion: typeof requestedVersion === 'string' && supportedProtocolVersions.has(requestedVersion)
+              ? requestedVersion
+              : MCP_SKILLS_PROTOCOL_REVISION,
+            capabilities: serverCapabilities(),
+            serverInfo
+          }
+        } else if (method === 'skills/list') {
+          const cursor = params?.cursor
+          if (cursor !== undefined && typeof cursor !== 'string') {
+            throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
+          }
+          rpcResult = adapter.listSkills(cursor !== undefined ? { cursor } : undefined)
+        } else if (method === 'skills/get') {
+          const uri = params?.uri
+          if (typeof uri !== 'string' || !uri) {
+            throw new McpProtocolError(-32602, 'Invalid params: uri is required')
+          }
+          rpcResult = adapter.getSkill({ uri })
+        } else if (method === 'resources/read') {
+          const uri = params?.uri
+          if (typeof uri !== 'string' || !uri) {
+            throw new McpProtocolError(-32602, 'Invalid params: uri is required')
+          }
+          rpcResult = adapter.readResource({ uri })
+        } else if (method === 'resources/list') {
+          const cursor = params?.cursor
+          if (cursor !== undefined && typeof cursor !== 'string') {
+            throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
+          }
+          rpcResult = adapter.listResources(cursor !== undefined ? { cursor } : undefined)
+        } else if (method === 'tools/list') {
+          rpcResult = { tools: adapter.listTools() }
+        } else if (method === 'tools/call' && typeof params?.name === 'string') {
+          if (Object.hasOwn(SESSION_RESPONSE_BUDGETS, params.name) && Buffer.byteLength(JSON.stringify(id)) > 256) {
+            responseSize = writeJson(response, 400, error(null, -32600, 'INVALID_REQUEST_ID'))
+            return
+          }
+          emit('codescope-request-started', 'started')
+          emit('codescope-handler-started', 'started')
+          const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+          const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
+          const { postResponse, ...publicResult } = toolResult
+          rpcResult = publicResult
+          const sessionBudget = SESSION_RESPONSE_BUDGETS[params.name as SessionToolName]
+          if (sessionBudget && Buffer.byteLength(JSON.stringify(result(id, rpcResult))) > sessionBudget) {
+            rpcResult = { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'RESPONSE_LIMIT_REACHED' }) }] }
+          }
+          emit('codescope-response-produced', 'success')
+          emit('codescope-handler-completed', 'success')
+          if (postResponse) {
+            emit('mcp-response-produced', 'success')
+            const finished = new Promise<void>((resolve) => response.once('finish', resolve))
+            responseSize = writeJson(response, 200, result(id, rpcResult))
+            success = true
+            await finished
+            emit('mcp-response-sent', 'success')
+            responseSent = true
+            try {
+              await postResponse()
+            } catch {
+              log({
+                timestamp: new Date().toISOString(), requestId: correlationId, sessionId: relaySessionId,
+                method, tool, stage: 'mcp-response-sent', durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+                responseSize, success: false, status: 'error', error: 'POST_RESPONSE_ACTION_FAILED'
+              })
+            }
+            return
+          }
+        } else {
+          failure = 'METHOD_NOT_FOUND'
+          responseSize = writeJson(response, 200, error(id, -32601, 'Method not found'))
           return
         }
-      } else {
-        failure = 'METHOD_NOT_FOUND'
-        responseSize = writeJson(response, 200, error(id, -32601, 'Method not found'))
-        return
+      } catch (dispatchError) {
+        if (dispatchError instanceof McpProtocolError) {
+          failure = dispatchError.code === -32601 ? 'METHOD_NOT_FOUND' : 'INVALID_PARAMS'
+          responseSize = writeJson(response, 200, error(id, dispatchError.code, dispatchError.message))
+          return
+        }
+        throw dispatchError
       }
 
       emit('mcp-response-produced', 'success')

@@ -44,17 +44,30 @@ export class McpLifecycle {
   private disposed = false
   private runtimeFailure = false
   private endpointGeneration: string | null = null
+  private globalServer: Server | null = null
+  private globalEndpoint: string | null = null
+  private globalGeneration: string | null = null
   private readonly instanceId: string
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
   private readonly createServer: (context: McpProjectContext) => Server
   private readonly log: (state: McpLifecycleState) => void
   private readonly disabled: boolean
+  private readonly academy?: import('../academy/academy-service').AcademyService
+  private readonly systemHealth?: import('../system-health/system-health-core').SystemHealthCore
+  private readonly runtimeIdentity?: import('../runtime-identity/runtime-identity-provider').RuntimeIdentityProvider
+  private readonly validationLedger?: import('../validation-ledger/validation-ledger').ValidationLedger
+  private readonly trace?: ChannelTraceSink
 
   constructor(options: McpLifecycleOptions = {}) {
     this.instanceId = options.runtimeIdentity?.getInstanceId() ?? randomUUID()
     this.disabled = options.disabled ?? false
     this.activity = options.activity ?? new ChannelActivityMonitor()
     this.usage = options.usage
+    this.academy = options.academy
+    this.systemHealth = options.systemHealth
+    this.runtimeIdentity = options.runtimeIdentity
+    this.validationLedger = options.validationLedger
+    this.trace = options.trace
     this.createServer = options.createContextServer ?? (options.createServer
       ? ((context) => options.createServer!(context.navigation, context.artifactReader))
       : ((context) => {
@@ -101,6 +114,76 @@ export class McpLifecycle {
     }
     return { status: 'RUNNING', endpoint: this.state.endpoint, projectId: this.state.projectId,
       instanceId, bindingId: this.endpointGeneration, observedAt, protocol: 'code-awareness-mcp-bootstrap/v1' }
+  }
+
+  async ensureGlobalSkillsEndpoint() {
+    const observedAt = new Date().toISOString()
+    if (this.disabled || this.disposed) {
+      return { status: 'UNAVAILABLE' as const, reason: this.disposed ? 'DISPOSED' : 'DISABLED', observedAt }
+    }
+    if (this.state.status === 'RUNNING' && this.endpointGeneration) {
+      return {
+        mode: 'PROJECT' as const,
+        status: 'RUNNING' as const,
+        endpoint: this.state.endpoint,
+        projectId: this.state.projectId,
+        instanceId: this.instanceId,
+        bindingId: this.endpointGeneration,
+        observedAt,
+        protocol: 'code-awareness-mcp-bootstrap/v1' as const
+      }
+    }
+    if (!this.academy) {
+      return { status: 'UNAVAILABLE' as const, reason: this.state.status, observedAt }
+    }
+    if (this.globalServer && this.globalEndpoint && this.globalGeneration) {
+      return {
+        mode: 'GLOBAL_ONLY' as const,
+        status: 'RUNNING' as const,
+        endpoint: this.globalEndpoint,
+        projectId: null,
+        instanceId: this.instanceId,
+        bindingId: this.globalGeneration,
+        observedAt,
+        protocol: 'code-awareness-mcp-bootstrap/v1' as const
+      }
+    }
+    const generation = randomUUID()
+    const adapter = ChannelMcpAdapter.createGlobalOnly(this.academy, this.systemHealth, this.runtimeIdentity, this.validationLedger)
+    adapter.setWorkloadGovernor(this.governor)
+    adapter.setActivityMonitor(this.activity)
+    const server = createMcpHttpServer(adapter, console.log, this.trace, headers => {
+      const supplied = headers['x-code-awareness-binding']
+      if (supplied === undefined) return true
+      return !this.disposed && this.globalGeneration === generation && supplied === generation &&
+        headers['x-code-awareness-instance'] === this.instanceId &&
+        (headers['x-code-awareness-project'] ?? '') === ''
+    })
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => { server.removeListener('listening', onListening); reject(err) }
+      const onListening = () => { server.removeListener('error', onError); resolve() }
+      server.once('error', onError)
+      server.once('listening', onListening)
+      server.listen(0, '127.0.0.1')
+    })
+    const address = server.address()
+    if (!address || typeof address === 'string') {
+      await new Promise<void>(resolve => { server.close(() => resolve()); server.closeIdleConnections() })
+      throw new Error('GLOBAL_MCP_ADDRESS_UNAVAILABLE')
+    }
+    this.globalServer = server
+    this.globalGeneration = generation
+    this.globalEndpoint = `http://127.0.0.1:${address.port}/mcp`
+    return {
+      mode: 'GLOBAL_ONLY' as const,
+      status: 'RUNNING' as const,
+      endpoint: this.globalEndpoint,
+      projectId: null,
+      instanceId: this.instanceId,
+      bindingId: generation,
+      observedAt: new Date().toISOString(),
+      protocol: 'code-awareness-mcp-bootstrap/v1' as const
+    }
   }
 
   getActivityState() { return this.activity.getState() }
@@ -164,7 +247,23 @@ export class McpLifecycle {
   dispose(): Promise<void> {
     if (this.disposed) return this.transition
     this.disposed = true
-    return this.deactivate().then(async () => { await this.usage?.close() })
+    return this.deactivate().then(async () => {
+      await this.stopGlobalServer()
+      await this.usage?.close()
+    })
+  }
+
+  private async stopGlobalServer(): Promise<void> {
+    const server = this.globalServer
+    this.globalServer = null
+    this.globalEndpoint = null
+    this.globalGeneration = null
+    if (!server) return
+    await new Promise<void>((resolve) => {
+      server.close(() => resolve())
+      server.closeIdleConnections()
+    })
+    server.removeAllListeners('error')
   }
 
   private schedule(): Promise<void> {
@@ -218,6 +317,7 @@ export class McpLifecycle {
       return
     }
     await this.stop()
+    await this.stopGlobalServer()
     if (revision !== this.revision) return
     const requested = this.requested
     if (!requested || this.disposed) {
