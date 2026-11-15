@@ -95,6 +95,12 @@ Não altere autonomamente:
 
 Se uma implementação correta exigir mudança nessas áreas ou se a realidade do repositório invalidar uma premissa arquitetural necessária, trate a situação como conflito ou bloqueio, não como autorização para redesenhar silenciosamente a solução.
 
+### Autonomia operacional — não terceirize CLI ao humano
+
+**Execute diretamente toda operação técnica viável, autorizada e dentro do escopo, em vez de pedir ao usuário que a faça.** Isso inclui localizar ou abrir arquivos, criar e organizar diretórios, editar arquivos, executar comandos, instalar dependências previstas, realizar testes e consultar logs. Prefira a ferramenta especializada quando ela resolver melhor; caso contrário, use CLI direta no ambiente local autorizado ou CLI Execution MCP para alcançar o host a partir de agente remoto. Consulte `cli-execution` para seleção e controles do canal.
+
+Se uma via falhar, diagnostique e tente alternativa segura e autorizada antes de repassar trabalho ao usuário. Solicite ação humana apenas diante de decisão, credencial, autorização/consentimento, ação física ou bloqueio real de acesso/capacidade. Explicite a dependência e peça a **menor habilitação necessária**, não passos manuais substitutos. Nunca use CLI para contornar permissões, segurança, governança Git ou limites do Plano.
+
 ## 4. Baseline de Engenharia
 
 Escolha a solução mais simples que satisfaça corretamente o Plano.
@@ -113,6 +119,8 @@ Priorize:
 - manutenção simples.
 
 Não introduza complexidade para demonstrar sofisticação.
+
+Organize cada funcionalidade com código próprio em um diretório identificável de seu domínio, nas camadas em que atuar. Agrupe seus subsistemas por responsabilidades reais, respeitando fronteiras e contratos definidos no Plano. Componentes de infraestrutura compartilhada permanecem em seus módulos próprios. Não crie diretórios por necessidades hipotéticas nem migre código existente fora do escopo autorizado.
 
 ### SOLID
 
