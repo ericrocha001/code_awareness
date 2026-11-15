@@ -150,7 +150,8 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       }
       } finally { nativeIngesting = false }
     }
-    if (message.name === 'read_agent_session_event' && store && message.args && typeof message.args === 'object' && 'sessionId' in message.args && typeof message.args.sessionId === 'string') {
+    if ((message.name === 'read_agent_session_event' || message.name === 'list_agent_session_events' &&
+      message.args && typeof message.args === 'object' && 'query' in message.args) && store && message.args && typeof message.args === 'object' && 'sessionId' in message.args && typeof message.args.sessionId === 'string') {
       const selection = store.references.source(message.args.sessionId)?.locator.target
       if (selection) {
         target = await validateTarget(message.id, selection)

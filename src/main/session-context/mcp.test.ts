@@ -151,7 +151,9 @@ describe('Session Context progressive MCP disclosure', () => {
     do {
       const result = await f.call('read_agent_session_event', { sessionId: imported.sessionId, eventId: stored.id, expectedRevision: imported.revision, cursor })
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(16384)
-      const page = data(result); literal += page.content; cursor = page.nextCursor; pages++
+      const page = data(result)
+      expect(result.isError, page.code).toBeFalsy()
+      literal += page.content; cursor = page.nextCursor; pages++
       expect(page.omission).toBeNull()
     } while (cursor)
     expect(stored.text).toBeNull(); expect(literal).toBe(text); expect(pages).toBeGreaterThan(1)
@@ -202,3 +204,40 @@ describe('Session Context progressive MCP disclosure', () => {
     await new Promise(resolve => setTimeout(resolve, 150))
   })
 })
+
+it('combines files, candidate turns and bounded sanitized source search in the existing MCP tools', async () => {
+  const f = setup()
+  const marker = 'cross-page-marker'
+  const secret = 'ghp_Abcdefghijklmnopqrstuv'
+  const text = 'a'.repeat(8186) + marker + ' token=' + secret
+  const records: EventInput[] = [{ type: 'INPUT', text: 'first', sourcePosition: 1 },
+    { type: 'AGENT_UPDATE', text, sourcePosition: 2 },
+    { type: 'INPUT', text: 'second', sourcePosition: 3 },
+    { type: 'AGENT_UPDATE', text: marker, sourcePosition: 4 }, ...events(620)]
+  const imported = await f.ingest(sessionInput('turn-file-search'), records)
+  const { sessionId, revision: expectedRevision } = imported
+  const update = f.store.references.db.prepare('UPDATE events SET files=? WHERE sessionId=? AND ordinal IN (2,4)')
+  update.run(JSON.stringify(['src/ação.ts']), sessionId)
+  const invoke = async (name: SessionToolName, args: object) => data(await f.call(name, { sessionId, expectedRevision, ...args }))
+  const map = await invoke('inspect_agent_session', {})
+  expect(map.segments[0].id).toBe('S1')
+  const turns = await invoke('inspect_agent_session', { mapView: 'TURNS', limit: 1 })
+  expect(turns.turns).toEqual([{ id: 'T1', firstOrdinal: 1, boundaryEvidence: 'INDEXED_INPUT_CANDIDATE', coverage: 'PARTIAL' }])
+  expect((await invoke('inspect_agent_session', { mapView: 'TURNS', limit: 1, cursor: turns.nextCursor })).turns[0].id).toBe('T3')
+  const filtered = await invoke('list_agent_session_events', { file: 'src\\ação.ts', turnId: 'T1', segmentId: 'S1', types: ['AGENT_UPDATE'] })
+  expect(filtered.events.map((event: { ordinal: number }) => event.ordinal)).toEqual([2])
+  expect(filtered.fileCoverage).toMatchObject({ state: 'INDEXED_REFERENCES_ONLY', observed: 2 })
+  expect(await invoke('list_agent_session_events', { file: '..\\ação.ts' })).toEqual({ code: 'INVALID_ARGUMENT' })
+  const found = await invoke('list_agent_session_events', { file: 'src/ação.ts', query: marker, limit: 1 })
+  expect(found.events[0]).toMatchObject({ ordinal: 2, match: { startByte: 8186 } })
+  expect(found.nextCursor).toBeDefined()
+  expect(JSON.stringify(found)).not.toContain(marker)
+  const second = await invoke('list_agent_session_events', { file: 'src/ação.ts', query: marker, limit: 1, cursor: found.nextCursor })
+  expect(second.events[0]).toMatchObject({ ordinal: 4, match: { startByte: 0 } })
+  expect(await invoke('list_agent_session_events', { file: 'src/ação.ts', query: 'changed', limit: 1, cursor: found.nextCursor })).toEqual({ code: 'CURSOR_STALE' })
+  expect((await invoke('list_agent_session_events', { file: 'src/ação.ts', query: secret })).events).toEqual([])
+  expect((await f.adapter.callTool('list_agent_session_events', { sessionId, query: marker })).isError).toBe(true)
+  const path = join(f.base, '.entire/metadata/turn-file-search/full.jsonl')
+  writeFileSync(path, 'drift')
+  expect(await invoke('list_agent_session_events', { query: marker })).toEqual({ code: 'SOURCE_STALE' })
+}, 30000)

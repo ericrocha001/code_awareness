@@ -16,6 +16,7 @@ import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { executeSessionTool } from './mcp'
+import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 
 const cleanup: (() => void)[] = []
@@ -354,3 +355,23 @@ it('Antigravity ingests ANTIGRAVITY_NATIVE_HOOK envelopes, exposes readiness and
   expect(context.counts.EXECUTION).toBeGreaterThanOrEqual(3)
   expect(context.edges.every((edge: { evidenceKind: string }) => !edge.evidenceKind.startsWith('NATIVE_GIT_') && !edge.evidenceKind.startsWith('NATIVE_ARTIFACT_'))).toBe(true)
 }, 30000)
+
+it('diagnoses only the selected Antigravity IDE source and never reads an unqualified transcript', () => {
+  const f = fixture()
+  const store = f.store()
+  const id = '019ba000-0000-7000-8000-000000000001'
+  const hash = nativeDigest(JSON.stringify([store.repositoryId, 'antigravity', id]))
+  const profile = join(f.root, 'ide-profile')
+  const config = join(dirname(store.path), 'session-context.provider.json')
+  const diagnose = (assertCurrent = () => {}) => antigravitySourceDiagnostic(store.path, store.repositoryId, hash, id, assertCurrent)
+  expect(diagnose()).toBe('PROFILE_UNAVAILABLE')
+  mkdirSync(profile)
+  writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { antigravityIde: { profile } } }))
+  expect(antigravitySourceDiagnostic(store.path, store.repositoryId, '0'.repeat(64), id, () => {})).toBe('IDENTITY_MISMATCH')
+  expect(diagnose()).toBe('SOURCE_NOT_FOUND')
+  const path = join(profile, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl')
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, 'synthetic format sentinel')
+  expect(diagnose()).toBe('FORMAT_UNSUPPORTED')
+  expect(diagnose(() => writeFileSync(path, 'source changed'))).toBe('SOURCE_STALE')
+})

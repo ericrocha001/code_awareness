@@ -16,7 +16,11 @@ afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length
 const data = (result: { content: readonly unknown[] }) => JSON.parse((result.content[0] as { text: string }).text)
 async function fixture(legacyText?: string) {
   const base = mkdtempSync(join(tmpdir(), 'reference-reading-')), root = join(base, 'repo')
-  mkdirSync(root); cleanup.push(() => rmSync(base, { recursive: true, force: true }))
+  mkdirSync(root)
+  cleanup.push(() => {
+    if (process.platform === 'win32') execFileSync('node', ['-e', "const fs=require('node:fs'),p=require('node:path');const folder=fs.realpathSync(process.argv[1]);if(p.dirname(folder)!==fs.realpathSync(require('node:os').tmpdir())||!p.basename(folder).startsWith('reference-reading-'))throw Error('TEMP_PATH');fs.rmSync(folder,{recursive:true,force:true,maxRetries:5})", base], { windowsHide: true })
+    else rmSync(base, { recursive: true, force: true, maxRetries: 5 })
+  })
   await runReadOnly('git', ['init', '-q'], root, 4096)
   const path = sessionStorePath(base, 'repo')
   if (legacyText !== undefined) {
@@ -174,3 +178,34 @@ it('reads a >8MiB event to its last byte via MCP cursors after indexing >20000 e
   expect(chunks.join('')).toBe(literal); expect(pages).toBeGreaterThan(1000)
   expect(f.store.session(session.id).payloadBytes).toBe(0)
 }, 180000)
+
+it('bounds derived projection entries and replays offsets after eviction and restart', async () => {
+  const f = await fixture()
+  const content = 'a'.repeat(8170) + ' token=private-value ' + '🧪'.repeat(80)
+  f.add('cache-session', 'codex', [{ type: 'session_meta', payload: { id: 'cache-session', cwd: f.root } },
+    ...Array.from({ length: 18 }, (_, index) => ({ type: 'event_msg', payload: { type: 'user_message', message: content + index } }))])
+  await f.provider.refresh()
+  const id = f.store.byProvider('cache-session')!.id
+  await f.provider.refresh(id); f.failure()
+  const session = f.store.session(id)
+  const events = f.store.events(id, {}, 0, 18)
+  const before = f.store.diagnostics()
+  const first = await f.provider.readEvent(session, events[0], 0)
+  const next = await f.provider.readEvent(session, events[0], first.range.endByte)
+  expect(first.partial).toBe(true)
+  for (const event of events.slice(1)) await f.provider.readEvent(session, event, 0)
+  const db = f.store.references.db
+  expect(db.prepare('SELECT COUNT(*) AS count FROM temp.literal_projection').get()).toEqual({ count: 16 })
+  expect(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name LIKE 'literal_%'").get()).toEqual({ count: 0 })
+  expect(await f.provider.readEvent(session, events[0], first.range.endByte)).toEqual(next)
+  const after = f.store.diagnostics()
+  expect(after.payloadBytes).toEqual(before.payloadBytes)
+  expect(after.databaseBytes).toEqual(before.databaseBytes)
+  expect(after.walBytes).toEqual(before.walBytes)
+  const reopened = new SessionStore(f.store.path, 'repo')
+  try {
+    const provider = new EntireProvider(reopened, f.root, () => {}, f.run)
+    expect(await provider.readEvent(reopened.session(id), events[0], first.range.endByte)).toEqual(next)
+    expect(reopened.references.db.prepare('SELECT COUNT(*) AS count FROM temp.literal_projection').get()).toEqual({ count: 1 })
+  } finally { reopened.close() }
+}, 60000)

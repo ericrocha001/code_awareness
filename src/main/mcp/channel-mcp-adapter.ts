@@ -394,7 +394,7 @@ export class ChannelMcpAdapter {
         }
         args = selected
       }
-      if (args && typeof args === 'object' && 'sourceSessionId' in args) {
+      if (args && typeof args === 'object' && ('sourceSessionId' in args || name === 'list_agent_session_events' && 'query' in args)) {
         try {
           assertArtifactAgent(authority, this.repositoryId ?? '')
           if (authority.worktreeId && nativeLiteralTarget(name as SessionToolName, args)?.worktreeId !== authority.worktreeId) {
