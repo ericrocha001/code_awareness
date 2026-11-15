@@ -19,6 +19,15 @@ O transporte Relay usa o endpoint MCP da implantação configurada e a credencia
 
 O endpoint público `/mcp` é protegido exclusivamente por uma Cloudflare Access Application com Managed OAuth. O Worker valida `Cf-Access-Jwt-Assertion` contra as chaves da organização, o issuer configurado em `CLOUDFLARE_ACCESS_TEAM_DOMAIN` e o AUD da aplicação em `CLOUDFLARE_ACCESS_AUD`. O `sub` validado é a identidade usada no vínculo com a instalação. O origin não publica discovery, challenge ou escopos Auth0 para MCP; esses contratos pertencem ao Access. `AUTHORIZATION_SERVER` permanece restrito ao enrollment existente e não participa de chamadas MCP.
 
+## Compatibilidade com Gemini Web — apps personalizados
+
+O Gemini Web aceita o endpoint remoto HTTPS `/mcp` do Channel pelo fluxo de **Cloudflare Access Managed OAuth**, sem alterações no transporte MCP. Em validação de 11/11/2026, o Gemini concluiu a vinculação e reconheceu o catálogo de ferramentas quando o cliente OAuth foi registrado com `token_endpoint_auth_method: client_secret_post`; o registro anterior com `client_secret_basic` autorizava o login no Cloudflare, mas o Gemini encerrava a vinculação com a mensagem **"A vinculação de conta é necessária para usar este app personalizado. Tente de novo."**. Esse resultado é evidência de compatibilidade observada nessa integração, não regra universal para todos os clientes OAuth.
+
+Para conectar: habilite Managed OAuth e Dynamic Client Registration na Access Application; autorize a **redirect URI exata** fornecida pelo Gemini; registre um cliente OAuth no `registration_endpoint` anunciado pelo authorization server com `authorization_code`, `refresh_token`, `response_type: code` e `token_endpoint_auth_method: client_secret_post`; informe o `client_id` e o `client_secret` nas configurações avançadas do app personalizado. O login e o consentimento são feitos pelo Cloudflare. Mantenha segredos fora do repositório, logs e documentação.
+
+O reconhecimento do catálogo `tools/list` **não substitui** a validação de uma chamada `tools/call` originada pelo Gemini. Se uma integração falhar após o consentimento, diferencie: Access auth logs (login autorizado/negado), token exchange no authorization server (não observável pelo Worker) e Workers Logs (`POST /mcp` após autenticação). Não desative a autenticação do Gateway como diagnóstico.
+
+
 Falhas transitórias do Relay permitem novas tentativas de conexão após 1, 2, 5, 10 e no máximo 30 segundos. Conectar com sucesso reinicia o contador. Esse mecanismo não repete chamadas MCP. Desabilitar o acesso ou encerrar o aplicativo cancela as tentativas. Erros terminais exigem intervenção.
 
 Trocar o projeto encerra a exposição anterior antes de confirmar a nova seleção. Fechar o projeto remove a exposição e mantém a intenção habilitada para uma seleção posterior. Timers, estados de conexão e portas não são persistidos.
