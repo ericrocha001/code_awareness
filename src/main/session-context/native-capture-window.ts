@@ -2,12 +2,14 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, lstatSync, openSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { CheckpointRegistry, RegistryEntity } from './checkpoint-registry'
-import { boundedFile, nativeDigest, parseNativeEnvelope, readNativeBinding, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { boundedFile, nativeDigest, nativeSessionEntityId, parseNativeEnvelope, readNativeBinding, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { readNativeGapHistory } from './native-hook-diagnostics'
 
 export function nativeCaptureConfiguration(binding: NativeHookBinding): string | undefined {
   try {
-    const bindingPath = join(binding.root, '.code-awareness/native-hooks/binding.json'), configPath = join(binding.root, '.codex/hooks.json')
+    const provider = binding.provider ?? 'codex'
+    const bindingPath = join(binding.root, provider === 'antigravity' ? '.code-awareness/native-hooks/antigravity/binding.json' : '.code-awareness/native-hooks/binding.json')
+    const configPath = join(binding.root, provider === 'antigravity' ? '.agents/hooks.json' : '.codex/hooks.json')
     const revision = (path: string) => {
       const stat = lstatSync(path, { bigint: true })
       return [stat.dev, stat.ino, stat.birthtimeNs, stat.mtimeNs, stat.ctimeNs].map(String).join(':')
@@ -67,7 +69,7 @@ export function nativeInvocationWindow(registry: CheckpointRegistry, binding: Na
       const event = parseNativeEnvelope(source?.cursor ?? '')
       if (source?.revision !== event.digest || edge.digest !== event.digest || event.eventId !== edge.evidenceRef || event.repositoryId !== binding.repositoryId ||
         event.worktreeId !== binding.worktreeId || event.generation !== binding.generation || 'native-invocation:' + event.invocationId !== invocation.id ||
-        'codex-native:' + event.sessionId !== session.id || JSON.stringify(event.capture) !== JSON.stringify(capture)) throw new Error('CAPTURE_ENVELOPE_UNPROVEN')
+        nativeSessionEntityId(event, event.sessionId) !== session.id || JSON.stringify(event.capture) !== JSON.stringify(capture)) throw new Error('CAPTURE_ENVELOPE_UNPROVEN')
       return event
     })
     const pre = events.find(event => event.event === 'PreToolUse'), post = events.find(event => event.event === 'PostToolUse')

@@ -11,10 +11,11 @@ import { buildSync } from 'esbuild'
 import { execFileSync } from 'node:child_process'
 import { SessionContextClient } from './client'
 import { sourceFingerprint, type SessionTargetResolver } from './target'
-import { inspectNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
+import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
 import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
 import { stampNativeCapture } from './native-capture-window'
 import { ingestNativeHooks } from './native-hook-ingestion'
+import { executeSessionTool } from './mcp'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
@@ -230,3 +231,40 @@ it('sends only host-observed trust through the real worker and rejects a changed
     expect(JSON.parse(changed.content[0].text)).toMatchObject({ code: 'SESSION_SCOPE_CHANGED' })
   } finally { await client.dispose() }
 }, 60000)
+
+it('Antigravity ingests ANTIGRAVITY_NATIVE_HOOK envelopes, exposes readiness and serves MCP context without fake causal edges', async () => {
+  const f = fixture()
+  const commandPath = join(f.root, 'native-hook.cjs')
+  const record = { path: f.root, ...f.target, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }
+  installNativeHooks({ repositoryId: 'repo', record, commandPath, nodePath: process.execPath, provider: 'antigravity', authorized: true })
+  const binding = readNativeBinding(join(f.root, '.code-awareness/native-hooks/antigravity/binding.json'))
+
+  for (const payload of [
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'SessionStart', lastUserInput: 'PRIVATE_PROMPT' },
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'call-ag-1', name: 'run_command', args: { CommandLine: 'PRIVATE_CMD' } } },
+    { conversationId: 'PRIVATE_AG_CONV', workspacePaths: [f.root], hookEventName: 'PostToolUse', toolCall: { id: 'call-ag-1', name: 'run_command', args: { CommandLine: 'PRIVATE_CMD' } } }
+  ]) {
+    spoolNativeHook(stampNativeCapture(normalizeNativeHook(payload, binding), binding), binding.spool)
+  }
+
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  f.restart()
+
+  const readiness = nativeHookReadiness(f.store().registry, f.root, f.target, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity')
+  expect(readiness).toMatchObject({
+    installation: { state: 'CONFIGURED', installed: 6, expected: 6 },
+    execution: { state: 'OBSERVED', eventType: 'PostToolUse' },
+    captureReadiness: { state: 'OBSERVED', reasonCode: 'CURRENT_WINDOW_INGESTED' }
+  })
+  expect(JSON.stringify(readiness)).not.toContain('PRIVATE_AG_CONV')
+
+  const provider = { refresh: async () => ({}) }
+  const listed = JSON.parse((await executeSessionTool(f.store(), provider, 'list_agent_sessions', { source: 'NATIVE_HOOK', limit: 10 }, () => {}, f.target, [], undefined, f.root)).content[0].text)
+  expect(listed.sessions).toHaveLength(1)
+  expect(listed.sessions[0]).toMatchObject({ provider: 'antigravity-native', agent: 'antigravity', origin: 'NATIVE_HOOK' })
+
+  const context = JSON.parse((await executeSessionTool(f.store(), provider, 'discover_execution_context', { selector: { type: 'SESSION', provider: 'antigravity-native', id: listed.sessions[0].providerSessionId } }, () => {}, f.target, [], undefined, f.root)).content[0].text)
+  expect(context.counts).toMatchObject({ SESSION: 1, WORKTREE: 1 })
+  expect(context.counts.EXECUTION).toBeGreaterThanOrEqual(3)
+  expect(context.edges.every((edge: { evidenceKind: string }) => !edge.evidenceKind.startsWith('NATIVE_GIT_') && !edge.evidenceKind.startsWith('NATIVE_ARTIFACT_'))).toBe(true)
+}, 30000)

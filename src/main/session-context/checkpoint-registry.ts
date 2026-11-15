@@ -99,12 +99,13 @@ export class CheckpointRegistry {
         causalEdges: { current: counts.currentEdges, withdrawn: counts.withdrawnEdges }, denominator: null, coverage: 'COVERAGE_UNKNOWN' }
     })
   }
-  nativeHookEvidence(worktreeId: string, generation: string, sessionId?: string): NativeHookEnvelope[] {
+  nativeHookEvidence(worktreeId: string, generation: string, sessionId?: string, source?: NativeHookEnvelope['source']): NativeHookEnvelope[] {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
     const rows = this.db.prepare(`SELECT DISTINCT s.cursor FROM registry_edges e JOIN registry_sources s ON e.source=s.source
       WHERE e.toId=? AND e.state='OBSERVED' AND e.source LIKE 'NATIVE_HOOK:%'
       AND (? IS NULL OR CASE WHEN json_valid(s.cursor) THEN json_extract(s.cursor,'$.sessionId') ELSE NULL END=?)
-      ORDER BY s.observedAt DESC LIMIT 8`).all(scope, sessionId ?? null, sessionId ?? null) as { cursor: string | null }[]
+      AND (? IS NULL OR CASE WHEN json_valid(s.cursor) THEN json_extract(s.cursor,'$.source') ELSE NULL END=?)
+      ORDER BY s.observedAt DESC LIMIT 8`).all(scope, sessionId ?? null, sessionId ?? null, source ?? null, source ?? null) as { cursor: string | null }[]
     return rows.flatMap(row => {
       try {
         const event = parseNativeEnvelope(row.cursor ?? '')
@@ -134,7 +135,7 @@ export class CheckpointRegistry {
     }).filter(edge => edge.evidenceKind === evidenceKind)
   }
   nativeSessions(offset: number, limit: number, accountHash?: string) {
-    const rows = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND externalId LIKE 'codex-native:%' ORDER BY externalId LIMIT ? OFFSET ?").all(limit, offset) as { externalId: string }[]
+    const rows = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND (externalId LIKE 'codex-native:%' OR externalId LIKE 'antigravity-native:%') ORDER BY externalId LIMIT ? OFFSET ?").all(limit, offset) as { externalId: string }[]
     return rows.filter(row => this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)).map(row => this.nativeSession(row.externalId))
   }
 
@@ -180,7 +181,7 @@ export class CheckpointRegistry {
       const invoked = this.nativeAuditEdge(witnesses[0])
       if (invoked.relation !== 'invoked' || invoked.evidenceKind !== 'NATIVE_GIT_CAUSAL' || invoked.digest !== commit.digest ||
           invoked.evidenceRef !== commit.evidenceRef || invoked.freshness !== commit.freshness ||
-          invoked.from.kind !== 'SESSION' || !/^codex-native:[a-f0-9]{64}$/.test(invoked.from.id) || !this.visible(invoked.from, accountHash)) continue
+          invoked.from.kind !== 'SESSION' || !/^(?:codex-native|antigravity-native):[a-f0-9]{64}$/.test(invoked.from.id) || !this.visible(invoked.from, accountHash)) continue
       const member = commits.get(committed.toId)
       if (!sessions.has(invoked.from.id)) sessions.set(invoked.from.id, {
         ...this.nativeSession(invoked.from.id), evidence: {
@@ -205,9 +206,10 @@ export class CheckpointRegistry {
   }
 
   private nativeSession(externalId: string) {
-    const id = externalId.slice(13)
-    return { provider: 'codex-native', providerSessionId: id, agent: 'codex', origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
-      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider: 'codex-native', id } } } }
+    const { provider, id } = sessionSelector(externalId)
+    const agent = provider === 'antigravity-native' ? 'antigravity' : 'codex'
+    return { provider, providerSessionId: id, agent, origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
+      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider, id } } } }
   }
   readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {
