@@ -11,6 +11,8 @@ import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
 import { readExecutionSessionAssociations, sessionStorePath } from './store'
 import type { SessionAssociation } from './associations'
+import { nativeCaptureAgent } from './capture-health'
+import { nativeBindingPath } from './native-hooks'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -193,7 +195,8 @@ export class SessionContextClient implements SessionContextPort {
               indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
             } catch { throw new Error('INVALID_ARGUMENT') }
           }
-          if (!indexOnlyNativeDelivery && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+          const health = name === 'inspect_capture_health' ? parseCaptureHealth(args) : undefined
+          if (!indexOnlyNativeDelivery && !health?.source && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
             request.phase = 'native-target-resolution'
             const available = (await this.resolveTarget.discover()).filter(target =>
               existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')) ||
@@ -202,16 +205,20 @@ export class SessionContextClient implements SessionContextPort {
             nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)
             this.nativeOffset = (start + nativeTargets.length) % Math.max(1, available.length)
           }
-          if (name === 'inspect_capture_health') {
-            const query = parseCaptureHealth(args)
+          if (health) {
+            const query = health
             if (query.worktreeId && this.resolveTarget) {
               const selection = { worktreeId: query.worktreeId, generation: query.generation! }
               target = { ...await this.resolveTarget(selection), selection }
             } else if (this.resolveTarget?.current) target = await this.resolveTarget.current()
             if (!target) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
             request.validate = target.validate
+            const nativeAgent = query.source === 'native' ? nativeCaptureAgent(query) : undefined
+            if (nativeAgent && existsSync(nativeBindingPath(target.root, nativeAgent))) {
+              nativeTargets = [{ ...target.selection, root: target.root, fingerprint: target.fingerprint }]
+            }
             const client = this.nativeHookClient
-            if (query.inspectNativeTrust && client) {
+            if (query.inspectNativeTrust && client && query.source !== 'entire' && nativeAgent !== 'antigravity') {
               request.phase = 'native-trust-inspection'
               const root = target.root
               const scope = { repositoryId: this.repositoryId, ...target.selection }

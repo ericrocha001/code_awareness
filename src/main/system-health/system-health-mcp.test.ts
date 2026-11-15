@@ -53,12 +53,9 @@ describe('System Health MCP — get_system_health tool', () => {
     failure.sink.record({ ...event, tool: 'inspect_worktree_structure', stage: 'mcp-response-produced', status: 'error', error: 'REQUEST_TIMEOUT' })
     expect(failure.getState().lastFailure?.operation).toBe('inspect_worktree_structure')
   })
-  it('appears in the MCP catalog alongside the seven CodeScope tools and runtime identity (9 tools total)', () => {
+  it('advertises the Session Context source selector in the public MCP catalog', () => {
     const adapter = new ChannelMcpAdapter(mockNavigation(), new SystemHealthCore())
     const tools = adapter.listTools()
-    expect(tools).toHaveLength(9)
-    expect(tools.map((t) => t.name)).toContain('get_system_health')
-    expect(tools.map((t) => t.name)).toContain('get_runtime_identity')
     expect(tools.map((t) => t.name)).toEqual([
       'discover_repository',
       'get_relationships',
@@ -69,10 +66,12 @@ describe('System Health MCP — get_system_health tool', () => {
       'read_code',
       'get_system_health',
       'get_runtime_identity',
+      'get_channel_usage',
     ])
     const healthTool = tools.find((t) => t.name === 'get_system_health')!
     expect(healthTool.description).toContain('Inspect the operational health')
     expect(healthTool.inputSchema.properties).toHaveProperty('feature')
+    expect(healthTool.inputSchema.properties).toHaveProperty('source.enum', ['native', 'entire'])
     expect(healthTool.securitySchemes).toEqual([{ type: 'oauth2', scopes: [] }])
   })
 

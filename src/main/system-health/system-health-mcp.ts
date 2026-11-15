@@ -55,7 +55,7 @@ export interface SystemHealthDiagnosticPayload {
 export const SYSTEM_HEALTH_MCP_TOOL: McpToolDefinition = {
   name: 'get_system_health',
   description:
-    'Inspect the operational health of CodeScope or Session Context capture. feature=session_context returns persisted configuration/capture/checkpoint evidence for a governed checkout, never prompts. Configuration readiness is distinct from observed capture. refresh requests a bounded read-only recheck; commitSha inspects a selected commit. No hooks/settings are changed.',
+    'Inspect the operational health of CodeScope or Session Context capture. feature=session_context defaults to native capture health for a governed checkout. source=entire reports Entire integration and checkpoints. Configuration readiness is distinct from observed capture. refresh requests a bounded recheck; no hooks or settings are changed.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -64,11 +64,12 @@ export const SYSTEM_HEALTH_MCP_TOOL: McpToolDefinition = {
         description: 'codescope (default) or session_context.'
       },
       worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      source: { type: 'string', enum: ['native', 'entire'], description: 'Session Context source. Defaults to native.' },
       generation: { type: 'string', pattern: '^[a-f0-9]{64}$' },
       cycleId: { type: 'string', minLength: 1, maxLength: 200 },
       inspectNativeTrust: { type: 'boolean', default: false, description: 'Read-only hooks/list inspection only when the selected Codex client exposes an authorized same-session surface. Otherwise reports UNKNOWN; never grants trust or starts a client.' },
-      agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$', description: 'Session Context: Entire integration name. antigravity identifies CLI only; unknown integrations remain unsupported.' },
-      commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+      agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$', description: 'For native, codex (default) or antigravity (IDE). For entire, an Entire integration name.' },
+      commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$', description: 'Inspect a selected commit checkpoint with source=entire.' },
       refresh: { type: 'boolean' }
     },
     additionalProperties: false

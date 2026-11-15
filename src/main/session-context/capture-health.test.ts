@@ -1,7 +1,7 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import Database from 'better-sqlite3'
 import { SessionStore, sessionStorePath } from './store'
@@ -12,39 +12,63 @@ import { digest } from './privacy'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import { executeSessionTool } from './mcp'
-import { nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { nativeBindingPath, normalizeNativeHook, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookProvider } from './native-hooks'
 import { ingestNativeHooks } from './native-hook-ingestion'
+import { installNativeHooks } from './native-hook-installation'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
-it('get_system_health separates current native capture from historical gaps and Entire health', async () => {
-  const f = fixture(), spool = join(f.root, '.code-awareness/native-hooks/spool')
-  prepareNativeSpool(spool)
-  const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'A', ...f.target, ...nativeGitIdentity(f.root), spool }
-  writeFileSync(join(f.root, '.code-awareness/native-hooks/binding.json'), JSON.stringify(binding))
-  recordNativeGap(spool, 'INVOCATION_ID_MISSING', 'NORMALIZE', 'PreToolUse')
-  spoolNativeHook(normalizeNativeHook({ session_id: 'private-native-session', cwd: f.root, hook_event_name: 'Stop' }, binding), spool)
-  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+it('defaults to bounded Codex health and selects the Antigravity IDE without probing incompatible Entire hooks', async () => {
+  const f = fixture()
+  const codex = installFixture(f, 'codex'), antigravity = installFixture(f, 'antigravity')
+  const { spool } = codex
+  const postCommit = join(f.hooks, 'post-commit')
+  writeFileSync(postCommit, 'incompatible fixture\n')
+  writeFileSync(join(spool, 'gap.json'), JSON.stringify({ schema: 1, observedAt: '2026-01-01T00:00:00.000Z' }))
+  for (let i = 0; i < 33; i++) recordNativeGap(spool, 'INVOCATION_ID_MISSING', 'NORMALIZE', 'PreToolUse')
+  spoolNativeHook(normalizeNativeHook({ session_id: 'private-native-session', cwd: f.root, hook_event_name: 'Stop' }, codex), spool)
+  await ingestNativeHooks(f.store().registry, codex, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  const inspectCapture = vi.fn(() => { throw new Error('ENTIRE_SHOULD_NOT_RUN') })
+  const run = vi.fn<CommandRunner>(() => { throw new Error('GIT_HOOK_INSPECTION_SHOULD_NOT_RUN') })
+  const watched = [postCommit, join(f.root, '.entire/settings.local.json'), join(f.root, '.codex/hooks.json'), join(f.root, '.agents/hooks.json'), join(spool, 'gap.json')]
+  const before = watched.map(path => readFileSync(path, 'utf8'))
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
-    sessionContext: { call: (name, args) => executeSessionTool(f.store(), new EntireProvider(f.store(), f.root, () => {}, f.run), name, args, () => {}, f.target, [], f.run, f.root) } })
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), { inspectCapture }, name, args, () => {}, f.target, [], run, f.root) } })
   const result = await adapter.callTool('get_system_health', { feature: 'session_context', refresh: true })
   expect(result.isError).toBeFalsy()
   const text = (result.content[0] as { text: string }).text
-  expect(JSON.parse(text)).toMatchObject({ feature: 'session_context', nativeCapture: { independentOfEntire: true, state: 'PARTIAL',
-    currentOperationalCapture: { state: 'OBSERVED' }, historicalCoverage: { state: 'PARTIAL', count: 1,
-      diagnostics: [expect.objectContaining({ phase: 'NORMALIZE', eventType: 'PreToolUse', reasonCode: 'INVOCATION_ID_MISSING' })] } } })
-  expect(text.length).toBeLessThan(8192)
+  expect(JSON.parse(text)).toMatchObject({ feature: 'session_context', source: 'native', version: 1, agent: 'codex', repositoryId: 'A', ...f.target,
+    state: 'PARTIAL', nativeCapture: { independentOfEntire: true, causality: 'NOT_EVALUATED',
+      lastIngestion: { state: 'OBSERVED' }, historicalCoverage: { state: 'PARTIAL', count: 34, countCoverage: 'LOWER_BOUND', acknowledgedCount: 0, omittedDiagnostics: 31 },
+      readiness: { installation: { state: 'CONFIGURED', installed: 7 }, captureReadiness: { state: 'NOT_VERIFIED', reasonCode: 'CURRENT_CAPTURE_UNPROVEN' } } } })
+  expect(JSON.parse(text).nativeCapture.historicalCoverage.diagnostics).toHaveLength(3)
+  expect(Buffer.byteLength(text)).toBeLessThan(8192)
   expect(text).not.toContain('private-native-session'); expect(text).not.toContain(f.root)
   const readiness = JSON.parse(text).nativeCapture.readiness
   expect(readiness).toMatchObject({ schemaVersion: 1, trust: { state: 'UNKNOWN', reasonCode: 'TRUST_NOT_INSPECTED' }, execution: { state: 'OBSERVED', freshness: 'HISTORICAL' } })
   const explicit = await adapter.callTool('get_system_health', { feature: 'session_context', inspectNativeTrust: true })
   expect(explicit.isError).toBeFalsy()
   expect(JSON.parse((explicit.content[0] as { text: string }).text).nativeCapture.readiness.trust).toMatchObject({ state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' })
+  const ide = await adapter.callTool('get_system_health', { feature: 'session_context', source: 'native', agent: 'antigravity', inspectNativeTrust: true })
+  expect(JSON.parse((ide.content[0] as { text: string }).text)).toMatchObject({ source: 'native', agent: 'antigravity', state: 'CONFIGURED',
+    nativeCapture: { source: 'ANTIGRAVITY_NATIVE_HOOK', readiness: { installation: { installed: 6 }, trust: { state: 'UNSUPPORTED' }, execution: { state: 'UNOBSERVED' } } } })
+  expect(JSON.parse((ide.content[0] as { text: string }).text).nativeCapture.historicalCoverage).toBeUndefined()
+  expect(antigravity.spool).not.toBe(spool)
+  expect(inspectCapture).not.toHaveBeenCalled()
+  expect(run).not.toHaveBeenCalled()
+  expect(f.store().captureHealth(f.target, 'worktree')).toBeUndefined()
+  expect(watched.map(path => readFileSync(path, 'utf8'))).toEqual(before)
 }, 20000)
 function fixture(repositoryId = 'A') {
   const base = mkdtempSync(join(tmpdir(), 'capture-health-')), root = join(base, 'repo'), disabled = join(base, 'disabled'), hooks = join(base, 'hooks')
   mkdirSync(root); mkdirSync(disabled); mkdirSync(hooks)
-  cleanup.push(() => rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+  cleanup.push(() => {
+    const target = realpathSync(base)
+    if (dirname(target) !== realpathSync(tmpdir()) || !basename(target).startsWith('capture-health-')) throw new Error('UNSAFE_FIXTURE_PATH')
+    if (process.platform === 'win32') {
+      execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })", target], { windowsHide: true })
+    } else rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
   const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=' + disabled,
     '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', ...args], { cwd: root, windowsHide: true, encoding: 'utf8' }).trim()
   git('init', '-q', '-b', 'main')
@@ -83,6 +107,14 @@ function fixture(repositoryId = 'A') {
   const inspect = (query: Record<string, unknown> = {}) => inspectCaptureHealth(store, new EntireProvider(store, root, assert, run), run, root, target, captureHealthQuery.parse(query), assert) as Promise<any>
   return { base, root, hooks, git, target, run, inspect, store: () => store, calls: () => entireCalls, mode: (value: string) => { mode = value },
     restart: () => { store.close(); store = new SessionStore(path, repositoryId) } }
+}
+function installFixture(f: ReturnType<typeof fixture>, provider: NativeHookProvider) {
+  const commandPath = join(f.root, 'native-hook.cjs')
+  writeFileSync(commandPath, '')
+  installNativeHooks({ repositoryId: f.store().repositoryId, record: { path: f.root, ...f.target,
+    branch: 'main', head: f.git('rev-parse', 'HEAD'), detached: false, locked: false, missing: false, prunable: false },
+    commandPath, nodePath: process.execPath, provider, authorized: true })
+  return readNativeBinding(nativeBindingPath(f.root, provider))
 }
 function checkpoint(f: ReturnType<typeof fixture>, id: string) {
   const blob = (text: string) => execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: f.root, input: text, encoding: 'utf8', windowsHide: true }).trim()
@@ -175,10 +207,16 @@ it('distinguishes installed CLI integrations, missing hooks and unsupported edit
 it('exposes capture diagnostics through System Health without adding a transcript or capture tool', async () => {
   const f = fixture()
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
-    sessionContext: { call: async (name, args) => ({ content: [{ type: 'text', text: JSON.stringify(await f.inspect(args as Record<string, unknown>)) }] }) } })
-  const result = await adapter.callTool('get_system_health', { feature: 'session_context' })
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), new EntireProvider(f.store(), f.root, () => {}, f.run), name, args, () => {}, f.target, [], f.run, f.root) } })
+  const result = await adapter.callTool('get_system_health', { feature: 'session_context', source: 'entire' })
   expect(result.content[0].type).toBe('text')
-  expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({ feature: 'session_context', state: 'CAPTURE_OBSERVED' })
+  expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject({ feature: 'session_context', source: 'entire', version: 1, state: 'CAPTURE_OBSERVED' })
+  expect(JSON.parse((result.content[0] as { text: string }).text).nativeCapture).toBeUndefined()
+  const native = await adapter.callTool('get_system_health', { feature: 'session_context' })
+  expect(JSON.parse((native.content[0] as { text: string }).text)).toMatchObject({ source: 'native', state: 'UNAVAILABLE',
+    nativeCapture: { readiness: { installation: { state: 'MISSING', installed: 0 }, execution: { state: 'UNOBSERVED' } } } })
+  expect(() => readFileSync(nativeBindingPath(f.root))).toThrow()
+  expect((await adapter.callTool('get_system_health', { feature: 'session_context', source: 'combined' })).isError).toBe(true)
   expect(adapter.listTools().some(tool => tool.name === 'inspect_capture_health')).toBe(false)
   const raw = readFileSync(join(f.root, '.entire/settings.local.json'), 'utf8')
   expect(raw).toContain('"push_sessions":false')
@@ -186,6 +224,27 @@ it('exposes capture diagnostics through System Health without adding a transcrip
   expect((db.prepare('SELECT COUNT(*) AS n FROM capture_health').get() as { n: number }).n).toBe(1)
   db.close()
 }, 30000)
+
+it('scopes native diagnostics to the selected repository, Worktree, generation and trust snapshot', async () => {
+  const f = fixture(), b = fixture('B')
+  const binding = installFixture(f, 'codex')
+  recordNativeGap(binding.spool, 'IO_FAILURE', 'READ')
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  const sibling = join(f.base, 'sibling')
+  f.git('worktree', 'add', '--detach', sibling)
+  const siblingTarget = { worktreeId: 'c'.repeat(64), generation: 'd'.repeat(64) }
+  const query = { source: 'native', inspectNativeTrust: true }
+  const read = async (store: SessionStore, root: string, target: typeof f.target, selection = target) => {
+    const result = await executeSessionTool(store, {}, 'inspect_capture_health', { ...query, ...selection }, () => {}, target, [], undefined, root,
+      undefined, undefined, undefined, undefined, { repositoryId: 'A', ...f.target, observation: { state: 'TRUSTED', reasonCode: 'HASH_TRUST_OBSERVED', freshness: 'OBSERVED_SNAPSHOT' } })
+    return JSON.parse((result.content[0] as { text: string }).text)
+  }
+  for (const result of [await read(f.store(), sibling, siblingTarget), await read(b.store(), b.root, b.target)]) {
+    expect(result).toMatchObject({ state: 'UNAVAILABLE', nativeCapture: { readiness: { trust: { state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_CHANGED' } } } })
+    expect(result.nativeCapture.historicalCoverage).toBeUndefined()
+  }
+  expect(await read(f.store(), f.root, f.target, { ...f.target, generation: siblingTarget.generation })).toEqual({ code: 'WORKTREE_NOT_DISCOVERED' })
+}, 20000)
 it.runIf(process.env.SESSION_CONTEXT_REAL_CAPTURE_SMOKE === '1')('accepts the existing authorized checkpoint using only real Git metadata', async () => {
   const result = await observeCheckpoint(runReadOnly, process.cwd(), { commitSha: 'e9343e7998b877682604bb772a7ecb31bb8b81e5' }, () => {})
   expect(result).toMatchObject({ state: 'VERIFIED', checkpointId: '01M6EGW7096RMXJE1VPD76NDSQ' })

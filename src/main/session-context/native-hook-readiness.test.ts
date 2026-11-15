@@ -216,12 +216,13 @@ it('sends only host-observed trust through the real worker and rejects a changed
   const target: SessionTargetResolver = async () => ({ root: f.root, fingerprint: sourceFingerprint(f.root), validate })
   const client = new SessionContextClient(f.root, 'repo', f.root, () => true, worker, target, 20000, undefined, undefined, undefined, live.client)
   try {
-    const query = { worktreeId: f.target.worktreeId, generation: f.target.generation, inspectNativeTrust: true }
+    const query = { source: 'native', worktreeId: f.target.worktreeId, generation: f.target.generation, inspectNativeTrust: true }
     const result = await client.call('inspect_capture_health', query)
     expect(result.isError, result.content[0].text).toBeFalsy()
-    expect(JSON.parse(result.content[0].text).nativeCapture.readiness).toMatchObject({
-      installation: { installed: 7 }, trust: { state: 'TRUSTED', trusted: 7 }, captureReadiness: { state: 'NOT_VERIFIED' }
-    })
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ source: 'native', state: 'CONFIGURED', nativeCapture: {
+      discovery: { state: 'OBSERVED', loadedSource: 'WORKTREE' },
+      readiness: { installation: { installed: 7 }, trust: { state: 'TRUSTED', trusted: 7 }, captureReadiness: { state: 'NOT_VERIFIED' } }
+    } })
     expect(result.content[0].text).not.toContain('private-thread')
     expect(result.content[0].text).not.toContain('PRIVATE_COMMAND')
     validate.mockClear()
