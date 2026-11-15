@@ -24,8 +24,10 @@ export function antigravityAppSourceSnapshot(options: {
     assertUserOwned(configPath)
     configText = boundedFile(configPath, 65536)
     const config = JSON.parse(configText)
-    profile = config?.nativeSources?.antigravityApp?.profile
+    const grant = config?.nativeSources?.antigravityApp
+    profile = grant?.profile
     if (config?.repositoryId !== repositoryId || typeof profile !== 'string' || !isAbsolute(profile)) throw new Error()
+    if (grant.sessionHash !== undefined && grant.sessionHash !== nativeHash) throw new Error()
     assertProfilePath(profile, profile)
     assertUserOwned(profile)
     if (!lstatSync(profile).isDirectory() || !sameNativePath(realpathSync.native(profile), profile)) throw new Error()
