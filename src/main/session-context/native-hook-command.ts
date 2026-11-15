@@ -1,10 +1,24 @@
 import { isAbsolute, resolve } from 'node:path'
-import { nativeEventType, nativeGapReason, nativeHookLimits, normalizeNativeHook, resolveNativeHookBinding, sameNativePath, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeGapPhase, type NativeGap } from './native-hooks'
+import { nativeEventType, nativeGapReason, nativeHookLimits, normalizeNativeHook, readNativeBinding, resolveNativeHookBinding, sameNativePath, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeGapPhase, type NativeGap } from './native-hooks'
 import { stampNativeCapture } from './native-capture-window'
+import { authorizeDistributedBinding } from './native-hook-catalog'
 
-const provider = (process.argv[2] ?? '').replaceAll('\\', '/').endsWith('/native-hooks/antigravity/binding.json') ? 'antigravity' : 'codex'
+declare const __CODE_AWARENESS_DISTRIBUTED_CAPTURE__: boolean
+const distributed = typeof __CODE_AWARENESS_DISTRIBUTED_CAPTURE__ !== 'undefined' && __CODE_AWARENESS_DISTRIBUTED_CAPTURE__
+
+const bindingArgument = (process.argv[2] ?? '').replaceAll('\\', '/')
+const provider = bindingArgument.endsWith('/native-hooks/antigravity/binding.json') ? 'antigravity' : 'codex'
+let legacyAntigravity = false
 function executionBinding(): NativeHookBinding | undefined {
-  try { if (process.argv[2]) return resolveNativeHookBinding(process.argv[2], process.cwd(), provider) } catch {}
+  try {
+    const path = process.argv[2]
+    if (!path) return
+    if (!distributed) {
+      const legacy = readNativeBinding(path)
+      if (legacy.provider === 'antigravity') { legacyAntigravity = true; return legacy }
+    }
+    return resolveNativeHookBinding(path, process.cwd(), provider, distributed ? binding => authorizeDistributedBinding(__filename, binding) : undefined)
+  } catch {}
 }
 function recordReadGap(reason: 'TIMEOUT' | 'READ_FAILURE' | 'INPUT_LIMIT') {
   const binding = executionBinding()
@@ -14,7 +28,8 @@ let responded = false
 let bytes = 0
 const chunks: Buffer[] = []
 const isAntigravity = (rawText?: string) => {
-  if (provider === 'antigravity') return true
+  if (provider === 'antigravity' || legacyAntigravity) return true
+  if (bindingArgument.endsWith('/native-hooks/binding.json')) return false
   return rawText !== undefined && /"hookEventName"\s*:/.test(rawText)
 }
 const respond = (eventType?: string, rawText?: string): boolean => {
@@ -51,7 +66,7 @@ process.stdin.on('end', () => {
     if (!binding?.enabled) return
     const payload: unknown = JSON.parse(rawText)
     const cwd = (payload as { cwd?: unknown } | null)?.cwd
-    if (provider === 'codex' && typeof cwd === 'string' && (!isAbsolute(cwd) || !sameNativePath(resolve(cwd), binding.root))) return
+    if ((binding.provider ?? 'codex') === 'codex' && typeof cwd === 'string' && (!isAbsolute(cwd) || !sameNativePath(resolve(cwd), binding.root))) return
     parsed = true
     eventType = nativeEventType(payload, binding.provider)
     phase = 'NORMALIZE'

@@ -12,11 +12,11 @@
   "scripts": {
     "preinstall": "node scripts/native-runtime-policy.cjs --check-npm",
     "postinstall": "npm run native:prepare && npm run native:doctor",
-    "predev": "node scripts/dependency-readiness.cjs && npm run native:doctor && npm run cli-execution:build",
+    "predev": "node scripts/dependency-readiness.cjs && npm run native:doctor && npm run cli-execution:build && node scripts/session-context/build-native-hook.cjs",
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "node scripts/dependency-readiness.cjs && npm run native:doctor",
-    "build": "node scripts/dependency-readiness.cjs --build-fallback && node scripts/cli-execution/build.cjs && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
+    "build": "node scripts/dependency-readiness.cjs --build-fallback && node scripts/cli-execution/build.cjs && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && node scripts/session-context/build-native-hook.cjs && npm run native:bundle-guard",
     "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
     "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/build.test.cjs scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
@@ -100,6 +100,7 @@
     "vitest": "5.1.0"
   },
   "build": {
+    "asarUnpack": ["out/session-context/native-hooks-catalog.cjs"],
     "npmRebuild": false,
     "beforePack": "./scripts/runtime-preview/pack.cjs",
     "afterPack": "./scripts/runtime-preview/pack.cjs",

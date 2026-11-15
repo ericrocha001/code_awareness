@@ -13,7 +13,8 @@ export class RepositoryCatalogService {
   constructor(
     readonly store: RepositoryCatalogStore,
     private readonly discovery: WorkspaceService,
-    private readonly destinations?: RepositoryDestinationRegistrar
+    private readonly destinations?: RepositoryDestinationRegistrar,
+    private readonly reconcileNativeHooks?: (record: RepositoryRecord) => Promise<void>
   ) {}
 
   list(includeHidden = false): RepositoryRecord[] { return this.store.list(includeHidden) }
@@ -46,6 +47,7 @@ export class RepositoryCatalogService {
       availability: 'AVAILABLE', gitState: info.isGit ? 'GIT' : 'NON_GIT'
     })
     await this.registerDestination(record)
+    await this.reconcileNativeHooks?.(record)
     return record
   }
 
@@ -63,6 +65,7 @@ export class RepositoryCatalogService {
     if (!info) throw new Error('LOCAL_CHECKOUT_UNAVAILABLE')
     const result = this.upsert(info, 'ACTIVE', true)
     await this.registerDestination(result.record)
+    await this.reconcileNativeHooks?.(result.record)
     return result.record
   }
 

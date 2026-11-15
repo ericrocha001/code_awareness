@@ -5,6 +5,7 @@ import {
   prepareNativeSpool, readNativeBinding, type NativeHookBinding, type NativeHookEvent, type NativeHookProvider
 } from './native-hooks'
 import { assertProfilePath, assertRevision, revision, writeConfig, removeConfig, type FileRevision } from '../local-mcp-clients/safe-config-file'
+import { authorizeDistributedBinding } from './native-hook-catalog'
 import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 
 const MAX_HOOK_CONFIG_BYTES = 65536
@@ -200,13 +201,20 @@ export function inspectSharedNativeInstallation(root: string, target: { reposito
     const installation = inspectNativeInstallation(main, anchor)
     if (installation.state !== 'CONFIGURED') return
     const state = readInstallation(main, anchor)
-    const helper = join(main, 'out/session-context/native-hook.cjs')
-    const checkoutHelper = join(root, 'out/session-context/native-hook.cjs')
-    if (!state || ownedCommandPaths(state.owned.command, main, state.snapshot.schema === 1)?.paths[1] !== helper) return
-    assertProfilePath(checkoutHelper, root)
-    const local = boundedFile(checkoutHelper, MAX_INSTALLATION_BYTES)
-    if (!local.includes(nativeDispatchMismatch) || boundedFile(helper, MAX_INSTALLATION_BYTES) !== local) return
-    return { handlers: installation.handlers, digest: nativeDigest(JSON.stringify([installation.digest, nativeDigest(local), anchor])) }
+    const helper = state && ownedCommandPaths(state.owned.command, main, state.snapshot.schema === 1)?.paths[1]
+    if (!helper) return
+    const content = boundedFile(helper, MAX_INSTALLATION_BYTES), helperDigest = nativeDigest(content)
+    if (!content.includes(nativeDispatchMismatch)) return
+    if (helper === join(main, 'out/session-context/native-hook.cjs')) {
+      const checkoutHelper = join(root, 'out/session-context/native-hook.cjs')
+      assertProfilePath(checkoutHelper, root)
+      if (boundedFile(checkoutHelper, MAX_INSTALLATION_BYTES) !== content) return
+    } else {
+      if (basename(helper) !== 'native-hook-' + helperDigest + '.cjs') return
+      authorizeDistributedBinding(helper, anchor)
+      authorizeDistributedBinding(helper, binding)
+    }
+    return { handlers: installation.handlers, digest: nativeDigest(JSON.stringify([installation.digest, helperDigest, anchor])) }
   } catch {}
 }
 

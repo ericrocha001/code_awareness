@@ -89,6 +89,8 @@ import { EnvironmentRestartSupervisorClient, RuntimeRestartController } from './
 import { AcademyService } from './academy/academy-service'
 import { registerAcademyHandlers } from './ipc/academy-handler'
 import { RepositoryCatalogStore } from './repository-catalog/repository-catalog-store'
+import { prepareEnrolledNativeHooks } from './session-context/native-hook-enrollment'
+import { GitWorktreeRegistry } from './git-operations/git-worktree-registry'
 import { RepositoryCatalogService } from './repository-catalog/repository-catalog-service'
 import { RepositoryRuntimeService } from './repository-catalog/repository-runtime-service'
 import { GitHubCredentialStore } from './github/github-credential-store'
@@ -354,7 +356,18 @@ app.whenReady().then(async () => {
 
   const workspaceService = new WorkspaceService()
   const repositoryCatalogStore = new RepositoryCatalogStore(desktopProfilePaths(app.getPath('userData')).repositoryCatalogPath)
-  repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService)
+  repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService, async record => {
+    if (isRuntimePreview() || record.status !== 'ACTIVE' || record.localCheckout?.availability !== 'AVAILABLE' || record.localCheckout.gitState !== 'GIT') return
+    try {
+      const root = realpathSync(record.localCheckout.path)
+      const registry = new GitWorktreeRegistry(root, gitService, { repositoryId: record.id, isActive: () => {
+        const current = repositoryCatalogStore.get(record.id)
+        return current.status === 'ACTIVE' && current.localCheckout?.availability === 'AVAILABLE' && current.localCheckout.path === record.localCheckout?.path
+      } })
+      await prepareEnrolledNativeHooks({ profile: app.getPath('userData'), repositoryId: record.id, registry, record: await registry.resolveCheckout(root) }, 'CATALOG_CHECKOUT')
+    }
+    catch { console.warn('[Session Context] CATALOG_NATIVE_HOOKS_UNAVAILABLE') }
+  })
   if (!isRuntimePreview()) await repositoryCatalog.initialize(settingsService.loadSettings())
   await runtimeIdentityProvider.bindSourceOrigin(repositoryCatalog.listAvailable().map(record => ({
     repositoryId: record.id, rootPath: record.localCheckout!.path
@@ -629,6 +642,9 @@ app.whenReady().then(async () => {
         })
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
+    if (gitRepositoryId && !isRuntimePreview()) gitOperations.bindNativeHookPreparation((record, registry) => prepareEnrolledNativeHooks({
+      profile: app.getPath('userData'), repositoryId: gitRepositoryId, record, registry
+    }, 'MANAGED_CREATION'))
     gitOperations.bindAtlasRemotePolicy(() => settingsService.loadSettings().gitManagement?.automaticFetch !== false)
     gitOperations.bindManagementPublicationPolicy(branch => githubIntegration.managementPublicationPolicy(project.path, branch))
     gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))

@@ -176,7 +176,7 @@ function scopedBinding(root: string, provider: NativeHookProvider): NativeHookBi
   return binding
 }
 
-export function resolveNativeHookBinding(anchorPath: string, cwd: string, provider: NativeHookProvider = 'codex'): NativeHookBinding {
+export function resolveNativeHookBinding(anchorPath: string, cwd: string, provider: NativeHookProvider = 'codex', authorize?: (binding: NativeHookBinding) => void): NativeHookBinding {
   if (!isAbsolute(anchorPath)) throw new Error('WORKTREE_MISMATCH')
   const base = dirname(dirname(dirname(resolve(anchorPath))))
   const anchorRoot = provider === 'antigravity' ? dirname(base) : base
@@ -185,6 +185,8 @@ export function resolveNativeHookBinding(anchorPath: string, cwd: string, provid
   const target = cwd === anchor.root ? anchor : scopedBinding(cwd, provider)
   if (target.commonDirectory !== anchor.commonDirectory || target.repositoryId !== anchor.repositoryId ||
       (target.root !== anchor.root && (provider !== 'codex' || anchor.commonDirectory !== join(anchor.root, '.git')))) throw new Error(nativeDispatchMismatch)
+  authorize?.(anchor)
+  if (target !== anchor) authorize?.(target)
   return target
 }
 

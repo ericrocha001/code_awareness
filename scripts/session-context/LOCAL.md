@@ -23,3 +23,18 @@ Use o nome exato da ferramenta MCP autorizado naquele ambiente. A instalação a
 O comando coleta apenas campos estruturais permitidos em spool limitado, sem rede ou SQLite próprio. A ativação do projeto e consultas de Session Context ingerem pequenas rodadas no Store existente. `list_agent_sessions` com `source:NATIVE_HOOK` lista identidades pseudonimizadas; `discover_execution_context` aprofunda as relações.
 
 Somente o caminho MCP configurado de `commit_git_changes`, com Pre/Post correspondentes, recibo concluído e objeto Git compatível, admite relação causal verificada. Shell, replay e eventos incompletos não demonstram autoria. Os aliases Entire permanecem não conciliados quando não houver evidência positiva. Nenhuma instalação de hook Git global ou alteração de `core.hooksPath` é realizada.
+
+### Repositórios do Catalog e captura offline
+
+Execute o CLI empacotado a partir da raiz física da Worktree alvo, usando o Node exigido pelo projeto. O build de desenvolvimento gera `out/session-context/native-hooks-catalog.cjs`. No Desktop empacotado, o CLI está em `resources/app.asar.unpacked/out/session-context/`.
+
+```powershell
+node <caminho-do-cli> install --repository=<id-do-catalog> --provider=codex --codex=<codex.exe> --authorized
+node <caminho-do-cli> install --repository=<id-do-catalog> --provider=antigravity --antigravity=<Antigravity.exe> --authorized
+node <caminho-do-cli> status --repository=<id-do-catalog> --provider=codex
+node <caminho-do-cli> disable --repository=<id-do-catalog> --provider=codex --authorized
+```
+
+Autorize o alvo antes de usar `--authorized`. No Codex, instalar em linked Worktree também prepara o manifesto e o binding do checkout principal daquele repositório. No Antigravity, a instalação prepara apenas a Worktree selecionada. Para delegar a preparação das futuras Worktrees gerenciadas criadas pelo fluxo Git do Code Awareness, acrescente `--authorize-managed-worktrees` à instalação autorizada. Para Worktrees externas, execute a instalação a partir do checkout vinculado. O comando aceita `--profile=<diretório>` para perfis isolados de validação.
+
+O helper fica no perfil do Code Awareness, com nome derivado do digest. O repositório pode produzir eventos com o Desktop fechado. A seleção posterior do projeto aciona o fluxo de ingestão existente no SQLite daquele repositório. `status` informa instalação e autorização no Catalog. Origem carregada, trust do cliente e eventos são verificações independentes. `disable` nesta modalidade revoga imediatamente o provedor para o repositório, preservando arquivos de terceiros e a evidência já capturada. A revogação não apaga manifests nem concede trust.

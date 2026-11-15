@@ -33,7 +33,7 @@ function run(args, { version = '0.166.0-alpha.6', replaced = false } = {}) {
     inspectNativeInstallation: (_root, _target, _platform, provider = 'codex') => { inspected.push(provider); return { state: 'MISSING', handlers: [] } },
     installNativeHooks: input => { installed.push(input); return { state: 'CONFIGURED' } }
   }
-  const invoke = () => runInNewContext(source, {
+  const invoke = () => runInNewContext('(() => {\n' + source + '\n})()', {
     __dirname, __filename: filename, Buffer, fixture: api, process: { cwd: () => root, argv: ['node', filename, ...args], execPath: process.execPath },
     console: { log: line => output.push(JSON.parse(line)) },
     require: name => Object.hasOwn(overrides, name) ? overrides[name] : localRequire(name)
