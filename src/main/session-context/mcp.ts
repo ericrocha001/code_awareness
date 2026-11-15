@@ -22,6 +22,7 @@ import type { RegistryReader } from './checkpoint-registry'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { nativeSessionProjection, nativeSessionSelector } from './native-session-query'
 import { nativeHookEvents } from './native-hooks'
+import { codexSourceSnapshot } from './native-codex-source'
 import { executionContextQuery, executionSelector, executionEntity, discoverExecutionContext, EXECUTION_SELECTOR_SCHEMA } from './execution-context'
 
 const id = z.string().uuid(), revision = z.number().int().positive(), cursor = z.string().max(512).optional()
@@ -31,10 +32,11 @@ const legacySessionEvents = z.object({ sessionId: id, expectedRevision: revision
   tool: z.string().min(1).max(80).optional(), ordinalFrom: revision.optional(), ordinalTo: revision.optional(), after: date, before: date,
   segmentId: z.string().max(30).regex(/^S[1-9]\d*$/).optional(), limit: z.number().int().min(1).max(15).default(15), cursor }).strict()
 const legacyEventRead = z.object({ sessionId: id, eventId: id, expectedRevision: revision, cursor }).strict()
-const nativeSessionDetail = z.object({ nativeSession: nativeSessionSelector, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor }).strict()
+const nativeSessionTarget = { nativeSession: nativeSessionSelector, sourceSessionId: id.optional() }
+const nativeSessionDetail = z.object({ ...nativeSessionTarget, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor }).strict()
 const nativeSessionEvents = nativeSessionDetail.extend({ hookEvents: z.array(z.enum(nativeHookEvents)).min(1).max(nativeHookEvents.length).optional(),
   after: date, before: date, limit: z.number().int().min(1).max(15).default(15) })
-const nativeEventRead = z.object({ nativeSession: nativeSessionSelector, eventId: z.string().regex(/^[a-f0-9]{64}$/), expectedRevision: revision, cursor }).strict()
+const nativeEventRead = z.object({ ...nativeSessionTarget, eventId: z.string().regex(/^[a-f0-9]{64}$/), expectedRevision: revision, cursor }).strict()
 
 const schemas = {
   discover_execution_context: executionContextQuery,
@@ -76,12 +78,22 @@ const schemas = {
 export const parseSessionRefresh = (args: unknown) => schemas.refresh_agent_sessions.parse(args ?? {})
 export const parseSessionList = (args: unknown) => schemas.list_agent_sessions.parse(args ?? {})
 export const parseCaptureHealth = (args: unknown) => captureHealthQuery.parse(args ?? {})
+export function nativeLiteralTarget(name: SessionToolName, args: unknown) {
+  if (name !== 'inspect_agent_session' && name !== 'list_agent_session_events' && name !== 'read_agent_session_event') return
+  if (!args || typeof args !== 'object' || !('sourceSessionId' in args)) return
+  const validation = schemas[name].safeParse(args)
+  if (!validation.success) throw new Error('INVALID_ARGUMENT')
+  const parsed = validation.data
+  if (!('sourceSessionId' in parsed) || !parsed.sourceSessionId) return
+  if (!parsed.nativeSession.worktreeId || !parsed.nativeSession.generation) throw new Error('ORIGIN_UNVERIFIED')
+  return { worktreeId: parsed.nativeSession.worktreeId, generation: parsed.nativeSession.generation }
+}
 export type SessionToolName = keyof typeof schemas
 export interface SessionContextPort { call(name: SessionToolName, args: unknown): Promise<McpToolResult> }
 const str = { type: 'string', minLength: 1, maxLength: 200 }, uuid = { type: 'string', format: 'uuid' }, rev = { type: 'integer', minimum: 1 }
 const cur = { type: 'string', maxLength: 512 }, time = { type: 'string', format: 'date-time' }
 const hex = { type: 'string', pattern: '^[a-f0-9]{64}$' }
-const session = { sessionId: uuid, expectedRevision: rev, nativeSession: { type: 'object',
+const session = { sessionId: uuid, expectedRevision: rev, sourceSessionId: { ...uuid, description: 'Explicit original provider session selected from an authorized source. Native only, requires worktreeId and generation.' }, nativeSession: { type: 'object',
   properties: { provider: { type: 'string', enum: ['codex-native', 'antigravity-native'] }, id: hex, worktreeId: hex, generation: hex },
   required: ['provider', 'id'], additionalProperties: false } }
 const sessionTarget = [{ required: ['sessionId'] }, { required: ['nativeSession'] }]
@@ -154,6 +166,48 @@ function page<T>(store: SessionStore, scope: object, offset: number, rows: T[], 
   }
   if (rows.length && !selected.length) throw new Error('RESPONSE_LIMIT_REACHED')
   return { ...base, [key]: selected, ...(rows.length > selected.length ? { nextCursor: store.cursor(scope, offset + selected.length) } : {}) }
+}
+
+function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
+  query: z.infer<typeof nativeSessionDetail> | z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>,
+  target: NonNullable<ReturnType<typeof nativeLiteralTarget>>, root: string, assertCurrent: () => void, budget: number, accountHash?: string) {
+  const { nativeSession, expectedRevision, cursor, sourceSessionId } = query
+  const observation = nativeSessionProjection(store, { nativeSession, limit: 1 }, 'MAP', accountHash)
+  if (nativeSession.provider !== 'codex-native') throw new Error('SOURCE_UNAVAILABLE')
+  if ('hookEvents' in query && query.hookEvents || 'after' in query && (query.after || query.before)) throw new Error('INVALID_ARGUMENT')
+  const snapshot = codexSourceSnapshot({ storePath: store.path, repositoryId: store.repositoryId, worktreeRoot: root, nativeHash: nativeSession.id,
+    sourceSessionId: sourceSessionId!, assertCurrent })
+  const revision = parseInt(digest(JSON.stringify([observation.revision, snapshot.fingerprint])).slice(0, 13), 16) || 1
+  if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
+  const scope = { name, repositoryId: store.repositoryId, nativeSession, target, revision, accountHash, event: 'eventId' in query ? query.eventId : null,
+    limit: 'limit' in query ? query.limit : null }
+  const offset = store.offset(cursor, scope)
+  const base = { repositoryId: store.repositoryId, nativeSession, revision, source: 'CODEX_LOCAL_TRANSCRIPT_V1', contentAvailability: 'AVAILABLE',
+    identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED', origin: 'WORKTREE_REVALIDATED', causalEvidence: 'NOT_INFERRED',
+    sourceCoverage: 'SUPPORTED_ASSISTANT_OUTPUT_ONLY', transcriptImported: false, untrusted: true, claimsVerified: false }
+  if (name === 'inspect_agent_session') {
+    if (cursor) throw new Error('INVALID_ARGUMENT')
+    return { ...observation, ...base, sourceEventCount: snapshot.events.length, omittedSourceEvents: snapshot.omitted }
+  }
+  if (name === 'list_agent_session_events' && 'limit' in query) {
+    if (offset > snapshot.events.length) throw new Error('CURSOR_STALE')
+    return page(store, scope, offset, snapshot.events.slice(offset, offset + query.limit + 1), query.limit, budget,
+      { ...base, omittedSourceEvents: snapshot.omitted }, ({ content: _content, ...event }) => event, 'events')
+  }
+  if (!('eventId' in query)) throw new Error('INVALID_ARGUMENT')
+  const event = snapshot.events.find(item => item.eventId === query.eventId)
+  if (!event) throw new Error('SOURCE_EVENT_UNAVAILABLE')
+  const raw = Buffer.from(event.content)
+  if (offset > raw.length || offset < raw.length && (raw[offset] & 0xc0) === 0x80) throw new Error('CURSOR_STALE')
+  for (let size = 8192; size >= 4; size = Math.floor(size / 2)) {
+    const content = utf8Prefix(raw.subarray(offset).toString('utf8'), size)
+    const end = offset + Buffer.byteLength(content)
+    const result = { ...base, eventId: event.eventId, content, range: { startByte: offset, endByte: end }, payloadDigest: event.payloadDigest,
+      provenance: 'OBSERVED_FROM_PROVIDER', omission: null, sanitized: false, complete: end === raw.length, partial: end < raw.length,
+      ...(end < raw.length ? { nextCursor: store.cursor(scope, end) } : {}) }
+    if (fits(result, budget, true)) return result
+  }
+  throw new Error('RESPONSE_LIMIT_REACHED')
 }
 export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvider, 'queryLive'>>, name: keyof typeof LIVE_SESSION_SCHEMAS, raw: unknown,
   assertActive: () => void, targets: LiveSessionTarget[]): Promise<McpToolResult> {
@@ -324,12 +378,15 @@ export async function executeSessionTool(
           ...(contextMap ? { contextMap } : {}), nativeCapture: { state: actualStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', deepen: { tool: 'list_agent_sessions', arguments: { source: 'NATIVE_HOOK' } } },
           archiveCoverage: { code: filter.includeArchived ? 'COVERAGE_PARTIAL' : 'ARCHIVE_NOT_QUERIED', source: 'ENTIRE_LOCAL_AND_CHECKPOINT_INDEX', reason: 'PRIVATE_VENDOR_ARCHIVES_NOT_QUERIED', ...(filter.archiveCursor ? { cursorState: 'ARCHIVE_CURSOR_UNSUPPORTED' } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
     } else if ('nativeSession' in q) {
-      if (name === 'read_agent_session_event') {
+      const target = nativeLiteralTarget(name, q)
+      if (target) {
+        if (!root || !selectedTarget || target.worktreeId !== selectedTarget.worktreeId || target.generation !== selectedTarget.generation) throw new Error('ORIGIN_UNVERIFIED')
+        data = nativeLiteralProjection(store as SessionStore, name, q as z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>, target, root, assertActive, budget, archiveAccountHash)
+      } else if (name === 'read_agent_session_event') {
         const request = q as z.infer<typeof nativeEventRead>
         nativeSessionProjection(store as SessionStore, { ...request, limit: 1 }, 'MAP', archiveAccountHash)
         throw new Error('SOURCE_UNAVAILABLE')
-      }
-      data = nativeSessionProjection(store as SessionStore, q as z.infer<typeof nativeSessionEvents>,
+      } else data = nativeSessionProjection(store as SessionStore, q as z.infer<typeof nativeSessionEvents>,
         name === 'inspect_agent_session' ? 'MAP' : 'EVENTS', archiveAccountHash)
     } else {
       const actualStore = store as SessionStore

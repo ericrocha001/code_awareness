@@ -374,7 +374,18 @@ export class ChannelMcpAdapter {
       })
     }
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
-    if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
+    if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) {
+      if (!this.sessionContext) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
+      if (args && typeof args === 'object' && 'sourceSessionId' in args) {
+        try {
+          assertArtifactAgent(authority, this.repositoryId ?? '')
+          const result = await this.sessionContext.call(name as SessionToolName, args)
+          assertArtifactAgent(authority, this.repositoryId ?? '')
+          return result
+        } catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SOURCE_NOT_AUTHORIZED' }) }] } }
+      }
+      return this.sessionContext.call(name as SessionToolName, args)
+    }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {
       if (!this.executionClosure || !this.artifactReader) return { isError: true, content: [{ type: 'text', text: 'CLOSURE_UNAVAILABLE' }] }
       return executeAssessExecutionClosure({ ...this.executionClosure, reader: this.artifactReader, ledger: this.validationLedger,

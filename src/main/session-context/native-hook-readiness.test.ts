@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
@@ -224,6 +224,57 @@ it('investigates native hook observations by provider and generation without inf
   f.restart()
   expect(await call('inspect_agent_session', { ...selected, expectedRevision: map.revision })).toMatchObject({ revision: map.revision, observedEventCount: 2 })
 })
+
+it('revalidates an authorized Codex transcript and exposes only its selected literal field', async () => {
+  const f = fixture()
+  f.install()
+  const providerId = '01a1dff8-0000-7000-8000-000000000001'
+  const event = normalizeNativeHook({ session_id: providerId, cwd: f.root, hook_event_name: 'SessionEnd' }, readNativeBinding(f.bindingPath))
+  const store = f.store()
+  store.registry.apply(nativeObservationBatch(event), undefined)
+  const profile = join(f.root, 'provider-profile')
+  const directory = join(profile, 'sessions', '2026', '11', '15')
+  mkdirSync(directory, { recursive: true })
+  const rollout = join(directory, 'rollout-pilot-' + providerId + '.jsonl')
+  const config = join(dirname(store.path), 'session-context.provider.json')
+  const grant = (creatorAccountHash = nativeDigest(JSON.stringify(['pilot-user', 'pilot-account']))) =>
+    writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { codex: { profile, creatorAccountHash } } }))
+  const content = 'Exact literal 🧪 "sample"\n'.repeat(600)
+  const rows = [{ type: 'session_meta', payload: { id: providerId, session_id: providerId, account_scoped: true, creator_user_id: 'pilot-user',
+    creator_account_id: 'pilot-account', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.169.0-alpha.11.1' } },
+    { type: 'response_item', payload: { type: 'message', role: 'developer', content: [{ type: 'output_text', text: 'PRIVATE_INSTRUCTIONS' }] } },
+    { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: content }] } }]
+  const write = () => writeFileSync(rollout, rows.map(row => JSON.stringify(row)).join('\n') + '\n')
+  write()
+  const nativeSession = { provider: 'codex-native', id: event.sessionId, worktreeId: f.target.worktreeId, generation: f.target.generation }
+  const args = { nativeSession, sourceSessionId: providerId }
+  const call = async (name: Parameters<typeof executeSessionTool>[2], input: unknown, target = f.target) =>
+    JSON.parse((await executeSessionTool(store, {}, name, input, () => {}, target, [], undefined, f.root)).content[0].text)
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'SOURCE_NOT_AUTHORIZED' })
+  grant('9'.repeat(64))
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'SOURCE_IDENTITY_CONFLICT' })
+  grant()
+  const map = await call('inspect_agent_session', args)
+  expect(map).toMatchObject({ source: 'CODEX_LOCAL_TRANSCRIPT_V1', sourceEventCount: 1, identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED' })
+  const events = await call('list_agent_session_events', { ...args, expectedRevision: map.revision })
+  expect(JSON.stringify(events)).not.toContain('Exact literal')
+  expect(JSON.stringify(events)).not.toContain('PRIVATE_INSTRUCTIONS')
+  let cursor: string | undefined, reconstructed = ''
+  do {
+    const page = await call('read_agent_session_event', { ...args, expectedRevision: map.revision, eventId: events.events[0].eventId, cursor })
+    expect(page).toMatchObject({ payloadDigest: nativeDigest(content), transcriptImported: false, untrusted: true })
+    reconstructed += page.content
+    cursor = page.nextCursor
+  } while (cursor)
+  expect(reconstructed).toBe(content)
+  expect(store.count()).toBe(0)
+  rows[0].payload.runtime_workspace_roots!.push(profile)
+  write()
+  expect(await call('inspect_agent_session', args)).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+  rows[0].payload.runtime_workspace_roots!.pop()
+  write()
+  expect(await call('inspect_agent_session', { ...args, expectedRevision: map.revision })).toEqual({ code: 'REVISION_CONFLICT' })
+}, 60000)
 
 it('sends only host-observed trust through the real worker and rejects a changed session at readback', async () => {
   const f = fixture()

@@ -5,7 +5,7 @@ import type { PublicationProvenancePort, PublicationAssociation } from '../../sh
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
-import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp'
+import { parseSessionRefresh, parseSessionList, parseCaptureHealth, nativeLiteralTarget } from './mcp'
 import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
@@ -270,6 +270,13 @@ export class SessionContextClient implements SessionContextPort {
               target = await this.resolveTarget.current()
               request.validate = target.validate
             }
+          }
+          const literalTarget = nativeLiteralTarget(name, args)
+          if (literalTarget) {
+            if (!this.resolveTarget) throw new Error('ORIGIN_UNVERIFIED')
+            request.phase = 'target-resolution'
+            target = { ...await this.resolveTarget(literalTarget), selection: literalTarget }
+            request.validate = target.validate
           }
           if ((name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') && args && typeof args === 'object' && 'worktreeId' in args && (args as any).worktreeId) {
             const q = args as { worktreeId: string; generation?: string }
