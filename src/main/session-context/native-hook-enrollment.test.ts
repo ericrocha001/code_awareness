@@ -69,10 +69,11 @@ test('two cataloged repositories use one portable helper with separate offline s
     const run = (cwd: string, anchor: string, provider: 'codex' | 'antigravity', event: string, id: string) =>
       new Promise<void>((resolve, reject) => {
         const binding = hookPaths(anchor, provider).bindingPath
-        const child = execFile(process.execPath, [helper, binding], { cwd, timeout: 4000 }, error => error ? reject(error) : resolve())
+        const child = execFile(process.execPath, [helper, binding], { cwd: provider === 'antigravity' ? profile : cwd, timeout: 4000 }, error => error ? reject(error) : resolve())
+        const ideWorkspace = process.platform === 'win32' ? cwd[0].toLowerCase() + cwd.slice(1) : cwd
         child.stdin!.end(JSON.stringify(provider === 'codex'
           ? { cwd, session_id: id, hook_event_name: event, tool_use_id: 'one', tool_name: 'Bash' }
-          : { cwd, workspacePaths: [cwd], conversationId: id, hookEventName: event, toolCall: { id: 'one', name: 'run_command' } }))
+          : { cwd: ideWorkspace, workspacePaths: [ideWorkspace], conversationId: id, hookEventName: event, toolCall: { id: 'one', name: 'run_command' } }))
       })
     const [a, b] = fixtures
     await Promise.all(fixtures.flatMap(f => [
@@ -87,6 +88,11 @@ test('two cataloged repositories use one portable helper with separate offline s
       return value.sessionId
     })).flat()
     expect(new Set(counts).size).toBe(4)
+    const antigravitySpoolA = join(hookPaths(a.linked, 'antigravity').directory, 'spool')
+    const antigravityEventsA = () => readdirSync(antigravitySpoolA).filter(name => /^\d+\.json$/.test(name))
+    const beforeAntigravityA = antigravityEventsA()
+    await run(b.linked, a.linked, 'antigravity', 'SessionStart', 'wrong-repo')
+    expect(antigravityEventsA()).toEqual(beforeAntigravityA)
     for (const f of fixtures) {
       await Promise.all([run(f.linked, f.root, 'codex', 'PreToolUse', 'same-id'), run(f.linked, f.linked, 'antigravity', 'PreToolUse', 'same-id')])
       await Promise.all([run(f.linked, f.root, 'codex', 'PostToolUse', 'same-id'), run(f.linked, f.linked, 'antigravity', 'PostToolUse', 'same-id')])

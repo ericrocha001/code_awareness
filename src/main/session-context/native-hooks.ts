@@ -182,7 +182,8 @@ export function resolveNativeHookBinding(anchorPath: string, cwd: string, provid
   const anchorRoot = provider === 'antigravity' ? dirname(base) : base
   if (!sameNativePath(resolve(anchorPath), nativeBindingPath(anchorRoot, provider))) throw new Error('WORKTREE_MISMATCH')
   const anchor = scopedBinding(anchorRoot, provider)
-  const target = cwd === anchor.root ? anchor : scopedBinding(cwd, provider)
+  // Antigravity starts handlers outside the checkout. Its payload scope is verified during normalization.
+  const target = provider === 'antigravity' || cwd === anchor.root ? anchor : scopedBinding(cwd, provider)
   if (target.commonDirectory !== anchor.commonDirectory || target.repositoryId !== anchor.repositoryId ||
       (target.root !== anchor.root && (provider !== 'codex' || anchor.commonDirectory !== join(anchor.root, '.git')))) throw new Error(nativeDispatchMismatch)
   authorize?.(anchor)
@@ -194,6 +195,9 @@ function verifyBindingWorktree(identity: ReturnType<typeof nativeGitIdentity>, b
   if (identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory || identity.directoryIdentity !== binding.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
 }
 
+// The IDE can emit a lowercase drive letter even when the binding uses the filesystem's casing.
+const antigravityGitIdentity = (root: string) => nativeGitIdentity(realpathSync.native(root))
+
 function normalizeAntigravityHook(payload: Record<string, unknown>, binding: NativeHookBinding, now: Date): NativeHookEnvelope {
   if (!antigravityHookEvents.includes(payload.hookEventName as typeof antigravityHookEvents[number])) throw new Error('EVENT_UNSUPPORTED')
   if (payload.conversationId === undefined || payload.conversationId === null || payload.conversationId === '') throw new Error('REQUIRED_ID_MISSING')
@@ -203,7 +207,7 @@ function normalizeAntigravityHook(payload: Record<string, unknown>, binding: Nat
     if (!Array.isArray(payload.workspacePaths) || !payload.workspacePaths.length || payload.workspacePaths.some(p => typeof p !== 'string' || !p.trim())) throw new Error('CWD_MISSING')
     const identities: ReturnType<typeof nativeGitIdentity>[] = []
     for (const rootPath of payload.workspacePaths as string[]) {
-      try { identities.push(nativeGitIdentity(rootPath)) }
+      try { identities.push(antigravityGitIdentity(rootPath)) }
       catch { throw new Error(payload.workspacePaths.length > 1 ? 'WORKTREE_SCOPE_AMBIGUOUS' : 'WORKTREE_STALE') }
     }
     const distinct = new Map(identities.map(item => [`${item.root}:${item.directoryIdentity}`, item]))
@@ -212,12 +216,12 @@ function normalizeAntigravityHook(payload: Record<string, unknown>, binding: Nat
     if (payload.cwd !== undefined) {
       if (typeof payload.cwd !== 'string' || !payload.cwd.trim()) throw new Error('CWD_MISSING')
       let cwdIdentity: ReturnType<typeof nativeGitIdentity>
-      try { cwdIdentity = nativeGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_MISMATCH') }
+      try { cwdIdentity = antigravityGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_MISMATCH') }
       if (cwdIdentity.root !== identity.root || cwdIdentity.commonDirectory !== identity.commonDirectory || cwdIdentity.directoryIdentity !== identity.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
     }
   } else {
     if (typeof payload.cwd !== 'string' || !payload.cwd.trim()) throw new Error('CWD_MISSING')
-    try { identity = nativeGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_STALE') }
+    try { identity = antigravityGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_STALE') }
   }
   verifyBindingWorktree(identity, binding)
   const sessionId = nativeDigest(JSON.stringify([binding.repositoryId, 'antigravity', payload.conversationId]))
