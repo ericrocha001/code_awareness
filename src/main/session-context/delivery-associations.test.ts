@@ -109,7 +109,7 @@ it('projects governed delivery and GitHub membership bidirectionally through MCP
     const edges: any[] = [], paths: any[] = [], nodes: any[] = []
     let cursor: string | undefined
     for (let page = 0; page < 24; page++) {
-      const response = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', { selector, depth: 4, mode: 'RELATION_DETAIL', limit: 24, ...(cursor ? { cursor } : {}) }, () => {})
+      const response = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', { selector, depth: 4, mode: 'RELATION_DETAIL', limit: 24, ...(cursor ? { cursor } : {}) }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
       expect(response.isError, response.content[0].text).toBeFalsy()
       const result = JSON.parse(response.content[0].text)
       edges.push(...result.edges); paths.push(...result.paths); nodes.push(...result.nodes)
@@ -129,11 +129,15 @@ it('projects governed delivery and GitHub membership bidirectionally through MCP
   const backward = await query({ type: 'COMMIT', id: sha })
   expect(backward.paths.some((p: any) => p.target.endsWith(handoff.artifactId + ':1') && p.weakestLink === 'DECLARED')).toBe(true)
   expect(backward.edges.some((e: any) => e.evidenceKind === 'OPERATION_EXECUTION_CONTEXT')).toBe(true)
+  expect(backward.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ id: handoff.artifactId, title: 'Handoff', artifactKind: 'IMPLEMENTATION_HANDOFF' }),
+    expect.objectContaining({ id: f.plan.artifactId, title: 'Plan', artifactKind: 'EXECUTABLE_PLAN' })]))
   const declared = (name: string, metadata: string) => f.service.publish('---\nname: ' + name + '\ndescription: Fixture\nkind: IMPLEMENTATION_HANDOFF\n' + metadata + '\n---\nMention PR #111.')
   const shaDeclared = declared('SHA declaration', 'headCommit: ' + sha + '\nsha: ' + sha)
   const prDeclared = declared('PR declaration', 'prNumber: 111\nprUrl: https://github.com/owner/repo/pull/111')
+  const documented = f.service.publish('---\nname: Declared delivery\ndescription: Explicit delivery rationale\nkind: IMPLEMENTATION_HANDOFF\npullRequest: 111\nrelations:\n  - artifactId: ' + f.plan.artifactId + '\n    kind: implements\n---\nPRIVATE_DECLARED')
+  const noPrMetadata = declared('Historical PR mention', '')
   const wrongRepo = declared('Foreign declaration', 'repository: fork/repo\ncommitSha: ' + sha + '\nprNumber: 111')
-  for (const artifact of [shaDeclared, prDeclared, wrongRepo]) await refreshFor({ kind: 'ARTIFACT', id: artifact.artifactId })
+  for (const artifact of [shaDeclared, prDeclared, wrongRepo, documented, noPrMetadata]) await refreshFor({ kind: 'ARTIFACT', id: artifact.artifactId })
   const otherPlan = f.service.publish('---\nname: Other plan\ndescription: Fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nOther candidate')
   const unrelatedHandoff = f.service.publish('---\nname: Other handoff\ndescription: Fixture\nkind: IMPLEMENTATION_HANDOFF\nrelations:\n  - artifactId: ' + otherPlan.artifactId + '\n    kind: implements\n---\nOther candidate')
   await refreshFor({ kind: 'ARTIFACT', id: unrelatedHandoff.artifactId })
@@ -144,6 +148,13 @@ it('projects governed delivery and GitHub membership bidirectionally through MCP
   expect(explicitSha.paths.some((p: any) => p.target === 'PR:fixture:111' && p.evidenceClass === 'DERIVED' && p.weakestLink === 'DECLARED')).toBe(true)
   const explicitPr = await query({ type: 'ARTIFACT', id: prDeclared.artifactId, revision: 1 })
   expect(explicitPr.edges).toEqual(expect.arrayContaining([expect.objectContaining({ evidenceKind: 'HANDOFF_DECLARED', to: 'PR:fixture:111' })]))
+  const declaredChain = await query({ type: 'PR', id: '111' })
+  expect(declaredChain.edges).toEqual(expect.arrayContaining([expect.objectContaining({ evidenceKind: 'GITHUB_COMMIT_LIST', from: 'COMMIT:fixture:' + sha }),
+    expect.objectContaining({ evidenceKind: 'HANDOFF_DECLARED', from: 'ARTIFACT:fixture:' + documented.artifactId + ':1' }),
+    expect.objectContaining({ evidenceKind: 'CONTINUUM_TYPED_RELATION', relation: 'implements', from: 'ARTIFACT:fixture:' + documented.artifactId + ':1' }),
+    expect.objectContaining({ evidenceKind: 'LEDGER_EVIDENCE_FOR', to: 'PROOF:fixture:' + proof.proofId })]))
+  expect(declaredChain.nodes.some((n: any) => n.id === noPrMetadata.artifactId)).toBe(false)
+  expect(declaredChain.edges.some((e: any) => e.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
   const foreign = await query({ type: 'ARTIFACT', id: wrongRepo.artifactId, revision: 1 })
   expect(foreign.edges.some((e: any) => e.evidenceKind === 'HANDOFF_DECLARED')).toBe(false)
   member = false; head = 'f'.repeat(40); merge = true; await refresh()

@@ -405,6 +405,14 @@ export class ChannelMcpAdapter {
           return result
         } catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SOURCE_NOT_AUTHORIZED' }) }] } }
       }
+      if (name === 'discover_execution_context') {
+        try { assertArtifactAgent(authority, this.repositoryId ?? '') }
+        catch { return this.sessionContext.call(name, args) }
+        const result = await this.sessionContext.call(name, args, true)
+        try { assertArtifactAgent(authority, this.repositoryId ?? '') }
+        catch { return { isError: true, content: [{ type: 'text', text: '{"code":"SOURCE_NOT_AUTHORIZED"}' }] } }
+        return result
+      }
       return this.sessionContext.call(name as SessionToolName, args)
     }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {
