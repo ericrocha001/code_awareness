@@ -54,6 +54,41 @@ function setup() {
 function events(n: number): EventInput[] { return Array.from({ length: n }, (_, index) => ({ type: index === 487 ? 'ERROR' : 'AGENT_UPDATE', text: index === 487 ? 'unique failure evidence: token=private-value' : `progress ${index}`, sourcePosition: index + 1 })) }
 
 describe('Session Context progressive MCP disclosure', () => {
+  it('publishes one string schema for native SHA-256 and legacy UUID event IDs to MCP clients', async () => {
+    const [{ Client }, { StreamableHTTPClientTransport }, { AjvJsonSchemaValidator }] = await Promise.all([
+      import('@modelcontextprotocol/sdk/client'),
+      import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
+      import('@modelcontextprotocol/sdk/validation/ajv')
+    ])
+    const f = setup()
+    const imported = await f.ingest(sessionInput('client-schema'), [{ type: 'INPUT', text: 'public fixture', sourcePosition: 1 }])
+    const event = f.store.events(imported.sessionId, {}, 0, 1)[0]
+    const server = createMcpHttpServer(f.adapter, () => {})
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+    cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
+    const address = server.address() as { port: number }
+    const client = new Client({ name: 'session-schema-regression', version: '1' })
+    cleanup.push(() => client.close())
+    await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${address.port}/mcp`)))
+    const { tools } = await client.listTools()
+    const tool = tools.find(tool => tool.name === 'read_agent_session_event')!
+    const schema = structuredClone(tool.inputSchema)
+    expect(schema.properties!.eventId).toMatchObject({ type: 'string' })
+    expect(schema.properties!.eventId).not.toHaveProperty('oneOf')
+    const validate = new AjvJsonSchemaValidator().getValidator(schema)
+    const native = { nativeSession: { provider: 'codex-native', id: 'a'.repeat(64) }, eventId: 'b'.repeat(64), expectedRevision: 1 }
+    const legacy = { sessionId: imported.sessionId, eventId: event.id, expectedRevision: imported.revision }
+    expect(validate(native).valid).toBe(true)
+    expect(validate(legacy).valid).toBe(true)
+    expect(validate({ ...native, eventId: 'not-an-event-id' }).valid).toBe(false)
+    expect(await client.callTool({ name: tool.name, arguments: native })).toMatchObject({
+      isError: true, content: [{ type: 'text', text: '{"code":"SESSION_UNAVAILABLE"}' }]
+    })
+    expect(await client.callTool({ name: tool.name, arguments: legacy })).toMatchObject({
+      structuredContent: { content: 'public fixture', complete: true }
+    })
+  }, 30000)
+
   it('exposes cheap materialization and bounded reasons without adding source diagnostics to literal pages', async () => {
     const f = setup()
     const discovered = f.store.ingest({ ...sessionInput('metadata-only'), importState: 'METADATA_ONLY', coverage: 'UNAVAILABLE', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 } }, [])

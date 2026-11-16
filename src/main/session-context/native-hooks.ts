@@ -3,6 +3,7 @@ import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSy
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { nativeArtifactFact, validNativeArtifactFact, type NativeArtifactFact } from './native-artifact-facts'
+import { antigravityAppLocatorDigest } from './antigravity-app-locator'
 
 export const nativeHookProviders = ['codex', 'antigravity'] as const
 export type NativeHookProvider = typeof nativeHookProviders[number]
@@ -62,6 +63,7 @@ export interface NativeHookEnvelope {
   turnId?: string
   invocationId?: string
   subagentId?: string
+  appTranscriptDigest?: string
   tool?: 'SHELL' | 'MCP' | 'OTHER'
   git?: { operationId: string; fingerprint: string; expectedHead: string | null; sha?: string; parent?: string | null; replayed?: boolean }
   artifact?: NativeArtifactFact
@@ -242,9 +244,11 @@ function normalizeAntigravityHook(payload: Record<string, unknown>, binding: Nat
   const tool: NativeHookEnvelope['tool'] = toolEvent
     ? (toolName === 'run_command' || toolName === 'Bash' || toolName === 'bash' ? 'SHELL' : (toolName === 'call_mcp_tool' || toolName.startsWith('mcp_') || toolName.startsWith('mcp__')) ? 'MCP' : 'OTHER')
     : undefined
+  const appTranscriptDigest = antigravityAppLocatorDigest(payload.conversationId, payload.transcriptPath)
   const facts = {
     schema: 1 as const, source: 'ANTIGRAVITY_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
-    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(tool ? { tool } : {})
+    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(tool ? { tool } : {}),
+    ...(appTranscriptDigest ? { appTranscriptDigest } : {})
   }
   const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
   return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
@@ -311,7 +315,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   if (Buffer.byteLength(text) > nativeHookLimits.envelopeBytes) throw new Error('ENVELOPE_LIMIT')
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
-  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'capture', 'observedAt', 'eventId', 'digest']
+  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'capture', 'appTranscriptDigest', 'observedAt', 'eventId', 'digest']
   const validEvent = value.source === 'CODEX_NATIVE_HOOK'
     ? codexHookEvents.includes(value.event as typeof codexHookEvents[number])
     : value.source === 'ANTIGRAVITY_NATIVE_HOOK'
@@ -322,6 +326,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
     ['turnId','invocationId','subagentId'].some(k => value[k] !== undefined && (typeof value[k] !== 'string' || !hashPattern.test(value[k] as string))) ||
     (value.source === 'ANTIGRAVITY_NATIVE_HOOK' && (value.git !== undefined || value.artifact !== undefined || value.subagentId !== undefined)) ||
+    (value.appTranscriptDigest !== undefined && (value.source !== 'ANTIGRAVITY_NATIVE_HOOK' || typeof value.appTranscriptDigest !== 'string' || !hashPattern.test(value.appTranscriptDigest))) ||
     (value.tool !== undefined && !['SHELL','MCP','OTHER'].includes(String(value.tool))) ||
     typeof value.observedAt !== 'string' || !Number.isFinite(Date.parse(value.observedAt))) throw new Error('INVALID_ENVELOPE')
   if (value.git !== undefined) {
