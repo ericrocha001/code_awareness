@@ -54,7 +54,7 @@ function setup() {
 function events(n: number): EventInput[] { return Array.from({ length: n }, (_, index) => ({ type: index === 487 ? 'ERROR' : 'AGENT_UPDATE', text: index === 487 ? 'unique failure evidence: token=private-value' : `progress ${index}`, sourcePosition: index + 1 })) }
 
 describe('Session Context progressive MCP disclosure', () => {
-  it('accepts native SHA-256 and legacy UUID event IDs with MCP client validation in format-annotation mode', async () => {
+  it('publishes one string schema for native SHA-256 and legacy UUID event IDs to MCP clients', async () => {
     const [{ Client }, { StreamableHTTPClientTransport }, { AjvJsonSchemaValidator }] = await Promise.all([
       import('@modelcontextprotocol/sdk/client'),
       import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
@@ -73,8 +73,8 @@ describe('Session Context progressive MCP disclosure', () => {
     const { tools } = await client.listTools()
     const tool = tools.find(tool => tool.name === 'read_agent_session_event')!
     const schema = structuredClone(tool.inputSchema)
-    const id = schema.properties!.eventId as { oneOf: { format?: string }[] }
-    for (const branch of id.oneOf) delete branch.format
+    expect(schema.properties!.eventId).toMatchObject({ type: 'string' })
+    expect(schema.properties!.eventId).not.toHaveProperty('oneOf')
     const validate = new AjvJsonSchemaValidator().getValidator(schema)
     const native = { nativeSession: { provider: 'codex-native', id: 'a'.repeat(64) }, eventId: 'b'.repeat(64), expectedRevision: 1 }
     const legacy = { sessionId: imported.sessionId, eventId: event.id, expectedRevision: imported.revision }
