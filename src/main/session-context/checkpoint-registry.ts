@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import { digest } from './privacy'
+import { digest, utf8Prefix } from './privacy'
 import { sessionIdentity, sessionSelector } from './session-identity'
 import { parseNativeEnvelope, type NativeHookEnvelope } from './native-hooks'
 import { provenanceClass, type ProvenanceClass } from './provenance-evidence'
@@ -10,15 +10,20 @@ export interface RegistryEdge {
   from: RegistryEntity; relation: string; to: RegistryEntity
   evidenceKind: string; evidenceRef: string; digest: string; freshness: string
 }
+export interface ArtifactLabelSnapshot {
+  id: string; title?: string; description?: string; artifactKind?: string; status?: string; revision: number; contentHash: string
+  freshness: 'CURRENT_REVISION_AT_PROJECTION' | 'EXACT_REVISION' | 'SOURCE_STALE'
+}
 export interface RegistryBatch {
   repositoryId: string; source: string; revision: string; status: string
   cursor?: string; edges: RegistryEdge[]; entities?: RegistryEntity[]
+  artifactLabels?: { id: string; snapshot: ArtifactLabelSnapshot | null }[]
 }
 export type RegistryReader = (request: { selector?: RegistryEntity; neighbors?: RegistryEntity[]; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
 type ObservedEdge = RegistryEdge & { sourceSystem: string; sourceRevision: string; observedAt: string; state: string }
 type NativeAuditEdge = { id: string; source: string; sourceRevision: string; fromId: string; toId: string; payload: string; integrity: string }
 export const REGISTRY_SCHEMA = `
- CREATE TABLE IF NOT EXISTS registry_entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, externalId TEXT NOT NULL, localSessionId TEXT, UNIQUE(kind,externalId));
+ CREATE TABLE IF NOT EXISTS registry_entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, externalId TEXT NOT NULL, localSessionId TEXT, artifactLabel TEXT, artifactDescription TEXT, UNIQUE(kind,externalId));
  CREATE TABLE IF NOT EXISTS registry_edges(id TEXT PRIMARY KEY, source TEXT NOT NULL, sourceRevision TEXT NOT NULL,
    fromId TEXT NOT NULL REFERENCES registry_entities(id), toId TEXT NOT NULL REFERENCES registry_entities(id),
    payload TEXT NOT NULL, integrity TEXT NOT NULL, observedAt TEXT NOT NULL, state TEXT NOT NULL);
@@ -272,7 +277,7 @@ export class CheckpointRegistry {
   }
   apply(batch: RegistryBatch, expectedRevision: string | undefined, assertCurrent: () => void = () => {}): void {
     if (batch.repositoryId !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH')
-    if (!/^[A-Za-z0-9:._-]{1,500}$/.test(batch.source) || batch.revision.length > 500 || batch.edges.length > 200 || (batch.entities?.length ?? 0) > 100 || (batch.cursor?.length ?? 0) > 4096) throw new Error('REGISTRY_BATCH_LIMIT')
+    if (!/^[A-Za-z0-9:._-]{1,500}$/.test(batch.source) || batch.revision.length > 500 || batch.edges.length > 200 || (batch.entities?.length ?? 0) > 100 || (batch.artifactLabels?.length ?? 0) > 20 || (batch.cursor?.length ?? 0) > 4096) throw new Error('REGISTRY_BATCH_LIMIT')
     this.db.transaction(() => {
       assertCurrent()
       const old = this.db.prepare('SELECT revision FROM registry_sources WHERE source=?').get(batch.source) as { revision: string } | undefined
@@ -284,6 +289,28 @@ export class CheckpointRegistry {
         return id
       }
       for (const value of batch.entities ?? []) entity(value)
+      for (const { id, snapshot } of batch.artifactLabels ?? []) {
+        if (!snapshot) {
+          this.db.prepare('UPDATE registry_entities SET artifactLabel=NULL, artifactDescription=NULL WHERE id=?').run(this.key({ kind: 'ARTIFACT', id }))
+          continue
+        }
+        const key = entity({ kind: 'ARTIFACT', id })
+        const { description, id: artifactId, ...label } = snapshot
+        const exact = artifactId + ':' + label.revision
+        if ((id !== artifactId && id !== exact) || !Number.isSafeInteger(label.revision) || label.revision < 1 || !/^[a-f0-9]{64}$/.test(label.contentHash)) throw new Error('INVALID_ARTIFACT_LABEL')
+        const text = description === undefined ? null : utf8Prefix(description, 384)
+        const fields = { ...label, title: label.title === undefined ? undefined : utf8Prefix(label.title, 120),
+          artifactKind: label.artifactKind === undefined ? undefined : utf8Prefix(label.artifactKind, 80), status: label.status === undefined ? undefined : utf8Prefix(label.status, 40),
+          descriptionTruncated: description !== undefined && text !== description }
+        if (id === artifactId) {
+          const prior = this.source('CONTINUUM_CURRENT:' + id)?.revision.split(':')[0]
+          if (prior && /^[1-9][0-9]*$/.test(prior) && prior !== String(label.revision)) {
+            this.db.prepare("UPDATE registry_entities SET artifactLabel=json_set(artifactLabel,'$.freshness','SOURCE_STALE') WHERE id=? AND artifactLabel IS NOT NULL")
+              .run(this.key({ kind: 'ARTIFACT', id: artifactId + ':' + prior }))
+          }
+        }
+        this.db.prepare('UPDATE registry_entities SET artifactLabel=?,artifactDescription=? WHERE id=?').run(JSON.stringify(fields), text, key)
+      }
       for (const edge of batch.edges) {
         if (!/^[A-Za-z0-9:_-]{1,100}$/.test(edge.relation) || !/^[A-Z_]{1,80}$/.test(edge.evidenceKind) || edge.evidenceRef.length > 500 || !/^[a-f0-9]{64}$/.test(edge.digest) || !/^[A-Z_]{1,80}$/.test(edge.freshness)) throw new Error('INVALID_REGISTRY_EVIDENCE')
         const from = entity(edge.from), to = entity(edge.to)
@@ -341,8 +368,12 @@ export class CheckpointRegistry {
     if (row && (digest(row.payload) !== row.integrity || JSON.parse(row.payload).repositoryId !== this.repositoryId)) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
     return !!row
   }
-  contextGraph(selector: RegistryEntity, accountHash?: string, depthLimit = 4) {
-    type Node = { key: string; type: EntityKind; id: string; revision?: number; generation?: string; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
+  artifactDescription(key: string): { description: string; descriptionTruncated: boolean } | undefined {
+    const row = this.db.prepare("SELECT artifactDescription AS description, json_extract(artifactLabel,'$.descriptionTruncated') AS truncated FROM registry_entities WHERE id=? AND kind='ARTIFACT' AND artifactLabel IS NOT NULL").get(key) as { description: string | null; truncated: number } | undefined
+    if (row && row.description !== null) return { description: row.description, descriptionTruncated: !!row.truncated }
+  }
+  contextGraph(selector: RegistryEntity, accountHash?: string, depthLimit = 4, allowArtifactMetadata = false) {
+    type Node = { key: string; type: EntityKind; id: string; revision?: number; generation?: string; provider?: string; agent?: string; payloadState?: string; title?: string; artifactKind?: string; status?: string; description?: string; descriptionTruncated?: boolean; metadataCoverage?: string; metadataFreshness?: ArtifactLabelSnapshot['freshness']; artifactRevision?: number; selector?: object; deepen?: { tool: string; arguments: object } }
     type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; revision: string; evidenceRef: string; digest: string; confidenceClass: ProvenanceClass; coverage: string; revisionScope: string }
     const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
     const continuumUnavailable = this.source('CONTINUUM')?.status === 'UNAVAILABLE'
@@ -376,6 +407,16 @@ export class CheckpointRegistry {
       } else if (entity.kind === 'ARTIFACT') {
         const version = /^(artifact-[a-f0-9-]{36}):([1-9][0-9]*)$/.exec(entity.id)
         if (version) { node.id = version[1]; node.revision = Number(version[2]) }
+        if (allowArtifactMetadata) {
+          const unavailable = continuumUnavailable
+          const row = unavailable ? undefined : this.db.prepare('SELECT artifactLabel FROM registry_entities WHERE id=?').get(key) as { artifactLabel: string | null } | undefined
+          const label = row?.artifactLabel ? JSON.parse(row.artifactLabel) as Omit<ArtifactLabelSnapshot, 'id' | 'description'> & { descriptionTruncated: boolean } : undefined
+          node.metadataCoverage = unavailable ? 'SOURCE_UNAVAILABLE' : label?.title || label?.artifactKind || label?.status ? 'PROJECTED' : 'NOT_INDEXED'
+          if (label) {
+            const { title, artifactKind, status, revision: artifactRevision, freshness: metadataFreshness } = label
+            Object.assign(node, { title, artifactKind, status, artifactRevision, metadataFreshness })
+          }
+        } else node.metadataCoverage = 'GATE_REQUIRED'
         if (!version) node.deepen = { tool: 'get_artifact', arguments: { artifactId: node.id } }
       }
       else if (entity.kind === 'WORKTREE') { const scope = /^([a-f0-9]{64}):([a-f0-9]{64})$/.exec(entity.id); if (scope) { node.id = scope[1]; node.generation = scope[2] } }

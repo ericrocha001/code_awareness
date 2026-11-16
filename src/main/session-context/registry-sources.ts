@@ -24,13 +24,15 @@ export function registrySources(options: {
     let selectedPartial = false
     const service = options.continuum()
     service?.assertRepository(repositoryId)
+    const missing = new Set<string>()
     let continuumStage = 'SERVICE'
     const addArtifact = (id: string) => {
-      if (artifacts.size >= 20 || !service || artifacts.has(id)) return
+      if (artifacts.size + missing.size >= 20 || !service || artifacts.has(id) || missing.has(id)) return
       const version = /^(.*):([1-9][0-9]*)$/.exec(id)
       continuumStage = 'ARTIFACT_READBACK'
       const artifact = version ? service.provenanceSnapshot(version[1], Number(version[2])) : service.provenanceSnapshot ? service.provenanceSnapshot(id) : service.get(id)
       if (artifact) artifacts.set(id, artifact)
+      else missing.add(id)
     }
     const prDeliveries: { batch: Omit<RegistryBatch, 'repositoryId'>; number: number; head?: string }[] = []
     const currentPrHeads = new Map<number, string | null>()
@@ -234,7 +236,11 @@ export function registrySources(options: {
       for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)
       addBatch({ source: 'LEDGER', revision: digest(page?.cursor ?? selector?.id ?? ''), cursor: page?.cursor ?? cursors.LEDGER, status: page?.more ? 'PARTIAL' : selector ? 'SELECTED_SCOPE' : 'COMPLETE', edges: [] })
     } catch { assertCurrent(); unavailable('LEDGER') }
-    for (const artifact of artifacts.values()) {
+    for (const id of missing) {
+      const source = /:\d+$/.test(id) ? 'CONTINUUM:' + id : 'CONTINUUM_CURRENT:' + id
+      addBatch({ source, revision: 'ARTIFACT_NOT_FOUND', status: 'REPLACED', edges: [], artifactLabels: [{ id, snapshot: null }] })
+    }
+    for (const [selectedId, artifact] of artifacts) {
       const current = service?.get(artifact.artifactId)
       const isCurrent = current?.revision === artifact.revision
       const identity: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId }
@@ -275,16 +281,19 @@ export function registrySources(options: {
       }
       const native = artifact.provenance?.nativeArtifact as { state?: string; receiptId?: string } | undefined
       const authority = { nativeState: native?.state ?? 'UNAVAILABLE', receiptId: native?.receiptId }
-      addBatch({ source: 'CONTINUUM:' + from.id, revision: String(artifact.revision) + ':' + artifact.contentHash + ':' + digest(JSON.stringify(authority)) + ':P2:' + (isCurrent ? 'CURRENT' : 'HISTORICAL'), cursor: JSON.stringify(authority), status: 'COMPLETE', entities: [from], edges })
-      if (isCurrent) {
+      const label = { id: identity.id, title: artifact.metadata.name, description: artifact.metadata.description, artifactKind: artifact.metadata.kind,
+        status: artifact.metadata.status, revision: artifact.revision, contentHash: artifact.contentHash }
+      addBatch({ source: 'CONTINUUM:' + from.id, revision: String(artifact.revision) + ':' + artifact.contentHash + ':' + digest(JSON.stringify(authority)) + ':P2:' + (isCurrent ? 'CURRENT' : 'HISTORICAL'), cursor: JSON.stringify(authority), status: 'COMPLETE', entities: [from], edges,
+        artifactLabels: [{ id: from.id, snapshot: { ...label, freshness: isCurrent ? 'EXACT_REVISION' : 'SOURCE_STALE' } }] })
+      if (isCurrent && (selectedId === identity.id || !artifacts.has(identity.id))) {
         addBatch({ source: 'CONTINUUM:' + artifact.artifactId, revision: 'REVISIONED_PROJECTION', status: 'REPLACED', edges: [] })
-        addBatch({ source: 'CONTINUUM_CURRENT:' + artifact.artifactId, revision: String(artifact.revision) + ':' + artifact.contentHash, status: 'COMPLETE', entities: [identity], edges: [
+        addBatch({ source: 'CONTINUUM_CURRENT:' + artifact.artifactId, revision: String(artifact.revision) + ':' + artifact.contentHash, status: 'COMPLETE', entities: [identity], artifactLabels: [{ id: identity.id, snapshot: { ...label, freshness: 'CURRENT_REVISION_AT_PROJECTION' } }], edges: [
         { from: identity, relation: 'revision', to: from, evidenceKind: 'CONTINUUM_REVISION', ...evidence }
         ] })
       }
     }
     if (selector && service) addBatch({ source: 'CONTINUUM', revision: digest(JSON.stringify([...artifacts.values()].map(artifact => [artifact.artifactId, artifact.revision, artifact.contentHash]))), cursor: cursors.CONTINUUM,
-      status: selectedPartial || artifacts.size >= 20 ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
+      status: selectedPartial || artifacts.size + missing.size >= 20 ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
     assertCurrent()
     return batches
   }

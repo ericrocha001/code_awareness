@@ -100,7 +100,7 @@ export function nativeLiteralTarget(name: SessionToolName, args: unknown) {
   return { worktreeId: parsed.nativeSession.worktreeId, generation: parsed.nativeSession.generation }
 }
 export type SessionToolName = keyof typeof schemas
-export interface SessionContextPort { call(name: SessionToolName, args: unknown): Promise<McpToolResult> }
+export interface SessionContextPort { call(name: SessionToolName, args: unknown, allowArtifactMetadata?: boolean): Promise<McpToolResult> }
 export const scopedSessionReadTools = new Set<string>(['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event', 'discover_execution_context'])
 const str = { type: 'string', minLength: 1, maxLength: 200 }, uuid = { type: 'string', format: 'uuid' }, rev = { type: 'integer', minimum: 1 }
 const cur = { type: 'string', maxLength: 512 }, time = { type: 'string', format: 'date-time' }
@@ -110,7 +110,7 @@ const session = { sessionId: uuid, expectedRevision: rev, sourceSessionId: { ...
   required: ['provider', 'id'], additionalProperties: false } }
 const sessionTarget = [{ required: ['sessionId'] }, { required: ['nativeSession'] }]
 const definitions: [SessionToolName, string, Record<string, unknown>, string[]][] = [
-  ['discover_execution_context', 'Read a compact local index map from one exact PR, commit, checkpoint, session, Artifact, proof or execution selector. Four hops maximum; paths retain evidence and never imply authorship. MAP is index-only: no Git, Entire, network, reconciliation or transcript import. RELATION_DETAIL selects relation metadata only. sourceCoverage and gaps remain explicit; refresh_agent_sessions(contextSelector) is a separate bounded opt-in. Sessions with provider IDs require provider; internal session UUIDs may omit it. Continue with identical selector/mode/limit and cursor.',
+  ['discover_execution_context', 'Read a compact local index map from one exact PR, commit, checkpoint, session, Artifact, proof or execution selector. Four hops maximum; paths retain evidence and never imply authorship. MAP is index-only: no Git, Entire, network, reconciliation or transcript import. Authorized Artifact labels include title, kind, status and revision. RELATION_DETAIL also exposes bounded descriptions. sourceCoverage and gaps remain explicit; refresh_agent_sessions(contextSelector) is a separate bounded opt-in. Sessions with provider IDs require provider; internal session UUIDs may omit it. Continue with identical selector/mode/limit and cursor.',
     { selector: EXECUTION_SELECTOR_SCHEMA, depth: { type: 'integer', minimum: 1, maximum: 4, default: 4, description: 'Use 1 for a single selected neighborhood; 4 preserves the legacy bounded map.' }, mode: { type: 'string', enum: ['MAP', 'RELATION_DETAIL'], default: 'MAP' }, limit: { type: 'integer', minimum: 1, maximum: 24, default: 20 }, cursor: cur }, ['selector']],
   ['discover_entire_sessions', 'Discover at most 20 ENTIRE_LIVE sessions in governed Worktrees of this repository. No prompts, paths, transcripts or SQLite import. Optional worktreeId and generation must be paired. Coverage reports omitted or limited inventory explicitly; imported transcripts remain in list_agent_sessions.',
     { worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN'] }, after: time, before: time, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 } }, []],
@@ -290,7 +290,8 @@ export async function executeSessionTool(
   registryReader?: RegistryReader,
   archiveAccountHash?: string,
   nativeClient?: NativeHookClient,
-  nativeTrustSnapshot?: NativeTrustSnapshot
+  nativeTrustSnapshot?: NativeTrustSnapshot,
+  allowArtifactMetadata = false
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -301,9 +302,9 @@ export async function executeSessionTool(
     let data: object
     if (name === 'discover_execution_context') {
       const request = q as z.infer<typeof executionContextQuery>
-      data = discoverExecutionContext(store as SessionStore, request, archiveAccountHash)
+      data = discoverExecutionContext(store as SessionStore, request, archiveAccountHash, request.limit, allowArtifactMetadata)
       let pageLimit = request.limit
-      while (!fits(data, budget) && pageLimit > 1) { pageLimit--; data = discoverExecutionContext(store as SessionStore, request, archiveAccountHash, pageLimit) }
+      while (!fits(data, budget) && pageLimit > 1) { pageLimit--; data = discoverExecutionContext(store as SessionStore, request, archiveAccountHash, pageLimit, allowArtifactMetadata) }
     } else if (name === 'reconcile_checkpoint_registry') {
       data = await reconcileRegistry(store as SessionStore, runner, root!, registrySelector(q as z.infer<typeof schemas.reconcile_checkpoint_registry>), assertActive, registryReader)
     } else if (name === 'inspect_capture_health') {

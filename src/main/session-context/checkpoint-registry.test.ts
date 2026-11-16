@@ -62,6 +62,41 @@ it('F2 projects an Artifact readable by the real Continuum service through the i
   expect(f.store().registry.contextGraph({ kind: 'ARTIFACT', id: receipt.artifactId }).edges.filter(edge => edge.source === 'CONTINUUM').every(edge => edge.state === 'STALE')).toBe(true)
   expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)?.revision.startsWith('2:')).toBe(true)
 })
+it('projects bounded Artifact labels by authorized view, exact revision and source coverage', async () => {
+  const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
+  cleanup.push(continuum.close)
+  let service: typeof continuum.service | null = continuum.service
+  const original = markdown('Intent')
+  const withDescription = (text: string, description: string) => text.replace(/^description: .*$/m, 'description: ' + JSON.stringify(description))
+  const receipt = continuum.service.publish(withDescription(original, 'Original rationale'))
+  const id = receipt.artifactId
+  const read = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => service, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => false, assertCurrent: () => {} })
+  const target = { kind: 'ARTIFACT' as const, id }
+  const refresh = async () => f.store().registry.applyAll(await read({ selector: target, cursors: f.store().registry.cursors() }), () => {})
+  await refresh()
+  expect(f.store().registry.contextGraph(target).nodes[0]).toMatchObject({ metadataCoverage: 'GATE_REQUIRED' })
+  const map = f.store().registry.contextGraph(target, undefined, 2, true)
+  expect(map.nodes[0]).toMatchObject({ title: 'Intent', artifactRevision: 1, metadataCoverage: 'PROJECTED' })
+  expect(JSON.stringify(map)).not.toContain('Original rationale')
+  continuum.service.update(id, 1, withDescription(markdown('Outcome'), '🧪'.repeat(250)))
+  await refresh()
+  f.restart()
+  const historical = f.store().registry.contextGraph({ ...target, id: id + ':1' }, undefined, 1, true).nodes[0]
+  expect(historical).toMatchObject({ title: 'Intent', metadataFreshness: 'SOURCE_STALE' })
+  expect(f.store().registry.artifactDescription(historical.key)).toEqual({ description: 'Original rationale', descriptionTruncated: false })
+  const detail = f.store().registry.contextGraph(target, undefined, 1, true).nodes[0]
+  expect(detail).toMatchObject({ title: 'Outcome', artifactRevision: 2 })
+  const description = f.store().registry.artifactDescription(detail.key)!
+  expect(description.descriptionTruncated).toBe(true)
+  expect(Buffer.byteLength(description.description)).toBeLessThanOrEqual(384)
+  expect(() => f.store().registry.apply({ repositoryId: 'foreign', source: 'CONTINUUM', revision: '1', status: 'COMPLETE', edges: [], artifactLabels: [{ id, snapshot: null }] }, undefined)).toThrow('REPOSITORY_MISMATCH')
+  service = null
+  await refresh()
+  expect(f.store().registry.contextGraph(target, undefined, 1, true).nodes[0]).toMatchObject({ metadataCoverage: 'SOURCE_UNAVAILABLE' })
+  expect(f.store().registry.contextGraph(target, undefined, 1, true).nodes[0]).not.toHaveProperty('title')
+})
+
 it('F2 distinguishes stale inventory cursors from failed readback and retains the known projection', async () => {
   const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
   cleanup.push(continuum.close)

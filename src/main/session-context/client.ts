@@ -48,7 +48,7 @@ export class SessionContextClient implements SessionContextPort {
     if (!this.active()) throw new Error('PROJECT_CONTEXT_CHANGED')
     return readExecutionSessionAssociations(sessionStorePath(this.storageBase, this.repositoryId), { ...scope, repositoryId: this.repositoryId })
   }
-  call(name: SessionToolName, args: unknown): Promise<McpToolResult> {
+  call(name: SessionToolName, args: unknown, allowArtifactMetadata = false): Promise<McpToolResult> {
     if (!this.active()) return Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
     if (Buffer.byteLength(JSON.stringify(args ?? {})) > 8192) return Promise.resolve(failure('INVALID_ARGUMENT'))
     if (name === 'refresh_agent_sessions') {
@@ -62,7 +62,7 @@ export class SessionContextClient implements SessionContextPort {
     }
     const key = JSON.stringify(args ?? {})
     if (name === 'refresh_agent_sessions' && this.refresh) return this.refresh.key === key ? this.refresh.task : Promise.resolve(failure('BACKPRESSURE'))
-    const task = this.dispatch(name, args, { captureNative: !this.readOnlyStore })
+    const task = this.dispatch(name, args, { captureNative: !this.readOnlyStore, allowArtifactMetadata: allowArtifactMetadata && !this.readOnlyStore })
     if (name === 'refresh_agent_sessions') {
       const refresh = { key, task }
       this.refresh = refresh
@@ -172,7 +172,7 @@ export class SessionContextClient implements SessionContextPort {
   reconcileProjection(): Promise<McpToolResult> {
     return this.active() ? this.dispatch('reconcile_checkpoint_registry', {}, { captureNative: false }) : Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
   }
-  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean } = {}): Promise<McpToolResult> {
+  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean; allowArtifactMetadata?: boolean } = {}): Promise<McpToolResult> {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
@@ -300,7 +300,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(nativeTrust ? { nativeTrust } : {}), ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, allowArtifactMetadata: options.allowArtifactMetadata, ...(nativeTrust ? { nativeTrust } : {}), ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

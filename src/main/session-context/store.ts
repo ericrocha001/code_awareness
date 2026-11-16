@@ -112,6 +112,9 @@ export class SessionStore {
         if (!columns.some(column => column.name === 'coverageReasons')) this.db.exec("ALTER TABLE sessions ADD COLUMN coverageReasons TEXT NOT NULL DEFAULT '{}'")
         this.db.prepare("UPDATE sessions SET coverageReasons = ? WHERE importState = 'UNKNOWN' AND coverageReasons = '{}' AND coverage <> 'COMPLETE'").run(JSON.stringify({ LEGACY_COVERAGE_UNEXPLAINED: 1 }))
         this.db.exec(REGISTRY_SCHEMA)
+        const entityColumns = (this.db.prepare('PRAGMA table_info(registry_entities)').all() as { name: string }[]).map(column => column.name)
+        if (!entityColumns.includes('artifactLabel')) this.db.exec('ALTER TABLE registry_entities ADD COLUMN artifactLabel TEXT')
+        if (!entityColumns.includes('artifactDescription')) this.db.exec('ALTER TABLE registry_entities ADD COLUMN artifactDescription TEXT')
         for (const [table, required] of [['registry_edges', ['id', 'source', 'sourceRevision', 'fromId', 'toId', 'payload', 'integrity', 'observedAt', 'state']], ['checkpoint_registry', ['checkpointId', 'refRevision', 'state', 'digest', 'sessionIds', 'integrity', 'observedAt']]] as const) {
           const names = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')

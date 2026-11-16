@@ -36,7 +36,7 @@ const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) =>
   parentPort?.postMessage({ id, validate: validation, ...(sourceSelection ? { sourceSelection } : {}) })
 })
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; nativeTargets?: LiveSessionTarget[]; nativeTrust?: NativeTrustSnapshot; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string } | { publicationResult: number; result?: unknown; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; allowArtifactMetadata?: boolean; nativeTargets?: LiveSessionTarget[]; nativeTrust?: NativeTrustSnapshot; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string } | { publicationResult: number; result?: unknown; code?: string }) => {
   if ('publicationResult' in message) {
     const entry = publicationReads.get(message.publicationResult); publicationReads.delete(message.publicationResult)
     if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.result)
@@ -187,7 +187,8 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
           readRegistry,
           undefined,
           undefined,
-          message.nativeTrust
+          message.nativeTrust,
+          message.allowArtifactMetadata
         )
     if (!closing && !Atomics.load(cancelled, 0)) parentPort?.postMessage({ id: message.id, result })
   } catch (error) {

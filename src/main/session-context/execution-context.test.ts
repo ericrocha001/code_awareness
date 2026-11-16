@@ -7,6 +7,8 @@ import { digest } from './privacy'
 import { executeSessionTool, SESSION_CONTEXT_TOOLS } from './mcp'
 import type { RegistryEdge, RegistryEntity } from './checkpoint-registry'
 import { executionContextQuery } from './execution-context'
+import { createMcpHttpServer } from '../mcp/mcp-http-server'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { reconcileRegistry } from './registry-reconciliation'
 import { runReadOnly } from './entire-provider'
@@ -21,7 +23,7 @@ function fixture(repositoryId = 'repo') {
   const base = mkdtempSync(join(tmpdir(), 'execution-context-')), store = new SessionStore(sessionStorePath(base, repositoryId), repositoryId)
   closes.push(() => { store.close(); rmSync(base, { recursive: true, force: true }) })
   const runner = vi.fn(async () => { throw new Error('READ_MUST_NOT_RUN_GIT') }), read = vi.fn(async () => { throw new Error('READ_MUST_NOT_RECONCILE') }), provider = { refresh: vi.fn(async () => { throw new Error('READ_MUST_NOT_RUN_ENTIRE') }) }
-  const call = (args: unknown, accountHash?: string) => executeSessionTool(store, provider, 'discover_execution_context', args, () => {}, undefined, [], runner, process.cwd(), undefined, read, accountHash)
+  const call = (args: unknown, accountHash?: string, allowArtifactMetadata?: boolean) => executeSessionTool(store, provider, 'discover_execution_context', args, () => {}, undefined, [], runner, process.cwd(), undefined, read, accountHash, undefined, undefined, allowArtifactMetadata)
   const add = (edges: RegistryEdge[], source = 'FIXTURE', revision = '1') => store.registry.apply({ repositoryId, source, revision, status: 'COMPLETE', edges }, store.registry.source(source)?.revision)
   return { store, call, runner, read, provider, add }
 }
@@ -210,3 +212,54 @@ it('discovers execution context for an antigravity-native session selector witho
   expect(map.edges).toHaveLength(2)
   expect(map.edges.every((item: { evidenceKind: string }) => item.evidenceKind === 'NATIVE_HOOK_OBSERVED')).toBe(true)
 })
+
+it('serves authorized compact labels and selected rationale through MCP SDK without refreshing', async () => {
+  const { Client } = await import('@modelcontextprotocol/sdk/client')
+  const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
+  const f = fixture()
+  const label = (id: string, title: string, kind: string) => ({ id, snapshot: {
+    id, title, artifactKind: kind, status: 'VALIDATED', revision: 1, contentHash: digest(title),
+    description: 'Bounded rationale for ' + title, freshness: 'CURRENT_REVISION_AT_PROJECTION' as const
+  } })
+  f.store.registry.applyAll([{ repositoryId: 'repo', source: 'CONTINUUM', revision: '1', status: 'COMPLETE',
+    artifactLabels: [label(handoff, 'Implementation', 'IMPLEMENTATION_HANDOFF'), label(plan1, 'Purpose', 'EXECUTABLE_PLAN')], edges: [
+      edge(entity('COMMIT', commit), entity('PR', '91'), 'GITHUB_COMMIT_LIST', 'member-of'),
+      edge(entity('ARTIFACT', handoff), entity('PR', '91'), 'HANDOFF_DECLARED', 'declares'),
+      edge(entity('ARTIFACT', handoff), entity('ARTIFACT', plan1), 'CONTINUUM_TYPED_RELATION', 'implements')
+    ] }], () => {})
+  const principal = authenticatedAgentPrincipal('MCP', () => true)
+  const adapter = new ChannelMcpAdapter({ projectId: 'repo', repoRoot: '/fixture', navigation: {} as any, continuum: { repositoryId: 'repo' } as any,
+    sessionContext: { call: (_name, args, allow) => f.call(args, undefined, allow) } })
+  const server = createMcpHttpServer(adapter, () => {}, undefined, undefined,
+    headers => headers.authorization === 'Bearer fixture' ? authorizeArtifactAgent(principal, 'repo', () => true) : undefined)
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const port = (server.address() as { port: number }).port
+  const connect = async (authorized: boolean) => {
+    const client = new Client({ name: 'provenance-fixture', version: '1' })
+    await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:' + port + '/mcp'),
+      authorized ? { requestInit: { headers: { authorization: 'Bearer fixture' } } } : {}))
+    return client
+  }
+  const client = await connect(true), anonymous = await connect(false)
+  const descriptionReads = vi.spyOn(f.store.registry, 'artifactDescription')
+  const query = (c: typeof client, args: Record<string, unknown>) => c.callTool({ name: 'discover_execution_context', arguments: args }).then(result => data({ content: Array.isArray(result.content) ? result.content : [] }))
+  try {
+    const forward = await query(client, { selector: { type: 'COMMIT', id: commit } })
+    expect(forward.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Implementation' }), expect.objectContaining({ title: 'Purpose' })]))
+    expect(JSON.stringify(forward)).not.toContain('Bounded rationale')
+    expect(descriptionReads).not.toHaveBeenCalled()
+    const reverse = await query(client, { selector: { type: 'ARTIFACT', id: plan1 }, mode: 'RELATION_DETAIL' })
+    expect(reverse.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ id: commit }), expect.objectContaining({ description: 'Bounded rationale for Purpose' })]))
+    expect(reverse.authorship).toBe('NOT_INFERRED')
+    const denied = await query(anonymous, { selector: { type: 'ARTIFACT', id: plan1 }, mode: 'RELATION_DETAIL' })
+    expect(denied.nodes[0]).toMatchObject({ metadataCoverage: 'GATE_REQUIRED' })
+    expect(denied.nodes[0]).not.toHaveProperty('description')
+    expect(descriptionReads).toHaveBeenCalledTimes(reverse.nodes.filter((node: { type: string }) => node.type === 'ARTIFACT').length)
+    const missing = await query(client, { selector: { type: 'COMMIT', id: 'f'.repeat(40) } })
+    expect(missing).toMatchObject({ partial: true, authorship: 'NOT_INFERRED', discovery: { reason: 'NO_INDEXED_EDGE' } })
+    expect(f.runner).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled(); expect(f.provider.refresh).not.toHaveBeenCalled()
+  } finally {
+    await Promise.all([client.close(), anonymous.close()])
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+}, 30000)

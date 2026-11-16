@@ -29,12 +29,12 @@ export function executionEntity(store: SessionStore, selector: ExecutionSelector
   const entity = selector.provider ? { kind: 'SESSION' as const, id: sessionIdentity(selector.provider, selector.id, selector.agent) } : store.registry.sessionIdentity(selector.id)
   return entity && store.registry.visible(entity, accountHash) ? entity : undefined
 }
-export function discoverExecutionContext(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash?: string, pageLimit = query.limit) {
-  return store.registry.readSnapshot(() => contextSnapshot(store, query, accountHash, pageLimit))
+export function discoverExecutionContext(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash?: string, pageLimit = query.limit, allowArtifactMetadata = false) {
+  return store.registry.readSnapshot(() => contextSnapshot(store, query, accountHash, pageLimit, allowArtifactMetadata))
 }
-function contextSnapshot(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash: string | undefined, pageLimit: number) {
+function contextSnapshot(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash: string | undefined, pageLimit: number, allowArtifactMetadata: boolean) {
   const selector = executionEntity(store, query.selector, accountHash)
-  const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth) : { nodes: [], edges: [], paths: [], bounded: false }
+  const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth, allowArtifactMetadata) : { nodes: [], edges: [], paths: [], bounded: false }
   const nativeSources = nativeCorrelationSourceCoverage(store.registry, graph.nodes.flatMap(node =>
     node.type === 'EXECUTION' && node.id.startsWith('native-invocation:') ? [node.id.slice('native-invocation:'.length)] : []))
   const sourceCoverage = [...store.registry.coverageSources().map(s => {
@@ -55,17 +55,22 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
       }
     } catch { reasons.add('NATIVE_CAPTURE_COVERAGE_UNAVAILABLE') }
   }
+  const unavailableSource = sourceCoverage.some(source => ['UNAVAILABLE', 'UNSUPPORTED', 'CONFLICT'].includes(source.status))
+  const gatedSource = sourceCoverage.some(source => source.status === 'NETWORK_NOT_AUTHORIZED')
   const observedRelations = graph.edges.some(edge => edge.evidenceKind !== 'CONTINUUM_REVISION')
   if (!observedRelations) reasons.add('PROVENANCE_NOT_OBSERVED')
+  const discoveryReason = observedRelations ? undefined : gatedSource ? 'GATE_REQUIRED' : unavailableSource ? 'SOURCE_UNAVAILABLE' : 'NO_INDEXED_EDGE'
   const coverage = { state: reasons.size ? observedRelations ? 'PARTIAL' : 'UNKNOWN' : 'SELECTED_SCOPE', reasons: [...reasons].sort(), negativeInference: 'NOT_AUTHORIZED' }
   const revision = digest(JSON.stringify([graph, sourceCoverage.map(({ observedAt: _observedAt, ...source }) => source), coverage]))
-  const scope = { name: 'discover_execution_context', repositoryId: store.repositoryId, selector: query.selector, mode: query.mode, depth: query.depth, limit: query.limit, revision, accountHash }
+  const scope = { name: 'discover_execution_context', repositoryId: store.repositoryId, selector: query.selector, mode: query.mode, depth: query.depth, limit: query.limit, revision, accountHash, allowArtifactMetadata }
   const offset = store.offset(query.cursor, scope)
   if (offset > graph.edges.length) throw new Error('CURSOR_STALE')
   const edges = graph.edges.slice(offset, offset + pageLimit)
   const selectedNodes = new Set(edges.flatMap(edge => [edge.from, edge.to]))
   if (selector) selectedNodes.add(store.registry.key(selector))
-  const nodes = graph.nodes.filter(node => selectedNodes.has(node.key))
+  const nodes = graph.nodes.filter(node => selectedNodes.has(node.key)).map(node =>
+    query.mode === 'RELATION_DETAIL' && allowArtifactMetadata && node.type === 'ARTIFACT' && node.metadataCoverage !== 'SOURCE_UNAVAILABLE'
+      ? { ...node, ...store.registry.artifactDescription(node.key) } : node)
   const more = offset + edges.length < graph.edges.length
   const deliveryLinks = graph.paths.map(path => path.edges.map(id => graph.edges.find(edge => edge.id === id)!))
   const isUsable = (link: (typeof graph.edges)[number]) => link.state !== 'STALE' && link.state !== 'UNKNOWN'
@@ -80,7 +85,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
   const backlog = store.registry.reconciliationBacklog()
   const nativeBacklog = nativeSources.filter(source => source.status === 'CONFLICT').map(({ status: _status, observedAt, ...source }) => ({ ...source, lastAttemptAt: observedAt }))
   const result = { repositoryId: store.repositoryId, selector: query.selector, revision, mode: query.mode,
-    state: graph.nodes.length ? 'INDEX_SNAPSHOT' : 'RECONCILIATION_PENDING', partial: more || graph.bounded || coverage.state === 'PARTIAL', coverage,
+    state: graph.nodes.length ? 'INDEX_SNAPSHOT' : 'RECONCILIATION_PENDING', partial: more || graph.bounded || coverage.state === 'PARTIAL' || discoveryReason !== undefined, coverage,
     counts: Object.fromEntries(['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'WORKTREE'].map(type => [type, graph.nodes.filter(node => node.type === type).length])), countsCoverage: graph.bounded ? 'BOUNDED' : 'OBSERVED_INDEX',
     nodes, edges: edges.map(edge => query.mode === 'RELATION_DETAIL' ? edge : { id: edge.id, from: edge.from, to: edge.to, relation: edge.relation, state: edge.state, evidenceKind: edge.evidenceKind, source: edge.source, freshness: edge.freshness, confidenceClass: edge.confidenceClass, coverage: edge.coverage, revision: edge.revision, revisionScope: edge.revisionScope, evidenceRef: edge.evidenceRef }),
     paths: graph.paths.filter(path => edges.some(edge => edge.id === path.edges.at(-1))).map(path => {
@@ -89,7 +94,11 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
       const causal = links.length && links.every(edge => edge.confidenceClass === 'VERIFIED_CAUSAL' && edge.evidenceKind === first.evidenceKind && edge.evidenceRef === first.evidenceRef && edge.sourceRevision === first.sourceRevision)
       const rank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_CAUSAL: 4 }
       const weakest = links.reduce((current, edge) => rank[edge.confidenceClass] < rank[current] ? edge.confidenceClass : current, first.confidenceClass)
-      return { ...path, ...(query.mode === 'RELATION_DETAIL' ? { evidenceClass: links.length > 1 ? 'DERIVED' : first.confidenceClass, weakestLink: weakest,
+      const target = graph.nodes.find(node => node.key === path.target)
+      const reason = target?.metadataCoverage === 'GATE_REQUIRED' ? 'GATE_REQUIRED' :
+        target?.metadataCoverage === 'SOURCE_UNAVAILABLE' || !links.every(isUsable) ? 'SOURCE_UNAVAILABLE' :
+        links.some(edge => edge.confidenceClass === 'DECLARED') && links.every(edge => ['DECLARED', 'DERIVED'].includes(edge.confidenceClass)) ? 'DECLARED_ONLY' : undefined
+      return { ...path, ...(reason ? { reason } : {}), ...(query.mode === 'RELATION_DETAIL' ? { evidenceClass: links.length > 1 ? 'DERIVED' : first.confidenceClass, weakestLink: weakest,
         links: links.map(edge => ({ id: edge.id, evidenceKind: edge.evidenceKind, evidenceRef: edge.evidenceRef, source: edge.source, sourceRevision: edge.sourceRevision, freshness: edge.freshness, confidenceClass: edge.confidenceClass, state: edge.state })),
         resolution: weakest === 'UNKNOWN' || !links.every(isUsable) || mixesDeclaredExecution(links) ? 'UNRESOLVED' : links.some(edge => edge.evidenceKind === 'BRANCH_CONTEXT_ONLY') ? 'BRANCH_CONTEXT_ONLY' : 'EVIDENCE_PATH' } : {}), confidenceClass: causal ? 'VERIFIED_CAUSAL' : links.length === 1 ? first.confidenceClass : 'CONTEXTUAL', meaning: causal ? 'SAME_OPERATION_EVIDENCE' : 'EXECUTION_CONTEXT_NOT_IMPLEMENTATION_PROOF' }
     }), sourceCoverage,
@@ -98,7 +107,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
     freshness: 'LAST_KNOWN_NOT_RECHECKED', authorship: 'NOT_INFERRED',
     reconciliation: { backlog: { ...backlog, pending: backlog.pending || nativeBacklog.some(source => source.pending), details: [...backlog.details, ...nativeBacklog] }, state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },
     ...(more ? { nextCursor: store.cursor(scope, offset + edges.length) } : {}),
-    discovery: { depth: query.depth, nextStep: 'SELECT_NEIGHBOR', suggestions: 'SEPARATE_FROM_CONFIRMED_EDGES' },
+    discovery: { depth: query.depth, nextStep: 'SELECT_NEIGHBOR', suggestions: 'SEPARATE_FROM_CONFIRMED_EDGES', ...(discoveryReason ? { reason: discoveryReason } : {}) },
     ...(graph.bounded ? { continuation: 'Select a node with depth=1 for its bounded immediate neighborhood.' } : {}) }
   return result
 }
