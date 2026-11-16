@@ -16,7 +16,7 @@
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "node scripts/dependency-readiness.cjs && npm run native:doctor",
-    "build": "node scripts/dependency-readiness.cjs --build-fallback && node scripts/cli-execution/build.cjs && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && node scripts/session-context/build-native-hook.cjs && npm run native:bundle-guard",
+    "build": "node scripts/dependency-readiness.cjs --build-fallback && node scripts/cli-execution/build.cjs && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && node scripts/session-context/build-native-hook.cjs && node scripts/web-activation/build.cjs && npm run native:bundle-guard",
     "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
     "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/build.test.cjs scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
@@ -73,7 +73,8 @@
     "ui:acceptance": "npm run ui:check && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/renderer/src/components/shared/ui-primitives.test.tsx src/renderer/src/components/shared/Popover/Popover.test.tsx",
     "test:agent": "node scripts/test-output.cjs run --",
     "test:output": "node scripts/test-output.cjs run -- node --test scripts/test-output.test.cjs",
-    "cli-execution:build": "node scripts/cli-execution/build.cjs"
+    "cli-execution:build": "node scripts/cli-execution/build.cjs",
+    "web-activation:build": "node scripts/web-activation/build.cjs"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.1",
@@ -135,6 +136,14 @@
           "cli-job-owner.exe",
           "receipt.json"
         ]
+      },
+      {
+        "from": "dist/web-activation/native-host.cjs",
+        "to": "web-activation/native-host.cjs"
+      },
+      {
+        "from": "dist/web-extension",
+        "to": "web-extension"
       }
     ],
     "win": {

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Code Awareness Web Activation</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 14px;
+        width: 330px;
+        background: #0f172a;
+        color: #f8fafc;
+        font: 13px/1.4 system-ui, -apple-system, sans-serif;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .card {
+        background: #1e293b;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        padding: 10px;
+        margin-bottom: 10px;
+      }
+      .row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin: 4px 0;
+      }
+      .badge {
+        padding: 2px 8px;
+        border-radius: 9999px;
+        font-size: 11px;
+        font-weight: 600;
+        background: #334155;
+      }
+      .badge.ok { background: #14532d; color: #86efac; }
+      .badge.warn { background: #7f1d1d; color: #fca5a5; }
+      label.toggle {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin: 6px 0;
+        cursor: pointer;
+      }
+      .actions {
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+      }
+      button {
+        flex: 1;
+        padding: 7px 10px;
+        border: 0;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        background: #2563eb;
+        color: #fff;
+      }
+      button.secondary { background: #334155; }
+      button.danger { background: #b91c1c; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      .hint { font-size: 11px; color: #94a3b8; margin-top: 6px; }
+      .error { font-size: 11px; color: #fca5a5; margin-top: 6px; }
+    </style>
+  </head>
+  <body>
+    <h1>Code Awareness · Local MCP</h1>
+    <div class="card">
+      <div class="row"><span>Desktop Bridge</span><span id="desktop-status" class="badge">Checking…</span></div>
+      <div class="row"><span>Active Scope</span><span id="scope-label">-</span></div>
+      <div class="row"><span>Active Chat</span><span id="site-label">-</span></div>
+      <div class="row"><span>Session State</span><span id="session-state" class="badge">INACTIVE</span></div>
+    </div>
+
+    <div class="card">
+      <strong style="font-size:12px;">Read-Only Egress Consent</strong>
+      <label class="toggle">
+        <span>Skills &amp; Repo Metadata</span>
+        <input id="consent-metadata" type="checkbox" disabled />
+      </label>
+      <label class="toggle">
+        <span>Literal Source &amp; Skill Files</span>
+        <input id="consent-literal" type="checkbox" disabled />
+      </label>
+      <div class="hint">Scoped per site + project. Mutations, writes, and CLI tools remain blocked.</div>
+    </div>
+
+    <div class="actions">
+      <button id="btn-activate" disabled>Activate Chat</button>
+      <button id="btn-new-chat" class="secondary" disabled>New Chat</button>
+      <button id="btn-revoke" class="danger" disabled>Revoke</button>
+    </div>
+    <div id="status-message" class="error"></div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

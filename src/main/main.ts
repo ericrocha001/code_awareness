@@ -80,6 +80,7 @@ import { RepositoryContinuumSession } from './continuum/project-continuum-sessio
 import { LocalChannelHost } from './local-agent-channel/local-channel-host'
 import { ContinuumLocalAdapter } from './continuum/local-adapter'
 import { AcademyLocalAdapter } from './academy/local-adapter'
+import { WebActivationLocalAdapter } from './web-activation/web-activation-local-adapter'
 import { registerContinuumHandlers } from './ipc/continuum-handler'
 import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
 import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
@@ -177,7 +178,12 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const sessionMemoryCentral = new SessionMemoryCentralService(app.getPath('userData'))
 const localAgentChannel = new LocalChannelHost(
-  [new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)), new AcademyLocalAdapter(academyService), new TestOutputLocalAdapter(continuumSession, validationLedger)],
+  [
+    new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)),
+    new AcademyLocalAdapter(academyService),
+    new TestOutputLocalAdapter(continuumSession, validationLedger),
+    new WebActivationLocalAdapter(() => mcpLifecycle.ensureGlobalSkillsEndpoint())
+  ],
   app.getPath('userData'),
   () => mcpLifecycle.getLocalEndpoint(runtimeIdentityProvider.getInstanceId())
 )

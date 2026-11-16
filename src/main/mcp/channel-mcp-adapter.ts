@@ -53,6 +53,14 @@ import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnos
 import { REQUEST_RUNTIME_RESTART_TOOL, executeRequestRuntimeRestart } from '../runtime-restart/runtime-restart-mcp'
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
+import {
+  AcademyMcpSkillsProvider,
+  McpProtocolError,
+  type McpResourceReadResult,
+  type McpResourcesListResult,
+  type McpSkillGetResult,
+  type McpSkillsListResult
+} from '../academy/academy-mcp-skills'
 import type { AcademyService } from '../academy/academy-service'
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../repository-file-ingress/repository-file-ingress-mcp'
@@ -127,6 +135,9 @@ export class ChannelMcpAdapter {
   private readonly sessionMemoryCentral?: SessionMemoryCentralService
   private readonly unitflowRuntime?: UnitFlowRuntimeFacade
   private readonly projectId?: string
+  private readonly repoRoot?: string
+  private readonly codeNavigationAvailable: boolean
+  private readonly academySkills?: AcademyMcpSkillsProvider
   private readonly assertActiveProject?: () => void
 
   constructor(
@@ -186,10 +197,14 @@ export class ChannelMcpAdapter {
       this.sessionMemoryCentral = context.sessionMemoryCentral
       this.unitflowRuntime = context.unitflowRuntime
       this.projectId = context.projectId
+      this.repoRoot = context.repoRoot
+      this.codeNavigationAvailable = Boolean(context.projectId || context.repoRoot)
       this.assertActiveProject = context.assertActiveProject
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
+      this.repoRoot = repoPathOrHealth
+      this.codeNavigationAvailable = true
       this.systemHealth = systemHealthOrIdentity as SystemHealthCore | undefined
       this.runtimeIdentity =
         (runtimeIdentityOrLedger as RuntimeIdentityProvider | undefined) ??
@@ -202,6 +217,7 @@ export class ChannelMcpAdapter {
       this.academy = academy
     } else {
       this.navigation = navigation as ProjectContextNavigation
+      this.codeNavigationAvailable = true
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
       this.runtimeIdentity =
         (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ??
@@ -215,11 +231,70 @@ export class ChannelMcpAdapter {
       this.runtimeRestart = undefined
       this.academy = academy
     }
+    this.academySkills = this.academy
+      ? new AcademyMcpSkillsProvider(this.academy, { projectId: this.projectId ?? null, repoRoot: this.repoRoot ?? null })
+      : undefined
+  }
+
+  static createGlobalOnly(
+    academy: AcademyService,
+    systemHealth?: SystemHealthCore,
+    runtimeIdentity?: RuntimeIdentityProvider,
+    validationLedger?: ValidationLedger
+  ): ChannelMcpAdapter {
+    const unavailable = async () => {
+      throw new Error('PROJECT_UNAVAILABLE: No active project selected')
+    }
+    const navigation = {
+      discoverRepository: unavailable,
+      getRelationships: unavailable,
+      inspectFiles: unavailable,
+      getReferences: unavailable,
+      getSymbolDependencies: unavailable,
+      getSymbolHierarchy: unavailable,
+      readCode: unavailable
+    } as unknown as ProjectContextNavigation
+    return new ChannelMcpAdapter(
+      { projectId: '', repoRoot: '', navigation },
+      systemHealth,
+      runtimeIdentity,
+      validationLedger,
+      academy
+    )
+  }
+
+  hasSkillsExtension(): boolean {
+    return Boolean(this.academySkills)
+  }
+
+  listSkills(params?: { cursor?: string }): McpSkillsListResult {
+    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
+    return this.academySkills.listSkills(params)
+  }
+
+  getSkill(params: { uri: string }): McpSkillGetResult {
+    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
+    return this.academySkills.getSkill(params)
+  }
+
+  readResource(params: { uri: string }): McpResourceReadResult {
+    if (!this.academySkills) throw new McpProtocolError(-32601, 'Resources unavailable')
+    return this.academySkills.readSkillResource(params)
+  }
+
+  listResources(params?: { cursor?: string }): McpResourcesListResult {
+    if (!this.academySkills) {
+      return { resultType: 'complete', resources: [], ttlMs: 30_000, cacheScope: 'private' }
+    }
+    return this.academySkills.listSkillResources(params)
   }
 
   listTools(): McpToolDefinition[] {
+    const navigationTools = this.codeNavigationAvailable
+      ? CODE_NAVIGATION_MCP_TOOLS.filter(tool => tool.name !== 'inspect_worktree_structure' || !!this.navigation.inspectWorktreeStructure)
+      : []
     const tools = [
-      ...CODE_NAVIGATION_MCP_TOOLS.filter(tool => tool.name !== 'inspect_worktree_structure' || !!this.navigation.inspectWorktreeStructure),
+      ...navigationTools,
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
       GET_CHANNEL_USAGE_TOOL,
@@ -543,6 +618,9 @@ export class ChannelMcpAdapter {
       return executeRecordValidationProof(this.validationLedger, args)
     }
 
+    if (!this.codeNavigationAvailable) {
+      return { content: [{ type: 'text', text: 'PROJECT_UNAVAILABLE: No active project selected' }], isError: true }
+    }
     return executeCodeNavigationTool(this.navigation, name, args, { ...invocationContext, trace: invocationContext?.trace ?? this.systemHealth?.sink })
   }
 }

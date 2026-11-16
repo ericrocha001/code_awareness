@@ -72,6 +72,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/academy/academy-sync.test.ts',
   'src/main/academy/academy-conflicts.test.ts',
   'src/main/academy/academy-mcp.test.ts',
+  'src/main/academy/academy-mcp-skills.test.ts',
   'src/main/academy/academy-real-migration.test.ts',
   'src/main/academy/academy-acceptance.test.ts',
   'src/main/academy/academy-distribution.test.ts',
@@ -91,7 +92,8 @@ const nativeTestFiles = Object.freeze([
   'src/main/buildx/smc/session-memory-central-store.test.ts',
   'src/main/buildx/unitflow/unitflow-runtime.test.ts',
   'src/main/buildx/execution/unit-execution-service.test.ts',
-  'src/main/buildx/adapters/cline/cline-utility-process.e2e.test.ts'
+  'src/main/buildx/adapters/cline/cline-utility-process.e2e.test.ts',
+  'src/web-extension/web-activation-e2e.test.ts'
 ])
 
 const checkoutTestRoots = ['src', 'infra', 'docs', 'scripts']

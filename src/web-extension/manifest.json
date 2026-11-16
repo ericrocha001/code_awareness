@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Code Awareness — Local MCP & Skills",
+  "version": "1.0.0",
+  "description": "Read-only local MCP Skills and Context bridge for DeepSeek and Qwen web chats via Code Awareness Desktop.",
+  "permissions": [
+    "nativeMessaging",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://chat.deepseek.com/*",
+    "https://chat.qwen.ai/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Code Awareness Web Activation"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chat.deepseek.com/*",
+        "https://chat.qwen.ai/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
