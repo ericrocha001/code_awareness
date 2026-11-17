@@ -77,9 +77,10 @@ it('reads only a hook-selected Antigravity App reply and replays sanitized byte 
   expect(await call('inspect_agent_session', {})).toMatchObject({ sourceDiagnostic: 'PROFILE_UNAVAILABLE' })
   writeFileSync(config, JSON.stringify({ repositoryId: 'repo', nativeSources: { antigravityApp: { profile, sessionHash: captured.sessionId } } }))
   const map = await call('inspect_agent_session', {})
-  expect(map).toMatchObject({ source: 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1', sourceEventCount: 1, omittedSourceEvents: 1 })
-  const eventPage = await call('list_agent_session_events', { expectedRevision: map.revision })
+  expect(map).toMatchObject({ source: 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1', sourceEventCount: 2, omittedSourceEvents: 0 })
+  const eventPage = await call('list_agent_session_events', { expectedRevision: map.revision, types: ['AGENT_UPDATE'] })
   expect(JSON.stringify(eventPage)).not.toContain('output')
+  expect(JSON.stringify(eventPage)).not.toContain('private-user-message')
   const select = { eventId: eventPage.events[0].eventId, expectedRevision: map.revision }
   const first = await call('read_agent_session_event', select)
   expect(first).toMatchObject({ sanitized: true, partial: true, payloadDigest: nativeDigest(sanitized) })

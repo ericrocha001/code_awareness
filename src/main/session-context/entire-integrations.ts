@@ -12,4 +12,6 @@ export function parseEntireAgentList(text: string): EntireIntegration[] {
   if (!integrations.length) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
   return integrations
 }
-export interface EntireCapture { configured: boolean; reason: string; providerSessionId?: string; agent?: string; integrations?: EntireIntegration[] }
+import type { EntireDiagnostic } from './entire-provider'
+
+export interface EntireCapture { configured: boolean; reason: string; providerSessionId?: string; agent?: string; integrations?: EntireIntegration[]; diagnostic?: EntireDiagnostic }

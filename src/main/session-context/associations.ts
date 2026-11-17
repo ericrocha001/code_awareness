@@ -32,5 +32,6 @@ export interface SessionAssociation {
 }
 export interface SessionFilter {
   state?: string; agent?: string; after?: string; before?: string
+  worktreeId?: string; generation?: string
   executionId?: string; artifactId?: string; commitSha?: string; pullRequest?: number
 }

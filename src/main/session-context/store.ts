@@ -35,7 +35,7 @@ export function readExecutionSessionAssociations(path: string, scope: Pick<Sessi
 }
 function associationQuery(filter: SessionFilter): { where: string[]; params: (string | number)[] } {
   const where: string[] = [], params: (string | number)[] = []
-  for (const key of ['executionId', 'commitSha', 'pullRequest'] as const) {
+  for (const key of ['executionId', 'commitSha', 'pullRequest', 'worktreeId', 'generation'] as const) {
     if (filter[key] !== undefined) { where.push(`json_extract(a.payload, '$.${key}')=?`); params.push(filter[key]!) }
   }
   if (filter.artifactId) { where.push("(json_extract(a.payload, '$.artifactId')=? OR json_extract(a.payload, '$.sourceArtifactId')=?)"); params.push(filter.artifactId, filter.artifactId) }
@@ -265,10 +265,33 @@ export class SessionStore {
     const where: string[] = [], params: (string | number)[] = []
     if (accountHash === undefined) where.push("(provider<>'codex' OR (importState='METADATA_ONLY' AND eventCount=0 AND payloadBytes=0 AND EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=sessions.id AND json_extract(access.payload,'$.origin')='CODEX_APP_SERVER' AND json_extract(access.payload,'$.archived')=1)))")
     if (accountHash !== undefined) { where.push("(provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=sessions.id AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
+    if (filter.worktreeId && filter.generation) {
+      const wtKey = this.registry.key({ kind: 'WORKTREE', id: `${filter.worktreeId}:${filter.generation}` })
+      where.push("(EXISTS (SELECT 1 FROM session_associations sa WHERE sa.sessionId=sessions.id AND json_extract(sa.payload,'$.worktreeId')=? AND json_extract(sa.payload,'$.generation')=?) OR EXISTS (SELECT 1 FROM registry_entities re JOIN registry_edges e ON (e.fromId=re.id OR e.toId=re.id) WHERE re.localSessionId=sessions.id AND e.state='OBSERVED' AND (e.fromId=? OR e.toId=?)))")
+      params.push(filter.worktreeId, filter.generation, wtKey, wtKey)
+    }
     for (const [key, column, op] of [['state', 'state', '='], ['agent', 'agent', '='], ['after', 'lastObserved', '>='], ['before', 'lastObserved', '<=']] as const) {
       if (filter[key]) { where.push(key === 'after' || key === 'before' ? `julianday(${column}) ${op} julianday(?)` : `${column} ${op} ?`); params.push(filter[key]!) }
     }
     return this.db.prepare(`SELECT * FROM sessions ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY lastObserved DESC, id LIMIT ? OFFSET ?`).all(...params, limit, offset) as SessionRow[]
+  }
+  worktreesForSession(sessionId: string): { worktreeId: string; generation: string }[] {
+    const seen = new Map<string, { worktreeId: string; generation: string }>()
+    for (const link of this.associations(sessionId, 12)) {
+      seen.set(`${link.worktreeId}:${link.generation}`, { worktreeId: link.worktreeId, generation: link.generation })
+    }
+    if (seen.size < 12) {
+      const entity = this.registry.sessionIdentity(sessionId)
+      if (entity) {
+        const key = this.registry.key(entity)
+        const rows = this.db.prepare(`SELECT w.externalId FROM registry_edges e JOIN registry_entities w ON (w.id=e.fromId OR w.id=e.toId) WHERE (e.fromId=? OR e.toId=?) AND e.state='OBSERVED' AND w.kind='WORKTREE' LIMIT 12`).all(key, key) as { externalId: string }[]
+        for (const row of rows) {
+          const [worktreeId, generation] = row.externalId.split(':')
+          if (worktreeId && generation && !seen.has(row.externalId)) seen.set(row.externalId, { worktreeId, generation })
+        }
+      }
+    }
+    return [...seen.values()].slice(0, 12)
   }
   recordAssociation(input: SessionAssociation, expectedCatalogRevision: number, assertCurrent: () => void = () => {}): { associationId: string; revision: number; replay: boolean } {
     this.assertRepository(input.repositoryId)

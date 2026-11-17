@@ -6,6 +6,25 @@ import { provenanceClass, type ProvenanceClass } from './provenance-evidence'
 
 export type EntityKind = 'COMMIT' | 'CHECKPOINT' | 'SESSION' | 'PR' | 'ARTIFACT' | 'PROOF' | 'WORKTREE' | 'EXECUTION'
 export interface RegistryEntity { kind: EntityKind; id: string }
+export interface SessionWitness {
+  kind: string; relation: string; revision: string; strength: ProvenanceClass; state: string
+}
+export interface WorktreeRef { worktreeId: string; generation: string }
+export interface NativeSessionFilter {
+  worktreeId?: string; generation?: string; agent?: string; after?: string; before?: string
+  artifactId?: string; executionId?: string; commitSha?: string; pullRequest?: number
+}
+export interface RegistrySessionRecord {
+  provider: string; providerSessionId: string; agent: string
+  origin: 'NATIVE_HOOK' | 'CHECKPOINT_REGISTRY'
+  aliasState: 'NOT_RECONCILED' | 'RECONCILED' | 'ALIAS_CONFLICT'
+  sessionId?: string
+  lastObserved?: string
+  worktrees: WorktreeRef[]
+  witness?: SessionWitness
+  evidence?: object
+  deepen: { tool: string; arguments: object }
+}
 export interface RegistryEdge {
   from: RegistryEntity; relation: string; to: RegistryEntity
   evidenceKind: string; evidenceRef: string; digest: string; freshness: string
@@ -243,6 +262,191 @@ export class CheckpointRegistry {
     const edge = JSON.parse(row.payload) as RegistryEdge
     if (this.key(edge.from) !== row.fromId || this.key(edge.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
     return edge
+  }
+
+  hasWorktreeHistory(worktreeId: string, generation: string): boolean {
+    const scope = worktreeId + ':' + generation
+    const key = this.key({ kind: 'WORKTREE', id: scope })
+    if (this.db.prepare('SELECT 1 FROM registry_entities WHERE id=? LIMIT 1').get(key)) return true
+    if (this.db.prepare('SELECT 1 FROM capture_health WHERE worktreeId=? AND generation=? LIMIT 1').get(worktreeId, generation)) return true
+    if (this.db.prepare("SELECT 1 FROM session_associations WHERE json_extract(payload,'$.worktreeId')=? AND json_extract(payload,'$.generation')=? LIMIT 1").get(worktreeId, generation)) return true
+    return !!this.db.prepare('SELECT 1 FROM registry_sources WHERE source IN (?,?,?) LIMIT 1').get('CAPTURE:' + scope, 'NATIVE_CAPTURE:' + scope, 'NATIVE_CAPTURE:antigravity:' + scope)
+  }
+
+  sessionWorktrees(provider: 'codex-native' | 'antigravity-native', id: string): WorktreeRef[] {
+    return this.worktreesAndObservedAt(`${provider}:${id}`).worktrees
+  }
+
+  private worktreesAndObservedAt(externalId: string): { worktrees: WorktreeRef[]; lastObserved?: string; agent?: string } {
+    const key = this.key({ kind: 'SESSION', id: externalId })
+    const worktrees = new Map<string, WorktreeRef>()
+    let eventObservedAt: string | undefined
+    let ingestionObservedAt: string | undefined
+    let agent: string | undefined
+    const noteTime = (cur: string | undefined, value?: string | null) =>
+      value && (!cur || Date.parse(value) > Date.parse(cur)) ? value : cur
+    const hookRows = this.db.prepare(`SELECT s.cursor, s.observedAt FROM registry_edges e JOIN registry_sources s ON e.source=s.source
+      WHERE e.toId=? AND e.state='OBSERVED' AND e.source LIKE 'NATIVE_HOOK:%' ORDER BY s.observedAt DESC, e.id LIMIT 64`).all(key) as { cursor: string | null; observedAt: string }[]
+    for (const row of hookRows) {
+      ingestionObservedAt = noteTime(ingestionObservedAt, row.observedAt)
+      try {
+        const event = parseNativeEnvelope(row.cursor ?? '')
+        if (event.repositoryId !== this.repositoryId) continue
+        eventObservedAt = noteTime(eventObservedAt, event.observedAt)
+        const id = event.worktreeId + ':' + event.generation
+        if (!worktrees.has(id) && worktrees.size < 12) worktrees.set(id, { worktreeId: event.worktreeId, generation: event.generation })
+        if (!agent) agent = event.source === 'ANTIGRAVITY_NATIVE_HOOK' ? 'antigravity' : 'codex'
+      } catch {}
+    }
+    const edgeRows = this.db.prepare(`SELECT w.externalId, MAX(e.observedAt) AS observedAt FROM registry_edges e
+      JOIN registry_entities w ON w.kind='WORKTREE' AND w.id IN (e.fromId, e.toId)
+      WHERE e.state='OBSERVED' AND (e.fromId=? OR e.toId=? OR EXISTS (
+        SELECT 1 FROM registry_edges r WHERE r.state='OBSERVED' AND (r.fromId=? OR r.toId=?)
+          AND ((r.fromId=e.fromId AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to')) OR (r.fromId=e.fromId AND r.toId=? AND json_extract(e.payload,'$.relation')='window-start'))
+      ))
+      GROUP BY w.externalId ORDER BY MAX(e.observedAt) DESC LIMIT 12`).all(key, key, key, key, key) as { externalId: string; observedAt: string }[]
+    for (const row of edgeRows) {
+      ingestionObservedAt = noteTime(ingestionObservedAt, row.observedAt)
+      const [worktreeId, generation] = row.externalId.split(':')
+      if (worktreeId && generation && !worktrees.has(row.externalId) && worktrees.size < 12) {
+        worktrees.set(row.externalId, { worktreeId, generation })
+      }
+    }
+    if (!eventObservedAt && !ingestionObservedAt) {
+      const latest = this.db.prepare("SELECT MAX(observedAt) AS observedAt FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED'").get(key, key) as { observedAt: string | null } | undefined
+      ingestionObservedAt = noteTime(ingestionObservedAt, latest?.observedAt)
+    }
+    const lastObserved = eventObservedAt ?? ingestionObservedAt
+    return { worktrees: [...worktrees.values()], lastObserved, agent }
+  }
+
+  private aliasStateFor(externalId: string, localSessionId: string | null): 'NOT_RECONCILED' | 'RECONCILED' | 'ALIAS_CONFLICT' {
+    if (!localSessionId) return 'NOT_RECONCILED'
+    const row = this.db.prepare('SELECT provider, providerSessionId, agent FROM sessions WHERE id=?').get(localSessionId) as { provider: string; providerSessionId: string; agent: string } | undefined
+    if (!row) return 'ALIAS_CONFLICT'
+    const sel = sessionSelector(externalId)
+    const expectedAgent = sel.agent ?? (sel.provider === 'antigravity-native' ? 'antigravity' : 'codex')
+    const sameIdentity = row.provider === sel.provider && row.providerSessionId === sel.id && row.agent === expectedAgent
+    const otherRefs = this.db.prepare("SELECT COUNT(*) AS n FROM registry_entities WHERE kind='SESSION' AND localSessionId=? AND externalId<>?").get(localSessionId, externalId) as { n: number }
+    return sameIdentity && otherRefs.n === 0 ? 'RECONCILED' : 'ALIAS_CONFLICT'
+  }
+
+  private nativeSessionRecord(externalId: string, witness?: SessionWitness, evidence?: object): RegistrySessionRecord {
+    const { provider, id, agent: parsedAgent } = sessionSelector(externalId)
+    const meta = this.worktreesAndObservedAt(externalId)
+    const agent = parsedAgent ?? meta.agent ?? (provider === 'antigravity-native' ? 'antigravity' : 'codex')
+    const entityRow = this.db.prepare('SELECT localSessionId FROM registry_entities WHERE id=?').get(this.key({ kind: 'SESSION', id: externalId })) as { localSessionId: string | null } | undefined
+    const localSessionId = entityRow?.localSessionId ?? null
+    const aliasState = this.aliasStateFor(externalId, localSessionId)
+    const isNative = provider === 'codex-native' || provider === 'antigravity-native'
+    const deepen = isNative
+      ? { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider, id } } }
+      : { tool: 'inspect_agent_session', arguments: { ...(localSessionId ? { sessionId: localSessionId } : { repositoryId: this.repositoryId }) } }
+    return {
+      provider, providerSessionId: id, agent,
+      origin: isNative ? 'NATIVE_HOOK' : 'CHECKPOINT_REGISTRY',
+      aliasState,
+      ...(localSessionId && aliasState === 'RECONCILED' ? { sessionId: localSessionId } : {}),
+      ...(meta.lastObserved ? { lastObserved: meta.lastObserved } : {}),
+      worktrees: meta.worktrees,
+      ...(witness ? { witness } : {}),
+      ...(evidence ? { evidence } : {}),
+      deepen
+    }
+  }
+
+  private witnessForPath(edgesById: Map<string, { evidenceKind: string; relation: string; sourceRevision: string; confidenceClass: ProvenanceClass; state: string }>, edgeIds: string[]): SessionWitness | undefined {
+    const pathEdges = edgeIds.map(id => edgesById.get(id)).filter((e): e is NonNullable<typeof e> => !!e)
+    if (!pathEdges.length) return undefined
+    const strengthOrder: ProvenanceClass[] = ['UNKNOWN', 'DERIVED', 'DECLARED', 'OBSERVED', 'VERIFIED_CAUSAL']
+    const stateOrder = ['UNKNOWN', 'STALE', 'DECLARED', 'OBSERVED', 'VERIFIED']
+    let strength: ProvenanceClass = 'VERIFIED_CAUSAL'
+    let state = 'VERIFIED'
+    for (const edge of pathEdges) {
+      if (strengthOrder.indexOf(edge.confidenceClass) < strengthOrder.indexOf(strength)) strength = edge.confidenceClass
+      const sIdx = stateOrder.indexOf(edge.state)
+      if (sIdx !== -1 && sIdx < stateOrder.indexOf(state)) state = edge.state
+    }
+    const primary = pathEdges.find(e => e.evidenceKind !== 'CONTINUUM_REVISION' && !['invoked', 'observed-in', 'scoped-to'].includes(e.relation))
+      ?? pathEdges.find(e => e.evidenceKind !== 'CONTINUUM_REVISION')
+      ?? pathEdges[0]
+    return { kind: primary.evidenceKind, relation: primary.relation, revision: primary.sourceRevision, strength, state }
+  }
+
+  private matchesSessionFilter(record: RegistrySessionRecord, filter: NativeSessionFilter): boolean {
+    if (filter.agent && record.agent !== filter.agent) return false
+    if (filter.worktreeId && filter.generation) {
+      if (!record.worktrees.some(w => w.worktreeId === filter.worktreeId && w.generation === filter.generation)) return false
+    }
+    if (filter.after) {
+      if (!record.lastObserved || Date.parse(record.lastObserved) < Date.parse(filter.after)) return false
+    }
+    if (filter.before) {
+      if (!record.lastObserved || Date.parse(record.lastObserved) > Date.parse(filter.before)) return false
+    }
+    return true
+  }
+
+  linkedSessions(selector: RegistryEntity, filter: NativeSessionFilter = {}, accountHash?: string) {
+    const graph = this.contextGraph(selector, accountHash, 4, false)
+    const edgesById = new Map(graph.edges.map(edge => [edge.id, edge]))
+    const pathByTarget = new Map(graph.paths.map(path => [path.target, path.edges]))
+    const dedup = new Map<string, RegistrySessionRecord>()
+    for (const node of graph.nodes) {
+      if (node.type !== 'SESSION' || !node.provider) continue
+      const externalId = sessionIdentity(node.provider, node.id, node.agent)
+      if (!this.visible({ kind: 'SESSION', id: externalId }, accountHash)) continue
+      const witness = this.witnessForPath(edgesById, pathByTarget.get(node.key) ?? [])
+      const record = this.nativeSessionRecord(externalId, witness)
+      if (!this.matchesSessionFilter(record, filter)) continue
+      const key = `${record.provider}\0${record.agent}\0${record.providerSessionId}`
+      if (!dedup.has(key)) dedup.set(key, record)
+    }
+    const rows = [...dedup.values()].sort((a, b) => (b.lastObserved ?? '').localeCompare(a.lastObserved ?? '') || a.providerSessionId.localeCompare(b.providerSessionId))
+    return { rows, bounded: graph.bounded, revision: digest(JSON.stringify([selector, rows.map(r => [r.provider, r.providerSessionId, r.agent, r.witness])])) }
+  }
+
+  queryNativeSessions(filter: NativeSessionFilter, accountHash?: string) {
+    const reasons = new Set<string>()
+    for (const source of this.coverageSources()) {
+      if (['NATIVE_HOOK', 'ENTIRE_REFS'].includes(source.source) && ['PARTIAL', 'UNAVAILABLE', 'UNSUPPORTED', 'NETWORK_NOT_AUTHORIZED'].includes(source.status)) {
+        reasons.add(source.source + '_' + source.status)
+      }
+    }
+    if (filter.commitSha || filter.pullRequest) {
+      const delivery = this.nativeDeliverySessions(filter.commitSha ? { kind: 'COMMIT', id: filter.commitSha } : { kind: 'PR', id: String(filter.pullRequest) }, accountHash)
+      const all = delivery.rows.map(row => {
+        const evidence = (row as { evidence?: { native?: { kind?: string; revision?: string; state?: string } } }).evidence
+        const witness: SessionWitness | undefined = evidence?.native?.revision ? {
+          kind: evidence.native.kind ?? 'NATIVE_GIT_CAUSAL', relation: 'committed', revision: evidence.native.revision, strength: 'VERIFIED_CAUSAL', state: 'VERIFIED'
+        } : undefined
+        return this.nativeSessionRecord(`${row.provider}:${row.providerSessionId}`, witness, evidence)
+      }).filter(record => this.matchesSessionFilter(record, filter))
+      const combinedReasons = [...new Set([...delivery.reasons])].sort()
+      const revision = digest(JSON.stringify([delivery.revision, filter.worktreeId ?? null, filter.generation ?? null, filter.agent ?? null, filter.after ?? null, filter.before ?? null]))
+      return { rows: all, reasons: combinedReasons, revision, coverage: !all.length || combinedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: true }
+    }
+    if (filter.artifactId || filter.executionId) {
+      const selector: RegistryEntity = filter.artifactId ? { kind: 'ARTIFACT', id: filter.artifactId } : { kind: 'EXECUTION', id: filter.executionId! }
+      const linked = this.linkedSessions(selector, filter, accountHash)
+      const nativeOnly = linked.rows.filter(r => r.origin === 'NATIVE_HOOK')
+      if (linked.bounded) reasons.add('GRAPH_LIMIT_REACHED')
+      const sortedReasons = [...reasons].sort()
+      const revision = digest(JSON.stringify([linked.revision, sortedReasons]))
+      return { rows: nativeOnly, reasons: sortedReasons, revision, coverage: !nativeOnly.length || sortedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
+    }
+    const entities = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND (externalId LIKE 'codex-native:%' OR externalId LIKE 'antigravity-native:%') ORDER BY externalId").all() as { externalId: string }[]
+    const dedup = new Map<string, RegistrySessionRecord>()
+    for (const row of entities) {
+      if (!this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)) continue
+      const record = this.nativeSessionRecord(row.externalId)
+      if (!this.matchesSessionFilter(record, filter)) continue
+      const key = `${record.provider}\0${record.agent}\0${record.providerSessionId}`
+      if (!dedup.has(key)) dedup.set(key, record)
+    }
+    const all = [...dedup.values()].sort((a, b) => (b.lastObserved ?? '').localeCompare(a.lastObserved ?? '') || a.providerSessionId.localeCompare(b.providerSessionId))
+    const revision = digest(JSON.stringify([this.source('NATIVE_HOOK')?.revision ?? 'empty', all.map(r => [r.provider, r.providerSessionId, r.aliasState, r.lastObserved, r.worktrees])]))
+    return { rows: all, reasons: [...reasons].sort(), revision, coverage: reasons.size ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
   }
 
   private nativeSession(externalId: string) {

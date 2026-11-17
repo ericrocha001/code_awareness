@@ -18,10 +18,35 @@ import { projectLiveSessions, projectLiveUsage, type LiveSessionQuery, type Live
 import type { LiveSessionTarget } from './target'
 
 interface ProviderConfig { enabled: true; repositoryId: string; executable: string; sha256: string; version: string }
+export interface EntireDiagnostic {
+  code: string
+  stage: string
+  reason: string
+  action: string
+}
 const verifiedLiveExecutables = new Map<string, string>()
+const verifiedExecutableHashes = new Map<string, string>()
 async function executableIdentity(executable: string): Promise<string> {
   const stat = await lstat(executable, { bigint: true })
   return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
+}
+function entireError(code: string, stage: string, reason: string, action: string, extra?: Record<string, unknown>): Error {
+  const diagnostic: EntireDiagnostic = { code, stage, reason, action }
+  return Object.assign(new Error(code), { diagnostic, ...extra })
+}
+function extractDiagnostic(error: unknown, fallbackPhase: string): EntireDiagnostic | undefined {
+  if (error && typeof error === 'object' && 'diagnostic' in error && error.diagnostic && typeof error.diagnostic === 'object') {
+    return error.diagnostic as EntireDiagnostic
+  }
+  const code = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : undefined
+  if (!code) return undefined
+  if (code === 'PROVIDER_TIMEOUT') {
+    const stage = error && typeof error === 'object' && 'phase' in error && typeof error.phase === 'string' ? error.phase : fallbackPhase
+    return { code, stage, reason: 'PHASE_TIMEOUT', action: 'RETRY_OR_CHECK_HOST_IO' }
+  }
+  if (code === 'PROVIDER_OUTPUT_LIMIT') return { code, stage: fallbackPhase, reason: 'CLI_OUTPUT_LIMIT', action: 'NARROW_QUERY_SCOPE' }
+  if (code === 'WORKTREE_STALE' || code === 'PROJECT_CONTEXT_CHANGED') return { code, stage: 'target-validation', reason: 'WORKTREE_ACCESS_REVOKED', action: 'REVALIDATE_WORKTREE' }
+  return undefined
 }
 interface ProviderSession { session_id: string; agent: string; status: string; worktree_path: string; started_at?: string; ended_at?: string }
 export interface CommandOutput { code: number; text: string; limited: boolean; timedOut?: boolean; limitReason?: 'STDOUT_LIMIT' | 'STDERR_LIMIT' | 'CONSUMER_LIMIT' }
@@ -50,10 +75,27 @@ export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume
   child.once('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); reject(new Error('PROVIDER_UNAVAILABLE')) })
   child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); if (consumerError) reject(consumerError); else resolve({ code: code ?? -1, text, limited, ...(limitReason ? { limitReason } : {}), ...(timedOut ? { timedOut } : {}) }) })
 })
-async function smallJson(path: string): Promise<Record<string, unknown>> {
-  const stat = await lstat(path)
-  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) throw new Error('PROVIDER_CONFIG_UNSAFE')
-  return JSON.parse(await readFile(path, 'utf8'))
+async function smallJson(path: string, stage: 'provider-config' | 'local-config'): Promise<Record<string, unknown>> {
+  let stat
+  try { stat = await lstat(path) }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw stage === 'provider-config'
+        ? entireError('PROVIDER_UNAVAILABLE', stage, 'PROVIDER_CONFIG_MISSING', 'CONFIGURE_PROVIDER')
+        : entireError('PROVIDER_CONFIG_UNSAFE', stage, 'LOCAL_CONFIG_MISSING', 'CREATE_LOCAL_SETTINGS')
+    }
+    throw entireError(stage === 'provider-config' ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_CONFIG_UNSAFE', stage, stage === 'provider-config' ? 'PROVIDER_CONFIG_UNSAFE_FILE' : 'LOCAL_CONFIG_UNSAFE', stage === 'provider-config' ? 'REPAIR_PROVIDER_CONFIG' : 'REPAIR_LOCAL_CONFIG')
+  }
+  if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 16 * 1024) {
+    throw entireError('PROVIDER_CONFIG_UNSAFE', stage, stage === 'provider-config' ? 'PROVIDER_CONFIG_UNSAFE_FILE' : 'LOCAL_CONFIG_UNSAFE', stage === 'provider-config' ? 'REPAIR_PROVIDER_CONFIG' : 'REPAIR_LOCAL_CONFIG')
+  }
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SyntaxError('Expected object')
+    return parsed
+  } catch {
+    throw entireError('PROVIDER_CONFIG_UNSAFE', stage, stage === 'provider-config' ? 'PROVIDER_CONFIG_INVALID_JSON' : 'LOCAL_CONFIG_INVALID_JSON', stage === 'provider-config' ? 'REPAIR_PROVIDER_CONFIG' : 'REPAIR_LOCAL_CONFIG')
+  }
 }
 function validSession(value: unknown): value is ProviderSession {
   if (!value || typeof value !== 'object') return false
@@ -70,7 +112,7 @@ export class EntireProvider {
     private readonly observePhase: (phase: string) => void = () => {},
     private readonly targetIdentity?: { worktreeId: string; generation: string }) {}
   private mark(phase: string): void { this.phase = phase; this.observePhase(phase) }
-  private assertDeadline(): void { if (Date.now() >= this.deadline) throw Object.assign(new Error('PROVIDER_TIMEOUT'), { phase: this.phase }) }
+  private assertDeadline(): void { if (Date.now() >= this.deadline) throw entireError('PROVIDER_TIMEOUT', this.phase, 'PHASE_TIMEOUT', 'RETRY_OR_CHECK_HOST_IO', { phase: this.phase }) }
   private assertWithinDeadline(): void { this.assertActive(); this.assertDeadline() }
   private async validate(): Promise<void> {
     this.mark('target-validation')
@@ -84,7 +126,7 @@ export class EntireProvider {
     const remaining = this.deadline - Date.now()
     const output = await this.run(exe, args, cwd, limit, consume, remaining)
     this.assertWithinDeadline()
-    if (output.timedOut) throw new Error('PROVIDER_TIMEOUT')
+    if (output.timedOut) throw entireError('PROVIDER_TIMEOUT', this.phase, 'PHASE_TIMEOUT', 'RETRY_OR_CHECK_HOST_IO', { phase: this.phase })
     return output
   }
   refresh(sessionId?: string): Promise<object> {
@@ -96,48 +138,82 @@ export class EntireProvider {
     return task
   }
   private async preflight(live = false, reuseExecutable = false): Promise<ProviderConfig> {
-    let config: ProviderConfig
-    try { config = await smallJson(join(dirname(this.store.path), 'session-context.provider.json')) as unknown as ProviderConfig }
-    catch { throw new Error('PROVIDER_UNAVAILABLE') }
-    if (config.enabled !== true || config.repositoryId !== this.store.repositoryId) throw new Error('CAPTURE_NOT_ENABLED')
-    if (!isAbsolute(config.executable) || !/^entire(?:\.exe)?$/i.test(basename(config.executable)) || !/^[a-f0-9]{64}$/.test(config.sha256) || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(config.version)) throw new Error('PROVIDER_CONFIG_UNSAFE')
-    const executable = await realpath(config.executable)
-    const executableStat = await lstat(executable, { bigint: true })
-    if (!executableStat.isFile() || executableStat.size > 256 * 1024 * 1024) throw new Error('PROVIDER_CONFIG_UNSAFE')
+    this.mark('provider-config')
+    const config = await smallJson(join(dirname(this.store.path), 'session-context.provider.json'), 'provider-config') as unknown as ProviderConfig
+    if (config.enabled !== true) throw entireError('CAPTURE_NOT_ENABLED', 'provider-config', 'CAPTURE_DISABLED', 'ENABLE_CAPTURE')
+    if (config.repositoryId !== this.store.repositoryId) throw entireError('CAPTURE_NOT_ENABLED', 'provider-config', 'REPOSITORY_MISMATCH', 'REPAIR_PROVIDER_CONFIG')
+    this.mark('executable')
+    if (!isAbsolute(config.executable) || !/^entire(?:\.exe)?$/i.test(basename(config.executable)) || !/^[a-f0-9]{64}$/.test(config.sha256) || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(config.version)) {
+      throw entireError('PROVIDER_CONFIG_UNSAFE', 'executable', 'EXECUTABLE_CONFIG_INVALID', 'REPAIR_PROVIDER_CONFIG')
+    }
+    let executable: string, executableStat: Awaited<ReturnType<typeof lstat>>
+    try {
+      executable = await realpath(config.executable)
+      executableStat = await lstat(executable, { bigint: true })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw entireError('PROVIDER_CONFIG_UNSAFE', 'executable', 'EXECUTABLE_MISSING', 'INSTALL_OR_PIN_ENTIRE')
+      throw entireError('PROVIDER_CONFIG_UNSAFE', 'executable', 'EXECUTABLE_UNSAFE_FILE', 'REPAIR_PROVIDER_CONFIG')
+    }
+    if (!executableStat.isFile() || executableStat.isSymbolicLink() || executableStat.nlink !== 1n || executableStat.size > BigInt(256 * 1024 * 1024)) {
+      throw entireError('PROVIDER_CONFIG_UNSAFE', 'executable', 'EXECUTABLE_UNSAFE_FILE', 'REPAIR_PROVIDER_CONFIG')
+    }
     const signature = [executableStat.dev, executableStat.ino, executableStat.size, executableStat.mtimeNs, executableStat.ctimeNs, config.sha256, config.version].join(':')
     const capabilityKey = executable + (live ? ':live' : ':references')
-    const verified = (live || reuseExecutable) && verifiedLiveExecutables.get(capabilityKey) === signature
-    if (!verified) {
+    const canReuse = live || reuseExecutable
+    const verified = canReuse && verifiedLiveExecutables.get(capabilityKey) === signature
+    const hashVerified = verified || (canReuse && verifiedExecutableHashes.get(executable) === signature)
+    if (!verified) verifiedLiveExecutables.delete(capabilityKey)
+    if (!hashVerified) {
+      verifiedExecutableHashes.delete(executable)
       this.mark('executable-hash')
       const hash = createHash('sha256')
-      for await (const chunk of createReadStream(executable)) { this.assertDeadline(); hash.update(chunk) }
+      for await (const chunk of createReadStream(executable, { highWaterMark: 1024 * 1024 })) { this.assertDeadline(); hash.update(chunk) }
       this.assertWithinDeadline()
-      if (hash.digest('hex') !== config.sha256) throw new Error('PROVIDER_VERSION_MISMATCH')
+      if (hash.digest('hex') !== config.sha256) throw entireError('PROVIDER_VERSION_MISMATCH', 'executable-hash', 'EXECUTABLE_HASH_MISMATCH', 'REVERIFY_EXECUTABLE_PIN')
     }
-    const localPath = join(this.root, '.entire', 'settings.local.json')
-    let local: Record<string, unknown>
-    try {
-      const directory = await lstat(join(this.root, '.entire'))
-      if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error()
-      local = await smallJson(localPath)
-    } catch { throw new Error('PROVIDER_CONFIG_UNSAFE') }
-    if ((local.strategy_options as Record<string, unknown> | undefined)?.push_sessions !== false || local.enabled === false) throw new Error('PROVIDER_CONFIG_UNSAFE')
-    if (live && local.telemetry !== false) throw new Error('PROVIDER_CONFIG_UNSAFE')
+    this.mark('local-config')
+    let directory
+    try { directory = await lstat(join(this.root, '.entire')) }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw entireError('PROVIDER_CONFIG_UNSAFE', 'local-config', 'LOCAL_DIR_MISSING', 'INITIALIZE_LOCAL_ENTIRE')
+      throw entireError('PROVIDER_CONFIG_UNSAFE', 'local-config', 'LOCAL_DIR_UNSAFE', 'REPAIR_LOCAL_CONFIG')
+    }
+    if (!directory.isDirectory() || directory.isSymbolicLink()) throw entireError('PROVIDER_CONFIG_UNSAFE', 'local-config', 'LOCAL_DIR_UNSAFE', 'REPAIR_LOCAL_CONFIG')
+    const local = await smallJson(join(this.root, '.entire', 'settings.local.json'), 'local-config')
+    this.mark('privacy-policy')
+    if (local.enabled === false) throw entireError('PROVIDER_CONFIG_UNSAFE', 'privacy-policy', 'LOCAL_CAPTURE_DISABLED', 'ENABLE_LOCAL_ENTIRE')
+    if ((local.strategy_options as Record<string, unknown> | undefined)?.push_sessions !== false) throw entireError('PROVIDER_CONFIG_UNSAFE', 'privacy-policy', 'PUSH_SESSIONS_ENABLED', 'DISABLE_PUSH_SESSIONS')
+    if (live && local.telemetry !== false) throw entireError('PROVIDER_CONFIG_UNSAFE', 'privacy-policy', 'TELEMETRY_ENABLED', 'DISABLE_TELEMETRY')
+    this.mark('git-tracking')
     const tracked = await this.command('git', ['-c', 'core.fsmonitor=false', 'ls-files', '--error-unmatch', '--', '.entire/settings.local.json'], this.root, 4096)
-    if (tracked.code !== 1 || tracked.limited) throw new Error('PROVIDER_CONFIG_UNSAFE')
+    if (tracked.code === 0) throw entireError('PROVIDER_CONFIG_UNSAFE', 'git-tracking', 'LOCAL_CONFIG_TRACKED_IN_GIT', 'UNTRACK_LOCAL_SETTINGS')
+    if (tracked.code !== 1 || tracked.limited) throw entireError('PROVIDER_CONFIG_UNSAFE', 'git-tracking', 'GIT_TRACKING_CHECK_FAILED', 'CHECK_GIT_WORKTREE')
     if (!verified) {
-      const version = await this.command(executable, ['version'], this.root, 4096)
-      if (version.code !== 0 || version.limited || !version.text.includes(config.version)) throw new Error('PROVIDER_VERSION_MISMATCH')
+      if (!hashVerified) {
+        const version = await this.command(executable, ['version'], this.root, 4096)
+        if (version.code !== 0 || version.limited) throw entireError('PROVIDER_VERSION_MISMATCH', 'version', 'VERSION_COMMAND_FAILED', 'CHECK_ENTIRE_EXECUTABLE')
+        if (!version.text.includes(config.version)) throw entireError('PROVIDER_VERSION_MISMATCH', 'version', 'VERSION_MISMATCH', 'REVERIFY_EXECUTABLE_PIN')
+      }
       const checks = live ? [[['session', 'list', '--help'], ['--json']], [['session', 'info', '--help'], ['--json']], [['session', 'tokens', '--help'], ['--json']]] : [[['session', 'list', '--help'], ['--json']], [['session', 'info', '--help'], ['--json', '--transcript']]]
       for (const [args, flags] of checks) {
         const help = await this.command(executable, [...args], this.root, 32 * 1024)
-        if (help.code !== 0 || help.limited || !flags.every(flag => help.text.includes(flag))) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+        if (help.code !== 0 || help.limited || !flags.every(flag => help.text.includes(flag))) {
+          throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'cli-schema', 'CLI_CAPABILITY_UNSUPPORTED', 'UPDATE_COMPATIBLE_ENTIRE')
+        }
       }
-      if (live || reuseExecutable) {
-        if (signature !== [await executableIdentity(executable), config.sha256, config.version].join(':')) throw new Error('PROVIDER_VERSION_MISMATCH')
+      if (canReuse) {
+        if (signature !== [await executableIdentity(executable), config.sha256, config.version].join(':')) {
+          throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
+        }
+        if (verifiedExecutableHashes.size >= 16) verifiedExecutableHashes.clear()
+        verifiedExecutableHashes.set(executable, signature)
         if (verifiedLiveExecutables.size >= 16) verifiedLiveExecutables.clear()
         verifiedLiveExecutables.set(capabilityKey, signature)
       }
+    } else if (signature !== [await executableIdentity(executable), config.sha256, config.version].join(':')) {
+      verifiedLiveExecutables.delete(capabilityKey)
+      verifiedExecutableHashes.delete(executable)
+      throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
     }
     this.assertWithinDeadline()
     return { ...config, executable }
@@ -147,14 +223,14 @@ export class EntireProvider {
     await this.validate()
     const config = await this.preflight(true)
     const identity = await executableIdentity(config.executable)
-    if (!supportsEntireMetadata(config.version)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+    if (!supportsEntireMetadata(config.version)) throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'version', 'UNSUPPORTED_ENTIRE_VERSION', 'UPDATE_COMPATIBLE_ENTIRE')
     const json = async (args: string[]) => {
-      if (await executableIdentity(config.executable) !== identity) throw new Error('PROVIDER_VERSION_MISMATCH')
+      if (await executableIdentity(config.executable) !== identity) throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
       const output = await this.command(config.executable, args, this.root, 1024 * 1024)
-      if (await executableIdentity(config.executable) !== identity) throw new Error('PROVIDER_VERSION_MISMATCH')
-      if (output.limited) throw new Error('PROVIDER_OUTPUT_LIMIT')
-      if (output.code !== 0) throw new Error('PROVIDER_UNAVAILABLE')
-      try { return JSON.parse(output.text) as unknown } catch { throw new Error('PROVIDER_SCHEMA_UNSUPPORTED') }
+      if (await executableIdentity(config.executable) !== identity) throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
+      if (output.limited) throw entireError('PROVIDER_OUTPUT_LIMIT', 'cli-execution', 'CLI_OUTPUT_LIMIT', 'NARROW_QUERY_SCOPE')
+      if (output.code !== 0) throw entireError('PROVIDER_UNAVAILABLE', 'cli-execution', 'CLI_EXECUTION_FAILED', 'CHECK_ENTIRE_CLI_STATE')
+      try { return JSON.parse(output.text) as unknown } catch { throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'cli-execution', 'CLI_OUTPUT_INVALID_JSON', 'CHECK_ENTIRE_CLI_STATE') }
     }
     let result: object
     if (name === 'discover_entire_sessions') {
@@ -168,7 +244,7 @@ export class EntireProvider {
     }
     await this.validate()
     const finalConfig = await this.preflight(true)
-    if (finalConfig.executable !== config.executable || finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version) throw new Error('PROVIDER_VERSION_MISMATCH')
+    if (finalConfig.executable !== config.executable || finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version) throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
     return result
   }
   async inspectCapture(): Promise<EntireCapture> {
@@ -177,12 +253,12 @@ export class EntireProvider {
     try {
       await this.validate()
       const config = await this.preflight(true)
-      if (config.version !== '0.12.2') throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+      if (config.version !== '0.12.2') throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'version', 'UNSUPPORTED_ENTIRE_VERSION', 'UPDATE_COMPATIBLE_ENTIRE')
       const agents = await this.command(config.executable, ['agent', 'list'], this.root, 32768)
-      if (agents.code !== 0 || agents.limited) throw new Error('INTEGRATION_UNAVAILABLE')
+      if (agents.code !== 0 || agents.limited) throw entireError('INTEGRATION_UNAVAILABLE', 'cli-execution', 'AGENT_LIST_FAILED', 'CHECK_ENTIRE_CLI_STATE')
       integrations = parseEntireAgentList(agents.text)
       const help = await this.command(config.executable, ['session', 'current', '--help'], this.root, 16384)
-      if (help.code !== 0 || help.limited || !help.text.includes('--json')) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+      if (help.code !== 0 || help.limited || !help.text.includes('--json')) throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'cli-schema', 'CLI_CAPABILITY_UNSUPPORTED', 'UPDATE_COMPATIBLE_ENTIRE')
       const current = await this.command(config.executable, ['session', 'current', '--json'], this.root, 32768)
       if (current.code !== 0 || current.limited) return { configured: true, reason: 'SESSION_UNOBSERVED', integrations }
       let envelope
@@ -205,7 +281,8 @@ export class EntireProvider {
     } catch (error) {
       const reason = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'PROVIDER_UNAVAILABLE'
       if (['WORKTREE_STALE', 'PROJECT_CONTEXT_CHANGED', 'SESSION_CONTEXT_TIMEOUT'].includes(reason)) throw error
-      return { configured: false, reason, integrations }
+      const diagnostic = extractDiagnostic(error, this.phase)
+      return { configured: false, reason, integrations, ...(diagnostic ? { diagnostic } : {}) }
     }
   }
   private async perform(sessionId?: string): Promise<object> {
@@ -219,7 +296,7 @@ export class EntireProvider {
         if (known?.provider && known.provider !== 'entire') throw new Error('TRANSCRIPT_PROVIDER_UNAVAILABLE')
       this.mark('preflight')
       const config = await this.preflight(false, true)
-      if (!supportsEntireMetadata(config.version)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+      if (!supportsEntireMetadata(config.version)) throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'version', 'UNSUPPORTED_ENTIRE_VERSION', 'UPDATE_COMPATIBLE_ENTIRE')
       if (!known) return await this.discoverMetadata(store, config)
       const args = known ? ['session', 'info', known.providerSessionId, '--json'] : ['session', 'list', '--json']
       const output = await this.command(config.executable, args, this.root, 1024 * 1024)
@@ -228,11 +305,13 @@ export class EntireProvider {
         if (known && await checkpointTranscriptSource(store, known, (exe, args, cwd, limit, consume) => this.command(exe, args, cwd, limit, consume), this.root, () => this.assertWithinDeadline())) {
           return await this.indexReferences(store, known, { providerSessionId: known.providerSessionId, providerVersion: config.version, agent: known.agent, state: known.state, coverage: known.coverage, sourceDigest: known.sourceDigest, sourceBytes: known.sourceBytes }, config, await realpath(this.root))
         }
-        throw new Error(output.limited ? 'IMPORT_LIMIT_REACHED' : 'PROVIDER_UNAVAILABLE')
+        throw output.limited
+          ? entireError('IMPORT_LIMIT_REACHED', 'cli-execution', 'CLI_OUTPUT_LIMIT', 'NARROW_QUERY_SCOPE')
+          : entireError('PROVIDER_UNAVAILABLE', 'cli-execution', 'CLI_EXECUTION_FAILED', 'CHECK_ENTIRE_CLI_STATE')
       }
       let values: unknown[]
       try { const parsed = JSON.parse(output.text); values = known ? [parsed] : Array.isArray(parsed) ? parsed : (() => { throw new Error() })() }
-      catch { throw new Error('PROVIDER_SCHEMA_UNSUPPORTED') }
+      catch { throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'cli-execution', 'CLI_OUTPUT_INVALID_JSON', 'CHECK_ENTIRE_CLI_STATE') }
       let imported = 0, skipped = 0
       const discoveryReasons: CoverageReasons = {}
       const skip = (reason: 'INVALID_SESSION_METADATA' | 'SOURCE_PATH_UNAVAILABLE' | 'FOREIGN_SOURCE') => { skipped++; discoveryReasons[reason] = (discoveryReasons[reason] ?? 0) + 1 }
@@ -272,7 +351,8 @@ export class EntireProvider {
       const coverageReasons: CoverageReasons = message === 'SOURCE_IDENTITY_CONFLICT' || message === 'SOURCE_IDENTITY_UNAVAILABLE' ? { [message]: 1 }
         : message === 'STREAM_UNAVAILABLE' || (this.phase === 'transcript' && message === 'PROVIDER_UNAVAILABLE') ? { STREAM_UNAVAILABLE: 1 } : {}
       const indexFailure = ['SOURCE_READER_NO_PROGRESS', 'REVISION_CONFLICT'].includes(message)
-      return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) || indexFailure ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
+      const diagnostic = extractDiagnostic(error, this.phase)
+      return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) || indexFailure ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), ...(diagnostic ? { stage: diagnostic.stage, reason: diagnostic.reason, action: diagnostic.action } : {}), lastObserved: new Date().toISOString(), imported: 0 }
     }
   }
   private async discoverMetadata(store: SessionStore, config: ProviderConfig): Promise<object> {

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -8,7 +9,11 @@ import { digest } from './privacy'
 import { EntireProvider, runReadOnly, type CommandRunner } from './entire-provider'
 
 const cleanup: (() => void)[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
+afterEach(() => {
+  vi.restoreAllMocks()
+  try { for (const close of cleanup.reverse()) close() }
+  finally { cleanup.length = 0 }
+})
 const line = (value: unknown) => JSON.stringify(value) + '\n'
 function fixture(root: string) {
   return [
@@ -22,7 +27,10 @@ function fixture(root: string) {
 }
 async function setup() {
   const base = mkdtempSync(join(tmpdir(), 'entire-provider-')), root = join(base, 'repo')
-  mkdirSync(root); cleanup.push(() => rmSync(base, { recursive: true, force: true }))
+  mkdirSync(root); cleanup.push(() => {
+    if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })", base], { windowsHide: true })
+    else rmSync(base, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+  })
   const store = new SessionStore(sessionStorePath(base, 'A'), 'A'); cleanup.push(() => store.close())
   const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire')
   writeFileSync(executable, 'pinned test executable')
@@ -116,4 +124,54 @@ describe('Entire reference provider', () => {
     expect(output).toMatchObject({ timedOut: true, limited: true })
     expect(() => process.kill(Number(output.text.trim()), 0)).toThrow()
   })
+  it('U1 emits discriminative safe diagnostics per preflight stage without exposing private paths or stdout', async () => {
+    const f = await setup()
+    const validConfig = readFileSync(f.configPath, 'utf8')
+    const validLocal = readFileSync(f.localPath, 'utf8')
+    const reset = () => { writeFileSync(f.configPath, validConfig); writeFileSync(f.localPath, validLocal) }
+
+    writeFileSync(f.configPath, '{bad')
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'provider-config', reason: 'PROVIDER_CONFIG_INVALID_JSON', action: 'REPAIR_PROVIDER_CONFIG' })
+    reset()
+    writeFileSync(f.configPath, JSON.stringify({ ...JSON.parse(validConfig), executable: join(f.base, 'missing-entire.exe') }))
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'executable', reason: 'EXECUTABLE_CONFIG_INVALID', action: 'REPAIR_PROVIDER_CONFIG' })
+    reset()
+    writeFileSync(f.configPath, JSON.stringify({ ...JSON.parse(validConfig), executable: join(f.base, 'missing-dir', process.platform === 'win32' ? 'entire.exe' : 'entire') }))
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'executable', reason: 'EXECUTABLE_MISSING', action: 'INSTALL_OR_PIN_ENTIRE' })
+    reset()
+    rmSync(f.localPath)
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'local-config', reason: 'LOCAL_CONFIG_MISSING', action: 'CREATE_LOCAL_SETTINGS' })
+    reset()
+    writeFileSync(f.localPath, JSON.stringify({ enabled: false, strategy_options: { push_sessions: false } }))
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'privacy-policy', reason: 'LOCAL_CAPTURE_DISABLED', action: 'ENABLE_LOCAL_ENTIRE' })
+    reset()
+    writeFileSync(f.localPath, JSON.stringify({ strategy_options: { push_sessions: true } }))
+    expect(await f.provider.refresh()).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'privacy-policy', reason: 'PUSH_SESSIONS_ENABLED', action: 'DISABLE_PUSH_SESSIONS' })
+    reset()
+    writeFileSync(f.localPath, JSON.stringify({ strategy_options: { push_sessions: false }, telemetry: true }))
+    await expect(f.provider.queryLive('discover_entire_sessions', { limit: 20 }, [])).rejects.toMatchObject({ message: 'PROVIDER_CONFIG_UNSAFE', diagnostic: { stage: 'privacy-policy', reason: 'TELEMETRY_ENABLED', action: 'DISABLE_TELEMETRY' } })
+    reset()
+    expect(await runReadOnly('git', ['add', '-f', '.entire/settings.local.json'], f.root, 4096)).toMatchObject({ code: 0 })
+    const trackedResult = await f.provider.refresh()
+    expect(trackedResult).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'git-tracking', reason: 'LOCAL_CONFIG_TRACKED_IN_GIT', action: 'UNTRACK_LOCAL_SETTINGS' })
+    expect(JSON.stringify(trackedResult)).not.toContain(f.root)
+    expect(JSON.stringify(trackedResult)).not.toContain(f.base)
+  }, 20000)
+  it('U1 reuses verified executable hash safely on warm calls and still enforces live settings and binary drift', async () => {
+    const f = await setup()
+    writeFileSync(f.localPath, JSON.stringify({ enabled: true, telemetry: false, strategy_options: { push_sessions: false } }))
+    const target = { root: f.root, worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64), fingerprint: 'fp' }
+    await f.provider.queryLive('discover_entire_sessions', { limit: 20 }, [target])
+    const callsAfterCold = f.calls.length
+    await f.provider.queryLive('discover_entire_sessions', { limit: 20 }, [target])
+    const warmCalls = f.calls.slice(callsAfterCold)
+    expect(warmCalls.some(args => args[0] === 'version' || args.includes('--help'))).toBe(false)
+    expect(warmCalls.some(args => args.includes('ls-files'))).toBe(true)
+    writeFileSync(f.localPath, JSON.stringify({ enabled: true, telemetry: true, strategy_options: { push_sessions: false } }))
+    await expect(f.provider.queryLive('discover_entire_sessions', { limit: 20 }, [target])).rejects.toMatchObject({ message: 'PROVIDER_CONFIG_UNSAFE', diagnostic: { reason: 'TELEMETRY_ENABLED' } })
+    writeFileSync(f.localPath, JSON.stringify({ enabled: true, telemetry: false, strategy_options: { push_sessions: false } }))
+    const config = JSON.parse(readFileSync(f.configPath, 'utf8'))
+    writeFileSync(config.executable, 'tampered executable bytes')
+    await expect(f.provider.queryLive('discover_entire_sessions', { limit: 20 }, [target])).rejects.toMatchObject({ message: 'PROVIDER_VERSION_MISMATCH', diagnostic: { stage: 'executable-hash', reason: 'EXECUTABLE_HASH_MISMATCH' } })
+  }, 20000)
 })
