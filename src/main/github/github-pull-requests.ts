@@ -11,6 +11,7 @@ export interface PullRequestDependencies {
   receiptDirectory: string
   approve(request: PullRequestApproval): Promise<boolean>
   approveMutation?(request: PullRequestMutationApproval): Promise<boolean>
+  onDeliveryObserved?(repositoryId: string): void
 }
 
 export interface PullRequestExecutionContext {
@@ -92,6 +93,8 @@ export class GitHubPullRequests {
       const reconciled = await this.reconcile(context, input)
       if (!reconciled || reconciled.number !== verified.number) throw new PullRequestError('PR_IDENTITY_CONFLICT')
       if (anchor) await this.completeDelivery(operationPath, fingerprint, reconciled, execution)
+      try { this.dependencies.onDeliveryObserved?.(context.repositoryId) }
+      catch { console.warn('[GitHub] DELIVERY_PROJECTION_REQUEST_FAILED') }
       return { status: 'CREATED' as const, operationId: input.operationId, replayed: false, pullRequest: reconciled }
     } catch (error) {
       if (error instanceof PullRequestError && ['AUTHORIZATION_EXPIRED', 'PROJECT_CHANGED'].includes(error.code)) throw error

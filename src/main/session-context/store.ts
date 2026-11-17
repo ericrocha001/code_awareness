@@ -115,6 +115,7 @@ export class SessionStore {
         const entityColumns = (this.db.prepare('PRAGMA table_info(registry_entities)').all() as { name: string }[]).map(column => column.name)
         if (!entityColumns.includes('artifactLabel')) this.db.exec('ALTER TABLE registry_entities ADD COLUMN artifactLabel TEXT')
         if (!entityColumns.includes('artifactDescription')) this.db.exec('ALTER TABLE registry_entities ADD COLUMN artifactDescription TEXT')
+        this.db.exec("CREATE INDEX IF NOT EXISTS registry_pending_artifact_label ON registry_entities(externalId) WHERE kind='ARTIFACT' AND artifactLabel IS NULL")
         for (const [table, required] of [['registry_edges', ['id', 'source', 'sourceRevision', 'fromId', 'toId', 'payload', 'integrity', 'observedAt', 'state']], ['checkpoint_registry', ['checkpointId', 'refRevision', 'state', 'digest', 'sessionIds', 'integrity', 'observedAt']]] as const) {
           const names = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
