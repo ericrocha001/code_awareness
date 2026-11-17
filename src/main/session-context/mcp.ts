@@ -250,10 +250,16 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       throw new Error('SESSION_UNAVAILABLE')
     }
   }
-  const appObservations = app && hookObserved ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
-  const locators = [...new Set(appObservations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []) ?? [])]
-  if (appObservations && (appObservations.bounded || appObservations.events.some(event =>
-    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) throw new Error('ORIGIN_UNVERIFIED')
+  const observations = hookObserved ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
+  const knownWorktrees = store.registry.sessionWorktrees(nativeSession.provider, nativeSession.id)
+  if ((observations && (observations.bounded || observations.events.length === 0 || observations.events.some(event =>
+    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) ||
+    (knownWorktrees.length > 0 && !knownWorktrees.some(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))) {
+    throw new Error('ORIGIN_UNVERIFIED')
+  }
+  const locators = app ? [...new Set(observations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []) ?? [])] : []
+  const registryVerifiedOrigin = (observations !== undefined && observations.events.length > 0) ||
+    (knownWorktrees.length > 0 && knownWorktrees.every(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))
   if ('hookEvents' in query && query.hookEvents) throw new Error('INVALID_ARGUMENT')
   const source = { storePath: store.path, repositoryId: store.repositoryId, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!, assertCurrent }
   const hooklessBase = observation ?? {
@@ -284,7 +290,14 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   const snapshot = (() => {
     if (!app) return codexSourceSnapshot({ ...source, worktreeRoot: root })
     if (locators.length > 1) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: 'IDENTITY_MISMATCH' })
-    try { return antigravityAppSourceSnapshot({ ...source, ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}), worktreeRoot: root }) }
+    try {
+      return antigravityAppSourceSnapshot({
+        ...source,
+        ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}),
+        worktreeRoot: root,
+        registryVerifiedOrigin
+      })
+    }
     catch (error) {
       if (error instanceof Error && ['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE', 'SOURCE_CONTENT_UNAVAILABLE'].includes(error.message)) {
         if (expectedRevision !== undefined && error.message === 'SOURCE_STALE') throw new Error('REVISION_CONFLICT')
@@ -422,7 +435,8 @@ export async function executeSessionTool(
   archiveAccountHash?: string,
   nativeClient?: NativeHookClient,
   nativeTrustSnapshot?: NativeTrustSnapshot,
-  allowArtifactMetadata = false
+  allowArtifactMetadata = false,
+  onDiscovery?: (report: { provider: 'codex' | 'antigravity'; truncated: boolean; coverageReason?: string; bytesRead: number; filesOpened: number; usedIndex: boolean }) => void
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -580,20 +594,44 @@ export async function executeSessionTool(
           ? root
           : liveTargets.find(t => t.worktreeId === filter.worktreeId && t.generation === filter.generation)?.root)
         : undefined
-      const localGranted = mergeRegistry && activeRoot && filter.worktreeId && filter.generation && !selector
-        ? [
-          ...discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, assertCurrent: assertActive }),
-          ...discoverAntigravityAppSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, assertCurrent: assertActive })
-        ].filter(item =>
-          (!filter.agent || item.agent === filter.agent) &&
-          (!filter.after || (!!item.lastObserved && Date.parse(item.lastObserved) >= Date.parse(filter.after))) &&
-          (!filter.before || (!!item.lastObserved && Date.parse(item.lastObserved) <= Date.parse(filter.before))) &&
-          actualStore.registry.visible({ kind: 'SESSION', id: `${item.provider}:${item.providerSessionId}` }, archiveAccountHash)
-        )
-        : []
+      const wantCodex = !filter.agent || filter.agent === 'codex'
+      const wantAntigravity = !filter.agent || filter.agent === 'antigravity'
+      const runNativeDiscovery = mergeRegistry && activeRoot && filter.worktreeId && filter.generation && !selector
+      const codexDiscovery = runNativeDiscovery && wantCodex
+        ? discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, after: filter.after, before: filter.before, limit: filter.limit, assertCurrent: assertActive })
+        : undefined
+      if (codexDiscovery) {
+        onDiscovery?.({ provider: 'codex', truncated: codexDiscovery.truncated, coverageReason: codexDiscovery.coverageReason, bytesRead: codexDiscovery.stats.headerBytesRead, filesOpened: codexDiscovery.stats.filesOpened, usedIndex: codexDiscovery.stats.usedIndex })
+      }
+      const agDiscovery = runNativeDiscovery && wantAntigravity
+        ? discoverAntigravityAppSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, after: filter.after, before: filter.before, limit: filter.limit, assertCurrent: assertActive })
+        : undefined
+      if (agDiscovery) {
+        onDiscovery?.({ provider: 'antigravity', truncated: agDiscovery.truncated, coverageReason: agDiscovery.coverageReason, bytesRead: agDiscovery.stats.transcriptBytesRead, filesOpened: agDiscovery.stats.transcriptFilesOpened, usedIndex: agDiscovery.stats.usedIndex })
+      }
+      const discoveryReasons: Record<string, number> = {}
+      if (codexDiscovery?.truncated && codexDiscovery.coverageReason) {
+        discoveryReasons[codexDiscovery.coverageReason] = (discoveryReasons[codexDiscovery.coverageReason] ?? 0) + 1
+      }
+      if (agDiscovery?.truncated && agDiscovery.coverageReason) {
+        discoveryReasons[agDiscovery.coverageReason] = (discoveryReasons[agDiscovery.coverageReason] ?? 0) + 1
+      }
+      const localGranted = [
+        ...(codexDiscovery?.sessions ?? []),
+        ...(agDiscovery?.sessions ?? [])
+      ].filter(item => {
+        if (filter.agent && item.agent !== filter.agent) return false
+        if (filter.after && (!item.lastObserved || Date.parse(item.lastObserved) < Date.parse(filter.after))) return false
+        if (filter.before && (!item.lastObserved || Date.parse(item.lastObserved) > Date.parse(filter.before))) return false
+        if (!actualStore.registry.visible({ kind: 'SESSION', id: `${item.provider}:${item.providerSessionId}` }, archiveAccountHash)) return false
+        const known = actualStore.registry.sessionWorktrees(item.provider, item.providerSessionId)
+        if (known.length > 0 && !known.some(w => w.worktreeId === filter.worktreeId && w.generation === filter.generation)) return false
+        return true
+      })
       const scopeRevision = digest(JSON.stringify([actualStore.catalogRevision(), mergeRegistry ? actualStore.registry.source('NATIVE_HOOK')?.revision ?? 'empty' : null,
         registryLinked.map(r => [r.provider, r.providerSessionId, r.agent, r.witness]),
-        localGranted.map(g => [g.provider, g.providerSessionId, g.lastObserved ?? null])]))
+        localGranted.map(g => [g.provider, g.providerSessionId, g.lastObserved ?? null]),
+        Object.entries(discoveryReasons)]))
       const scope = { name, repositoryId: actualStore.repositoryId, revision: scopeRevision, accountHash: archiveAccountHash ?? null, filter, view: focal ? 'FOCAL' : 'LEGACY' }
       const offset = actualStore.offset(cursor, scope)
       const importedRows = actualStore.sessions(filter, mergeRegistry ? 0 : offset, importedLimit, archiveAccountHash)
@@ -707,12 +745,20 @@ export async function executeSessionTool(
           project: () => associationMetadata(actualStore, row, filter, focal, availability)
         }))
       }
-      const nextDiscovery = !pageRows.length ? nextDiscoveryFor(query, selectedTarget, liveTargets) : undefined
-      const emptyReason = wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED' : anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED'
+      const discoveryPartialReason = Object.keys(discoveryReasons).length
+        ? (agDiscovery?.coverageReason ?? codexDiscovery?.coverageReason ?? 'SOURCE_DISCOVERY_LIMIT_REACHED')
+        : undefined
+      const nextDiscovery = !pageRows.length
+        ? (nextDiscoveryFor(query, selectedTarget, liveTargets) ?? (discoveryPartialReason === 'NO_METADATA_INDEX'
+          ? { reason: 'NO_METADATA_INDEX', tool: 'inspect_agent_session', requires: ['sourceSessionId', 'verifiedOrigin'] }
+          : undefined))
+        : undefined
+      const emptyReason = wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED' : discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')
       data = page(actualStore, scope, offset, pageRows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL',
           ...(wtState ? { worktreeState: wtState } : {}),
-          reason: pageRows.length ? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED') : emptyReason,
+          ...(Object.keys(discoveryReasons).length ? { sourceDiscoveryCoverage: 'PARTIAL', coverageReasons: discoveryReasons } : {}),
+          reason: pageRows.length ? (discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')) : emptyReason,
           ...(nextDiscovery ? { nextDiscovery } : {}),
           ...(contextMap ? { contextMap } : {}),
           ...(!focal ? {

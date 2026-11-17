@@ -1,7 +1,9 @@
+import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { countCanonicalTokens } from '../core/tokenizer'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
@@ -12,6 +14,9 @@ import { EntireTranscriptStream, ENTIRE_TRANSCRIPT_NORMALIZERS, normalizeEntireR
 import { buildSync } from 'esbuild'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import { SessionContextClient } from './client'
+import { antigravityAppTranscriptPath } from './antigravity-app-locator'
+import { discoverAntigravityAppSources } from './native-antigravity-app-source'
+import { discoverCodexSources } from './native-codex-source'
 import { executeSessionTool, SESSION_CONTEXT_TOOLS, type SessionToolName } from './mcp'
 import { nativeDigest } from './native-hooks'
 import { SessionStore, sessionStorePath } from './store'
@@ -249,4 +254,83 @@ it('U5 executes the end-to-end focal investigation through an authenticated HTTP
     expect(verifyStore.count()).toBe(0)
     expect(verifyStore.diagnostics().payloadBytes).toBe(0)
   } finally { verifyStore.close() }
+}, 30000)
+
+
+it('C2 proves focal native discovery saves real disk I/O bytes vs unindexed scans without importing transcripts', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'c2-io-econ-'))
+  cleanup.push(() => safeRemove(base))
+  const root = join(base, 'repo')
+  const other = join(base, 'other')
+  mkdirSync(join(root, '.git'), { recursive: true })
+  mkdirSync(other, { recursive: true })
+  writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/feat\n')
+  const store = new SessionStore(sessionStorePath(base, 'repo-io'), 'repo-io')
+  cleanup.push(() => store.close())
+
+  const agProfile = join(base, 'ag')
+  const codexProfile = join(base, 'codex')
+  const codexDir = join(codexProfile, 'sessions', '2026', '11', '15')
+  mkdirSync(codexDir, { recursive: true })
+  const agMatch = '019ba000-0000-7000-8000-000000000301'
+  const codexMatch = '01a1e000-0000-7000-8000-000000000301'
+  const accHash = nativeDigest(JSON.stringify(['io-user', 'io-acc']))
+
+  const agMatchPath = antigravityAppTranscriptPath(agProfile, agMatch)
+  mkdirSync(dirname(agMatchPath), { recursive: true })
+  writeFileSync(agMatchPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-15T10:00:00Z', content: 'Run tests' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-15T10:00:05Z', content: 'Completed' }
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+
+  const agDb = new Database(join(agProfile, 'conversation_summaries.db'))
+  agDb.exec('CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT, last_modified_time TEXT)')
+  const insAg = agDb.prepare('INSERT INTO conversation_summaries (conversation_id, workspace_uris, last_modified_time) VALUES (?, ?, ?)')
+  insAg.run(agMatch, JSON.stringify([pathToFileURL(root).href]), '2026-11-15 10:00:05+00:00')
+  for (let i = 0; i < 20; i++) {
+    const id = `019ba000-0000-7000-8000-${String(310 + i).padStart(12, '0')}`
+    insAg.run(id, JSON.stringify([pathToFileURL(other).href]), '2026-11-15 10:00:06+00:00')
+    const p = antigravityAppTranscriptPath(agProfile, id)
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, JSON.stringify({ step_index: 0, source: 'MODEL', type: 'PLANNER_RESPONSE', created_at: '2026-11-15T10:00:06Z', content: 'p'.repeat(32_768) }) + '\n')
+  }
+  agDb.close()
+
+  const codexMatchPath = join(codexDir, `rollout-2026-11-15T10-00-00-${codexMatch}.jsonl`)
+  writeFileSync(codexMatchPath, [
+    JSON.stringify({ type: 'session_meta', payload: { id: codexMatch, session_id: codexMatch, account_scoped: true, creator_user_id: 'io-user', creator_account_id: 'io-acc', cwd: root, runtime_workspace_roots: [root], cli_version: '0.169.0-alpha.11.1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'IO_OK' }] } })
+  ].join('\n') + '\n')
+  for (let i = 0; i < 20; i++) {
+    const id = `01a1e000-0000-7000-8000-${String(310 + i).padStart(12, '0')}`
+    writeFileSync(join(codexDir, `rollout-2026-11-15T10-05-${String(i).padStart(2, '0')}-${id}.jsonl`),
+      JSON.stringify({ type: 'session_meta', payload: { id, session_id: id, account_scoped: true, creator_user_id: 'io-user', creator_account_id: 'io-acc', cwd: other, runtime_workspace_roots: [other], cli_version: '0.169.0-alpha.11.1', pad: 'p'.repeat(12_000) } }) + '\n')
+  }
+
+  writeFileSync(join(dirname(store.path), 'session-context.provider.json'), JSON.stringify({
+    repositoryId: 'repo-io',
+    nativeSources: { codex: { profile: codexProfile, creatorAccountHash: accHash }, antigravityApp: { profile: agProfile } }
+  }))
+
+  const agDiscovery = discoverAntigravityAppSources({ storePath: store.path, repositoryId: 'repo-io', worktreeRoot: root, assertCurrent: () => {} })
+  expect(agDiscovery.sessions).toHaveLength(1)
+  expect(agDiscovery.stats.transcriptFilesOpened).toBe(0)
+  expect(agDiscovery.stats.transcriptBytesRead).toBe(0)
+
+  const codexNoIdx = discoverCodexSources({ storePath: store.path, repositoryId: 'repo-io', worktreeRoot: root, assertCurrent: () => {} })
+  const codexDb = new Database(join(codexProfile, 'state_5.sqlite'))
+  codexDb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, updated_at INTEGER)')
+  const insCodex = codexDb.prepare('INSERT INTO threads (id, rollout_path, cwd, updated_at) VALUES (?, ?, ?, ?)')
+  insCodex.run(codexMatch, codexMatchPath, `\\\\?\\${root}`, 3000)
+  for (let i = 0; i < 20; i++) {
+    const id = `01a1e000-0000-7000-8000-${String(310 + i).padStart(12, '0')}`
+    insCodex.run(id, join(codexDir, `rollout-2026-11-15T10-05-${String(i).padStart(2, '0')}-${id}.jsonl`), other, 2000 - i)
+  }
+  codexDb.close()
+
+  const codexWithIdx = discoverCodexSources({ storePath: store.path, repositoryId: 'repo-io', worktreeRoot: root, assertCurrent: () => {} })
+  expect(codexWithIdx.sessions).toHaveLength(1)
+  expect(codexWithIdx.stats.filesOpened).toBe(1)
+  expect(codexWithIdx.stats.headerBytesRead).toBeLessThan(Math.floor(codexNoIdx.stats.headerBytesRead / 10))
+  expect(store.count()).toBe(0)
 }, 30000)

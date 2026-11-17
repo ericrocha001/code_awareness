@@ -273,6 +273,10 @@ export class CheckpointRegistry {
     return !!this.db.prepare('SELECT 1 FROM registry_sources WHERE source IN (?,?,?) LIMIT 1').get('CAPTURE:' + scope, 'NATIVE_CAPTURE:' + scope, 'NATIVE_CAPTURE:antigravity:' + scope)
   }
 
+  sessionWorktrees(provider: 'codex-native' | 'antigravity-native', id: string): WorktreeRef[] {
+    return this.worktreesAndObservedAt(`${provider}:${id}`).worktrees
+  }
+
   private worktreesAndObservedAt(externalId: string): { worktrees: WorktreeRef[]; lastObserved?: string; agent?: string } {
     const key = this.key({ kind: 'SESSION', id: externalId })
     const worktrees = new Map<string, WorktreeRef>()

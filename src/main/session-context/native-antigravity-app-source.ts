@@ -1,6 +1,8 @@
+import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readdirSync, readSync, realpathSync, type BigIntStats } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, type BigIntStats } from 'node:fs'
 import { dirname, isAbsolute, join, normalize } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { assertProfilePath, assertUserOwned } from '../local-mcp-clients/safe-config-file'
 import { antigravityAppLocatorDigest, antigravityAppSessionId, antigravityAppTranscriptPath } from './antigravity-app-locator'
 import { boundedFile, nativeDigest, sameNativePath } from './native-hooks'
@@ -11,6 +13,9 @@ const maxBytes = 8 * 1024 * 1024
 const maxRecordBytes = 512 * 1024
 const maxRecords = 16_384
 const maxEvents = 512
+const maxDiscoveryRows = 256
+const maxDiscoveryResults = 20
+const sha256Pattern = /^[a-f0-9]{64}$/
 const fingerprint = (s: BigIntStats) => [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':')
 
 export interface DiscoveredAntigravityAppSource {
@@ -24,6 +29,18 @@ export interface DiscoveredAntigravityAppSource {
   identityEvidence: 'HASH_AND_APP_LOCATOR_VERIFIED'
 }
 
+export interface AntigravityAppDiscoveryResult {
+  sessions: DiscoveredAntigravityAppSource[]
+  truncated: boolean
+  coverageReason?: 'NO_METADATA_INDEX' | 'SOURCE_DISCOVERY_LIMIT_REACHED' | 'PROFILE_UNAVAILABLE'
+  stats: {
+    usedIndex: boolean
+    rowsScanned: number
+    transcriptFilesOpened: number
+    transcriptBytesRead: number
+  }
+}
+
 interface AntigravityAppGrant {
   configPath: string
   configText: string
@@ -32,25 +49,67 @@ interface AntigravityAppGrant {
   sessionHashes?: string[]
 }
 
-function readAntigravityAppGrant(storePath: string, repositoryId: string, nativeHash?: string): AntigravityAppGrant {
+function stripVerbatimPrefix(path: string): string {
+  return process.platform === 'win32' && path.startsWith('\\\\?\\') ? path.slice(4) : path
+}
+
+function readAntigravityAppGrantStatus(storePath: string, repositoryId: string, nativeHash?: string):
+  | { configured: false }
+  | { configured: true; ok: false }
+  | { configured: true; ok: true; grant: AntigravityAppGrant } {
   const directory = dirname(storePath), configPath = join(directory, 'session-context.provider.json')
+  let configText: string
   try {
     assertProfilePath(configPath, directory)
     assertUserOwned(configPath)
-    const configText = boundedFile(configPath, 65536)
-    const config = JSON.parse(configText)
-    const grant = config?.nativeSources?.antigravityApp
-    const profile = grant?.profile
-    if (config?.repositoryId !== repositoryId || typeof profile !== 'string' || !isAbsolute(profile)) throw new Error()
-    if (nativeHash !== undefined && grant.sessionHash !== undefined && grant.sessionHash !== nativeHash) throw new Error()
-    const sessionHashes = Array.isArray(grant.sessionHashes) && grant.sessionHashes.every((v: unknown) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v))
-      ? grant.sessionHashes as string[] : undefined
-    if (nativeHash !== undefined && sessionHashes && !sessionHashes.includes(nativeHash)) throw new Error()
+    configText = boundedFile(configPath, 65536)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { configured: false }
+    return { configured: true, ok: false }
+  }
+  let config: Record<string, unknown>
+  try {
+    config = JSON.parse(configText) as Record<string, unknown>
+  } catch {
+    return { configured: true, ok: false }
+  }
+  const nativeSources = config?.nativeSources as Record<string, unknown> | undefined
+  if (!nativeSources || nativeSources.antigravityApp === undefined) return { configured: false }
+  try {
+    const grant = nativeSources.antigravityApp as Record<string, unknown> | null
+    if (!grant || typeof grant !== 'object' || Array.isArray(grant)) throw new Error()
+    const profile = grant.profile
+    if (config.repositoryId !== repositoryId || typeof profile !== 'string' || profile.length === 0 || profile.length > 4096 || !isAbsolute(profile)) {
+      throw new Error()
+    }
+    if (grant.sessionHash !== undefined && (typeof grant.sessionHash !== 'string' || !sha256Pattern.test(grant.sessionHash))) {
+      throw new Error()
+    }
+    if (grant.sessionHashes !== undefined) {
+      if (!Array.isArray(grant.sessionHashes) || grant.sessionHashes.length > 1024 ||
+        !grant.sessionHashes.every((v: unknown) => typeof v === 'string' && sha256Pattern.test(v))) {
+        throw new Error()
+      }
+    }
+    const sessionHash = grant.sessionHash as string | undefined
+    const sessionHashes = grant.sessionHashes as string[] | undefined
+    if (nativeHash !== undefined) {
+      if (sessionHash !== undefined && sessionHash !== nativeHash) throw new Error()
+      if (sessionHashes !== undefined && !sessionHashes.includes(nativeHash)) throw new Error()
+    }
     assertProfilePath(profile, profile)
     assertUserOwned(profile)
     if (!lstatSync(profile).isDirectory() || !sameNativePath(realpathSync.native(profile), profile)) throw new Error()
-    return { configPath, configText, profile, sessionHash: grant.sessionHash, sessionHashes }
-  } catch { throw new Error('PROFILE_UNAVAILABLE') }
+    return { configured: true, ok: true, grant: { configPath, configText, profile, sessionHash, sessionHashes } }
+  } catch {
+    return { configured: true, ok: false }
+  }
+}
+
+function readAntigravityAppGrant(storePath: string, repositoryId: string, nativeHash?: string): AntigravityAppGrant {
+  const status = readAntigravityAppGrantStatus(storePath, repositoryId, nativeHash)
+  if (!status.configured || !status.ok) throw new Error('PROFILE_UNAVAILABLE')
+  return status.grant
 }
 
 function canonicalLocatorHash(path: string): string {
@@ -58,22 +117,83 @@ function canonicalLocatorHash(path: string): string {
   return createHash('sha256').update(canonical).digest('hex')
 }
 
-function entryMatchesWorktree(entry: Record<string, unknown>, normalizedRoot: string): boolean {
-  const containsRoot = (value: string) => {
-    const candidate = process.platform === 'win32' ? value.toLowerCase().replaceAll('\\', '/') : value
-    return candidate.includes(normalizedRoot)
+function normalizeMetadataTimestamp(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined
+  const normalized = raw.trim().replace(
+    /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$/,
+    (_, d: string, t: string, frac: string | undefined, tz: string) =>
+      `${d}T${t}${frac ? '.' + frac.slice(0, 3) : ''}${tz ? (tz === '+00:00' ? 'Z' : tz) : 'Z'}`
+  )
+  const ms = Date.parse(normalized)
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : undefined
+}
+
+function canonicalUriMatchesRoot(rawUri: unknown, resolvedRoot: string): boolean {
+  if (typeof rawUri !== 'string' || !rawUri || rawUri.length > 4096) return false
+  try {
+    const parsed = new URL(rawUri)
+    if (parsed.protocol !== 'file:') return false
+    const fsPath = stripVerbatimPrefix(fileURLToPath(parsed))
+    if (!isAbsolute(fsPath)) return false
+    const canonical = realpathSync.native(fsPath)
+    return sameNativePath(canonical, resolvedRoot)
+  } catch {
+    return false
   }
-  if (typeof entry.content === 'string' && entry.content.includes('Active Workspaces:') && containsRoot(entry.content)) return true
-  if (Array.isArray(entry.tool_calls)) {
-    for (const call of entry.tool_calls as { args?: Record<string, unknown> }[]) {
-      if (!call?.args || typeof call.args !== 'object') continue
-      for (const field of ['Path', 'TargetFile', 'SearchDirectory', 'DirectoryPath', 'AbsolutePath', 'Cwd', 'CommandLine']) {
-        const val = call.args[field]
-        if (typeof val === 'string' && containsRoot(val)) return true
-      }
+}
+
+function workspaceUrisMatchRoot(rawUris: unknown, resolvedRoot: string): boolean {
+  if (typeof rawUris !== 'string' || !rawUris) return false
+  let parsed: unknown
+  try { parsed = JSON.parse(rawUris) } catch { return false }
+  if (!Array.isArray(parsed) || parsed.length === 0 || parsed.length > 16) return false
+  // Every entry must resolve canonically to the queried checkout so multi-workspace sessions are never guessed.
+  return parsed.every(uri => canonicalUriMatchesRoot(uri, resolvedRoot))
+}
+
+function openSummariesDbChecked(profile: string): { db: Database.Database; dbPath: string; identity: string } | undefined {
+  const dbPath = join(profile, 'conversation_summaries.db')
+  let stat: BigIntStats
+  try {
+    assertProfilePath(dbPath, profile)
+    assertUserOwned(dbPath)
+    stat = lstatSync(dbPath, { bigint: true })
+    if (!stat.isFile() || stat.nlink !== 1n || !sameNativePath(realpathSync.native(dbPath), dbPath)) return undefined
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return undefined
+    throw new Error('PROFILE_UNAVAILABLE')
+  }
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 100 })
+  return { db, dbPath, identity: fingerprint(stat) }
+}
+
+function summaryRowMatchesWorktree(
+  profile: string,
+  sourceSessionId: string,
+  resolvedRoot: string,
+  assertCurrent: () => void
+): 'MATCHED' | 'MISMATCHED' | 'UNAVAILABLE' {
+  assertCurrent()
+  const handle = openSummariesDbChecked(profile)
+  if (!handle) return 'UNAVAILABLE'
+  try {
+    let row: { workspace_uris?: unknown } | undefined
+    try {
+      row = handle.db.prepare(
+        'SELECT workspace_uris FROM conversation_summaries WHERE conversation_id = ? LIMIT 1'
+      ).get(sourceSessionId) as { workspace_uris?: unknown } | undefined
+    } catch {
+      return 'UNAVAILABLE'
     }
+    assertCurrent()
+    assertProfilePath(handle.dbPath, profile)
+    const current = lstatSync(handle.dbPath, { bigint: true })
+    if (fingerprint(current) !== handle.identity) throw new Error('SOURCE_STALE')
+    if (!row) return 'UNAVAILABLE'
+    return workspaceUrisMatchRoot(row.workspace_uris, resolvedRoot) ? 'MATCHED' : 'MISMATCHED'
+  } finally {
+    handle.db.close()
   }
-  return false
 }
 
 function readTranscriptChecked(path: string, profile: string, assertCurrent: () => void) {
@@ -106,77 +226,166 @@ function readTranscriptChecked(path: string, profile: string, assertCurrent: () 
 }
 
 export function discoverAntigravityAppSources(options: {
-  storePath: string; repositoryId: string; worktreeRoot: string; assertCurrent: () => void
-}): DiscoveredAntigravityAppSource[] {
-  let grant: AntigravityAppGrant
-  try { grant = readAntigravityAppGrant(options.storePath, options.repositoryId) }
-  catch { return [] }
-  const brainDir = join(grant.profile, 'brain')
-  let dirs: { id: string; path: string; mtimeMs: number }[] = []
-  try {
-    for (const entry of readdirSync(brainDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() || !antigravityAppSessionId.test(entry.name)) continue
-      const transcript = antigravityAppTranscriptPath(grant.profile, entry.name)
-      try {
-        assertProfilePath(transcript, grant.profile)
-        const s = lstatSync(transcript, { bigint: true })
-        if (s.isFile() && s.nlink === 1n && s.size <= BigInt(maxBytes)) dirs.push({ id: entry.name, path: transcript, mtimeMs: Number(s.mtimeMs) })
-      } catch {}
+  storePath: string
+  repositoryId: string
+  worktreeRoot: string
+  after?: string
+  before?: string
+  limit?: number
+  assertCurrent: () => void
+}): AntigravityAppDiscoveryResult {
+  const status = readAntigravityAppGrantStatus(options.storePath, options.repositoryId)
+  if (!status.configured) {
+    return { sessions: [], truncated: false, stats: { usedIndex: false, rowsScanned: 0, transcriptFilesOpened: 0, transcriptBytesRead: 0 } }
+  }
+  if (!status.ok) {
+    return {
+      sessions: [],
+      truncated: true,
+      coverageReason: 'PROFILE_UNAVAILABLE',
+      stats: { usedIndex: false, rowsScanned: 0, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
     }
-  } catch { return [] }
-  const normalizedRoot = (() => {
-    const p = realpathSync.native(options.worktreeRoot)
-    return process.platform === 'win32' ? p.toLowerCase().replaceAll('\\', '/') : p
-  })()
-  const found: DiscoveredAntigravityAppSource[] = []
-  for (const item of dirs.sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 24)) {
+  }
+  const grant = status.grant
+  let handle: ReturnType<typeof openSummariesDbChecked>
+  try {
     options.assertCurrent()
-    const nativeHash = nativeDigest(JSON.stringify([options.repositoryId, 'antigravity', item.id]))
-    if (grant.sessionHash && grant.sessionHash !== nativeHash) continue
-    if (grant.sessionHashes && !grant.sessionHashes.includes(nativeHash)) continue
+    handle = openSummariesDbChecked(grant.profile)
+  } catch {
+    return {
+      sessions: [],
+      truncated: true,
+      coverageReason: 'PROFILE_UNAVAILABLE',
+      stats: { usedIndex: false, rowsScanned: 0, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
+    }
+  }
+  if (!handle) {
+    return {
+      sessions: [],
+      truncated: true,
+      coverageReason: 'NO_METADATA_INDEX',
+      stats: { usedIndex: false, rowsScanned: 0, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
+    }
+  }
+
+  const resolvedRoot = realpathSync.native(options.worktreeRoot)
+  const afterMs = options.after ? Date.parse(options.after) : undefined
+  const beforeMs = options.before ? Date.parse(options.before) : undefined
+  const limit = Math.min(Math.max(options.limit ?? maxDiscoveryResults, 1), maxDiscoveryResults)
+  let rowsScanned = 0
+  let truncated = false
+  let coverageReason: AntigravityAppDiscoveryResult['coverageReason']
+  const found: DiscoveredAntigravityAppSource[] = []
+
+  try {
+    let rows: Array<{ conversation_id?: unknown; workspace_uris?: unknown; last_modified_time?: unknown }>
     try {
-      const { text } = readTranscriptChecked(item.path, grant.profile, options.assertCurrent)
-      if (!text.trim() || !text.endsWith('\n')) continue
-      let matchedWorkspace = false, lastObserved: string | undefined, valid = true
-      for (let offset = 0, n = 0; offset < text.length && n < maxRecords; n++) {
-        const next = text.indexOf('\n', offset)
-        const line = text.slice(offset, next)
-        offset = next + 1
-        if (Buffer.byteLength(line) > maxRecordBytes) { valid = false; break }
-        const entry = JSON.parse(line)
-        if (!Number.isSafeInteger(entry?.step_index) || entry.step_index < 0 || typeof entry.type !== 'string' ||
-          typeof entry.source !== 'string' || typeof entry.created_at !== 'string' || !Number.isFinite(Date.parse(entry.created_at))) { valid = false; break }
-        lastObserved = entry.created_at
-        if (!matchedWorkspace && entryMatchesWorktree(entry, normalizedRoot)) matchedWorkspace = true
+      rows = handle.db.prepare(
+        `SELECT conversation_id, workspace_uris, last_modified_time
+         FROM conversation_summaries
+         ORDER BY last_modified_time DESC
+         LIMIT ?`
+      ).all(maxDiscoveryRows + 1) as Array<{ conversation_id?: unknown; workspace_uris?: unknown; last_modified_time?: unknown }>
+    } catch {
+      return {
+        sessions: [],
+        truncated: true,
+        coverageReason: 'NO_METADATA_INDEX',
+        stats: { usedIndex: false, rowsScanned: 0, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
       }
-      if (!valid || !matchedWorkspace) continue
+    }
+
+    if (rows.length > maxDiscoveryRows) {
+      truncated = true
+      coverageReason = 'SOURCE_DISCOVERY_LIMIT_REACHED'
+    }
+
+    for (const row of rows.slice(0, maxDiscoveryRows)) {
+      options.assertCurrent()
+      rowsScanned++
+      if (typeof row.conversation_id !== 'string' || !antigravityAppSessionId.test(row.conversation_id)) continue
+      const nativeHash = nativeDigest(JSON.stringify([options.repositoryId, 'antigravity', row.conversation_id]))
+      if (grant.sessionHash !== undefined && grant.sessionHash !== nativeHash) continue
+      if (grant.sessionHashes !== undefined && !grant.sessionHashes.includes(nativeHash)) continue
+      if (!workspaceUrisMatchRoot(row.workspace_uris, resolvedRoot)) continue
+      const lastObserved = normalizeMetadataTimestamp(row.last_modified_time)
+      if ((afterMs !== undefined || beforeMs !== undefined) && lastObserved === undefined) continue
+      if (afterMs !== undefined && lastObserved !== undefined && Date.parse(lastObserved) < afterMs) continue
+      if (beforeMs !== undefined && lastObserved !== undefined && Date.parse(lastObserved) > beforeMs) continue
+      if (found.length >= limit) {
+        truncated = true
+        coverageReason = 'SOURCE_DISCOVERY_LIMIT_REACHED'
+        break
+      }
       found.push({
         provider: 'antigravity-native',
         providerSessionId: nativeHash,
-        sourceSessionId: item.id,
+        sourceSessionId: row.conversation_id,
         agent: 'antigravity',
-        lastObserved,
+        ...(lastObserved ? { lastObserved } : {}),
         contentAvailability: 'AVAILABLE',
         captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE',
         identityEvidence: 'HASH_AND_APP_LOCATOR_VERIFIED'
       })
-      if (found.length >= 20) break
-    } catch {}
+    }
+
+    options.assertCurrent()
+    assertProfilePath(handle.dbPath, grant.profile)
+    assertProfilePath(grant.configPath, dirname(options.storePath))
+    const currentDb = lstatSync(handle.dbPath, { bigint: true })
+    if (fingerprint(currentDb) !== handle.identity || boundedFile(grant.configPath, 65536) !== grant.configText) {
+      return {
+        sessions: [],
+        truncated: true,
+        coverageReason: 'PROFILE_UNAVAILABLE',
+        stats: { usedIndex: true, rowsScanned, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
+      }
+    }
+  } catch {
+    return {
+      sessions: [],
+      truncated: true,
+      coverageReason: 'PROFILE_UNAVAILABLE',
+      stats: { usedIndex: true, rowsScanned, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
+    }
+  } finally {
+    handle.db.close()
   }
-  return found
+
+  return {
+    sessions: found,
+    truncated,
+    ...(coverageReason ? { coverageReason } : {}),
+    stats: { usedIndex: true, rowsScanned, transcriptFilesOpened: 0, transcriptBytesRead: 0 }
+  }
 }
 
 export function antigravityAppSourceSnapshot(options: {
-  storePath: string; repositoryId: string; nativeHash: string; sourceSessionId: string; locatorDigest?: string; worktreeRoot?: string; assertCurrent: () => void
+  storePath: string
+  repositoryId: string
+  nativeHash: string
+  sourceSessionId: string
+  locatorDigest?: string
+  worktreeRoot?: string
+  registryVerifiedOrigin?: boolean
+  assertCurrent: () => void
 }) {
-  const { storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, assertCurrent } = options
+  const { storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent } = options
   if (!antigravityAppSessionId.test(sourceSessionId) ||
     nativeDigest(JSON.stringify([repositoryId, 'antigravity', sourceSessionId])) !== nativeHash) throw new Error('IDENTITY_MISMATCH')
-  const { configPath, configText, profile, sessionHash, sessionHashes } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
+  const { configPath, configText, profile } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
   const directory = dirname(storePath)
 
   const path = antigravityAppTranscriptPath(profile, sourceSessionId)
   if (locatorDigest !== undefined && antigravityAppLocatorDigest(sourceSessionId, path) !== locatorDigest) throw new Error('IDENTITY_MISMATCH')
+  if (locatorDigest === undefined) {
+    if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
+    const resolvedRoot = realpathSync.native(worktreeRoot)
+    const dbMatch = summaryRowMatchesWorktree(profile, sourceSessionId, resolvedRoot, assertCurrent)
+    if (dbMatch === 'MISMATCHED') throw new Error('ORIGIN_UNVERIFIED')
+    if (dbMatch === 'UNAVAILABLE' && !registryVerifiedOrigin) throw new Error('ORIGIN_UNVERIFIED')
+  }
+
   const effectiveLocator = locatorDigest ?? canonicalLocatorHash(path)
   const { identity, text } = readTranscriptChecked(path, profile, assertCurrent)
 
@@ -185,7 +394,6 @@ export function antigravityAppSourceSnapshot(options: {
   const attempts: NativeSourceAttemptRef[] = []
   let omitted = 0
   let ordinal = 0
-  let matchedWorktree = false
   const pushEvent = (part: number, type: NativeSourceEvent['type'], timestamp: string, rawText: string, extra: Partial<NativeSourceEvent> = {}) => {
     if (events.length >= maxEvents) { omitted++; return undefined }
     const content = sanitize(rawText), payloadDigest = nativeDigest(content)
@@ -193,7 +401,6 @@ export function antigravityAppSourceSnapshot(options: {
       eventId: nativeDigest(JSON.stringify([identity, ordinal, part, payloadDigest])),
       ordinal,
       type,
-      timestamp,
       ...(extra.tool ? { tool: extra.tool } : {}),
       ...(extra.status ? { status: extra.status } : {}),
       ...(extra.pairing ? { pairing: extra.pairing } : {}),
@@ -206,10 +413,6 @@ export function antigravityAppSourceSnapshot(options: {
     events.push(event)
     return event
   }
-  const normalizedRoot = worktreeRoot ? (() => {
-    const p = realpathSync.native(worktreeRoot)
-    return process.platform === 'win32' ? p.toLowerCase().replaceAll('\\', '/') : p
-  })() : undefined
   for (let offset = 0; offset < text.length;) {
     assertCurrent()
     const next = text.indexOf('\n', offset)
@@ -221,7 +424,6 @@ export function antigravityAppSourceSnapshot(options: {
     try { entry = JSON.parse(line) } catch { throw new Error('FORMAT_UNSUPPORTED') }
     if (!Number.isSafeInteger(entry?.step_index) || entry.step_index < 0 || typeof entry.type !== 'string' ||
       typeof entry.source !== 'string' || typeof entry.created_at !== 'string' || !Number.isFinite(Date.parse(entry.created_at))) throw new Error('FORMAT_UNSUPPORTED')
-    if (normalizedRoot && !matchedWorktree && entryMatchesWorktree(entry, normalizedRoot)) matchedWorktree = true
     const ts = entry.created_at as string
     if (entry.type === 'USER_INPUT' && (entry.source === 'USER_EXPLICIT' || entry.source === 'USER') && typeof entry.content === 'string') {
       pushEvent(0, 'INPUT', ts, entry.content)
@@ -267,8 +469,10 @@ export function antigravityAppSourceSnapshot(options: {
     assertProfilePath(configPath, directory)
     if (fingerprint(lstatSync(path, { bigint: true })) !== identity || boundedFile(configPath, 65536) !== configText) throw new Error()
   } catch { throw new Error('SOURCE_STALE') }
-  if (!locatorDigest && sessionHash !== nativeHash && !(sessionHashes?.includes(nativeHash)) && !matchedWorktree) {
-    throw new Error('ORIGIN_UNVERIFIED')
+  if (locatorDigest === undefined) {
+    if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
+    const dbMatch = summaryRowMatchesWorktree(profile, sourceSessionId, realpathSync.native(worktreeRoot), assertCurrent)
+    if (dbMatch === 'MISMATCHED' || (dbMatch === 'UNAVAILABLE' && !registryVerifiedOrigin)) throw new Error('ORIGIN_UNVERIFIED')
   }
   if (!events.length) throw new Error('SOURCE_CONTENT_UNAVAILABLE')
   return {

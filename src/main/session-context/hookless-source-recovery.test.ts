@@ -1,12 +1,16 @@
+import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { antigravityAppTranscriptPath } from './antigravity-app-locator'
 import { executeSessionTool } from './mcp'
+import { discoverAntigravityAppSources } from './native-antigravity-app-source'
+import { discoverCodexSources } from './native-codex-source'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding } from './native-hooks'
 import { SessionStore, sessionStorePath } from './store'
@@ -16,6 +20,20 @@ afterEach(() => { cleanup.splice(0).reverse().forEach(fn => fn()) })
 
 function safeRemove(dir: string) {
   execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })", dir], { windowsHide: true })
+}
+
+function seedAntigravitySummariesDb(profile: string, rows: Array<{ id: string; workspaceUris: unknown; lastModified?: string }>) {
+  mkdirSync(profile, { recursive: true })
+  const db = new Database(join(profile, 'conversation_summaries.db'))
+  try {
+    db.exec('CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT, last_modified_time TEXT)')
+    const stmt = db.prepare('INSERT OR REPLACE INTO conversation_summaries (conversation_id, workspace_uris, last_modified_time) VALUES (?, ?, ?)')
+    for (const r of rows) {
+      stmt.run(r.id, typeof r.workspaceUris === 'string' ? r.workspaceUris : JSON.stringify(r.workspaceUris), r.lastModified ?? '2026-11-17 10:00:10+00:00')
+    }
+  } finally {
+    db.close()
+  }
 }
 
 function setup() {
@@ -188,6 +206,13 @@ it('U3 discovers and reads real-shape Antigravity App transcript_full.jsonl with
     { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-17T10:00:10Z', content: 'FOREIGN_REPLY' }
   ].map(r => JSON.stringify(r)).join('\n') + '\n')
 
+  const otherRepo = join(f.dir, 'other-ag-repo')
+  mkdirSync(otherRepo, { recursive: true })
+  seedAntigravitySummariesDb(profile, [
+    { id: convId, workspaceUris: [pathToFileURL(f.root).href], lastModified: '2026-11-17 10:00:10+00:00' },
+    { id: foreignConvId, workspaceUris: [pathToFileURL(otherRepo).href], lastModified: '2026-11-17 10:00:10+00:00' }
+  ])
+
   writeFileSync(f.configPath, JSON.stringify({
     repositoryId: 'repo-u3',
     nativeSources: { antigravityApp: { profile } }
@@ -262,4 +287,302 @@ it('U3 discovers and reads real-shape Antigravity App transcript_full.jsonl with
     observedEventCount: 1,
     sourceEventCount: 4
   })
+}, 30000)
+
+
+it('C1 enforces canonical checkout origin, generation isolation, multi-workspace strictness, and complete grant validation', async () => {
+  const f = setup()
+  const agProfile = join(f.dir, 'ag-c1')
+  const codexProfile = join(f.dir, 'codex-c1')
+  const siblingOther = join(f.dir, 'repo-other')
+  const siblingTwo = join(f.dir, 'repo2')
+  mkdirSync(siblingOther, { recursive: true })
+  mkdirSync(siblingTwo, { recursive: true })
+
+  const convMention = '019ba000-0000-7000-8000-000000000101'
+  const convSibling = '019ba000-0000-7000-8000-000000000102'
+  const convMulti = '019ba000-0000-7000-8000-000000000103'
+  const convMultiInvalid = '019ba000-0000-7000-8000-000000000104'
+  const convValid = '019ba000-0000-7000-8000-000000000105'
+  for (const id of [convMention, convSibling, convMulti, convMultiInvalid, convValid]) {
+    const p = antigravityAppTranscriptPath(agProfile, id)
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, [
+      { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-17T10:00:00Z', content: `Active Workspaces:\n- ${f.root}\n` },
+      { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-17T10:00:02Z',
+        tool_calls: [{ name: 'run_command', args: { Cwd: siblingOther, CommandLine: `type "${f.root}"`, Path: f.root } }],
+        content: `Verified answer for ${id}` }
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  }
+
+  seedAntigravitySummariesDb(agProfile, [
+    { id: convMention, workspaceUris: [pathToFileURL(siblingOther).href] },
+    { id: convSibling, workspaceUris: [pathToFileURL(siblingTwo).href] },
+    { id: convMulti, workspaceUris: [pathToFileURL(f.root).href, pathToFileURL(siblingOther).href] },
+    { id: convMultiInvalid, workspaceUris: JSON.stringify([pathToFileURL(f.root).href, 'not-a-uri']) },
+    { id: convValid, workspaceUris: [pathToFileURL(f.root).href] }
+  ])
+
+  const hMention = nativeDigest(JSON.stringify(['repo-u3', 'antigravity', convMention]))
+  const hSibling = nativeDigest(JSON.stringify(['repo-u3', 'antigravity', convSibling]))
+  const hMulti = nativeDigest(JSON.stringify(['repo-u3', 'antigravity', convMulti]))
+  const hMultiInvalid = nativeDigest(JSON.stringify(['repo-u3', 'antigravity', convMultiInvalid]))
+  const hValid = nativeDigest(JSON.stringify(['repo-u3', 'antigravity', convValid]))
+
+  // Seed Codex prefix sibling session + matching Codex session
+  const rolloutDir = join(codexProfile, 'sessions', '2026', '11', '17')
+  mkdirSync(rolloutDir, { recursive: true })
+  const codexAccHash = nativeDigest(JSON.stringify(['c1-u', 'c1-a']))
+  const codexSiblingId = '01a1e000-0000-7000-8000-000000000111'
+  const codexValidId = '01a1e000-0000-7000-8000-000000000112'
+  writeFileSync(join(rolloutDir, `rollout-2026-11-17T09-00-00-${codexSiblingId}.jsonl`), [
+    JSON.stringify({ type: 'session_meta', payload: { id: codexSiblingId, session_id: codexSiblingId, account_scoped: true, creator_user_id: 'c1-u', creator_account_id: 'c1-a', cwd: siblingTwo, runtime_workspace_roots: [siblingTwo], cli_version: '0.169.0-alpha.11.1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'SIBLING' }] } })
+  ].join('\n') + '\n')
+  writeFileSync(join(rolloutDir, `rollout-2026-11-17T09-05-00-${codexValidId}.jsonl`), [
+    JSON.stringify({ type: 'session_meta', payload: { id: codexValidId, session_id: codexValidId, account_scoped: true, creator_user_id: 'c1-u', creator_account_id: 'c1-a', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.169.0-alpha.11.1' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'CODEX_OK' }] } })
+  ].join('\n') + '\n')
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: {
+      codex: { profile: codexProfile, creatorAccountHash: codexAccHash },
+      antigravityApp: { profile: agProfile, sessionHashes: [hMention, hSibling, hMulti, hMultiInvalid, hValid] }
+    }
+  }))
+
+  const listed = await f.call('list_agent_sessions', { worktreeId: f.target.worktreeId, generation: f.target.generation })
+  expect(listed.isError).toBe(false)
+  expect(listed.data.sessions.map((s: any) => s.sourceSessionId).sort()).toEqual([codexValidId, convValid].sort())
+
+  for (const [id, hash] of [[convMention, hMention], [convSibling, hSibling], [convMulti, hMulti], [convMultiInvalid, hMultiInvalid]]) {
+    const res = await f.call('inspect_agent_session', {
+      sourceSessionId: id,
+      nativeSession: { provider: 'antigravity-native', id: hash, ...f.target }
+    })
+    expect(res.isError).toBe(true)
+    expect(res.data.code).toBe('ORIGIN_UNVERIFIED')
+  }
+
+  // Malformed sessionHashes must reject (never relax to unrestricted)
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: { antigravityApp: { profile: agProfile, sessionHashes: 'invalid-string' } }
+  }))
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: convValid,
+    nativeSession: { provider: 'antigravity-native', id: hValid, ...f.target }
+  })).toMatchObject({ isError: false, data: { sourceDiagnostic: 'PROFILE_UNAVAILABLE' } })
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: { antigravityApp: { profile: agProfile, sessionHashes: [hValid, 'bad-hex'] } }
+  }))
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: convValid,
+    nativeSession: { provider: 'antigravity-native', id: hValid, ...f.target }
+  })).toMatchObject({ isError: false, data: { sourceDiagnostic: 'PROFILE_UNAVAILABLE' } })
+
+  // Dual sessionHash + sessionHashes must satisfy BOTH
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: { antigravityApp: { profile: agProfile, sessionHash: hValid, sessionHashes: [hMention] } }
+  }))
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: convValid,
+    nativeSession: { provider: 'antigravity-native', id: hValid, ...f.target }
+  })).toMatchObject({ isError: false, data: { sourceDiagnostic: 'PROFILE_UNAVAILABLE' } })
+
+  // Bad hook locator digest rejects cleanly without leaking verified content
+  const wrongRepoConfig = { repositoryId: 'wrong-repo', nativeSources: { antigravityApp: { profile: agProfile, sessionHashes: [hValid] } } }
+  writeFileSync(f.configPath, JSON.stringify(wrongRepoConfig))
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: convValid,
+    nativeSession: { provider: 'antigravity-native', id: hValid, ...f.target }
+  })).toMatchObject({ isError: false, data: { sourceDiagnostic: 'PROFILE_UNAVAILABLE' } })
+
+  // Restore valid dual grant & test wrong locator digest + recreated generation conflict
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: {
+      codex: { profile: codexProfile, creatorAccountHash: codexAccHash },
+      antigravityApp: { profile: agProfile, sessionHash: hValid, sessionHashes: [hValid] }
+    }
+  }))
+
+  const spool = join(f.root, '.code-awareness/native-hooks/spool')
+  prepareNativeSpool(spool)
+  const agSpool = join(f.root, '.code-awareness/native-hooks/antigravity/spool')
+  prepareNativeSpool(agSpool)
+  const bindingCodex: NativeHookBinding = {
+    schema: 1, enabled: true, provider: 'codex', repositoryId: 'repo-u3', ...f.target, ...nativeGitIdentity(f.root), spool
+  }
+  const bindingAg: NativeHookBinding = {
+    schema: 1, enabled: true, provider: 'antigravity', repositoryId: 'repo-u3', ...f.target, ...nativeGitIdentity(f.root), spool: agSpool
+  }
+  f.getStore().registry.apply(nativeObservationBatch(normalizeNativeHook({
+    session_id: codexValidId, cwd: f.root, hook_event_name: 'SessionStart', transcript_path: join(rolloutDir, `rollout-2026-11-17T09-05-00-${codexValidId}.jsonl`)
+  }, bindingCodex)), undefined)
+  f.getStore().registry.apply(nativeObservationBatch(normalizeNativeHook({
+    conversationId: convValid, workspacePaths: [f.root], hookEventName: 'Stop',
+    transcriptPath: join(agProfile, 'brain', convValid, '.system_generated', 'logs', 'wrong.jsonl')
+  }, bindingAg)), undefined)
+
+  // Recreated worktree at exact same path f.root with different generation MUST NOT inherit prior generation's sessions
+  const recreatedTarget = { worktreeId: f.target.worktreeId, generation: '9'.repeat(64) }
+  const recreatedRes = await executeSessionTool(
+    f.getStore(), {}, 'list_agent_sessions', recreatedTarget, () => {}, recreatedTarget, [{ ...recreatedTarget, root: f.root, fingerprint: 'fp2' }], undefined, f.root
+  )
+  const recreatedList = JSON.parse((recreatedRes.content[0] as { text: string }).text)
+  expect(recreatedList.sessions).toEqual([])
+
+  for (const [provider, id, hash] of [
+    ['antigravity-native', convValid, hValid] as const,
+    ['codex-native', codexValidId, nativeDigest(JSON.stringify(['repo-u3', 'codex', codexValidId]))] as const
+  ]) {
+    const errRes = await executeSessionTool(
+      f.getStore(), {}, 'inspect_agent_session',
+      { sourceSessionId: id, nativeSession: { provider, id: hash, ...recreatedTarget } },
+      () => {}, recreatedTarget, [{ ...recreatedTarget, root: f.root, fingerprint: 'fp2' }], undefined, f.root
+    )
+    expect(errRes.isError).toBe(true)
+    expect(JSON.parse((errRes.content[0] as { text: string }).text).code).toBe('ORIGIN_UNVERIFIED')
+  }
+}, 30000)
+
+it('C2 discovers via metadata/indexes with zero Antigravity transcript opens, strict agent short-circuiting, header/byte caps, and honest partial coverage', async () => {
+  const f = setup()
+  const agProfile = join(f.dir, 'ag-c2')
+  const codexProfile = join(f.dir, 'codex-c2')
+  const otherRepo = join(f.dir, 'other-c2-repo')
+  mkdirSync(otherRepo, { recursive: true })
+
+  // Seed Antigravity with 25 noisy other-repo sessions containing corrupt/huge unparseable transcripts + 1 matching session
+  const agMatch = '019ba000-0000-7000-8000-000000000201'
+  const dbRows: Array<{ id: string; workspaceUris: unknown; lastModified?: string }> = [
+    { id: agMatch, workspaceUris: [pathToFileURL(f.root).href], lastModified: '2026-11-17 12:00:00+00:00' }
+  ]
+  const matchPath = antigravityAppTranscriptPath(agProfile, agMatch)
+  mkdirSync(dirname(matchPath), { recursive: true })
+  writeFileSync(matchPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-17T12:00:00Z', content: 'Check build' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-17T12:00:01Z', content: 'C2_AG_OK' }
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+
+  for (let i = 0; i < 25; i++) {
+    const id = `019ba000-0000-7000-8000-${String(210 + i).padStart(12, '0')}`
+    dbRows.push({ id, workspaceUris: [pathToFileURL(otherRepo).href], lastModified: '2026-11-17 12:05:00+00:00' })
+    const p = antigravityAppTranscriptPath(agProfile, id)
+    mkdirSync(dirname(p), { recursive: true })
+    // Corrupt non-JSON payload that would fail or explode memory if discovery touched transcript bodies
+    writeFileSync(p, '{CORRUPT_NOT_JSONL\0'.repeat(1024))
+  }
+  seedAntigravitySummariesDb(agProfile, dbRows)
+
+  // Seed Codex with 28 small rollout files (unindexed exceeds 24 file limit)
+  const codexDir = join(codexProfile, 'sessions', '2026', '11', '15')
+  mkdirSync(codexDir, { recursive: true })
+  const codexAccHash = nativeDigest(JSON.stringify(['c2-u', 'c2-a']))
+  const codexMatchId = '01a1e000-0000-7000-8000-000000000201'
+  const codexMatchPath = join(codexDir, `rollout-2026-11-17T12-00-00-${codexMatchId}.jsonl`)
+  writeFileSync(codexMatchPath, [
+    JSON.stringify({ type: 'session_meta', payload: { id: codexMatchId, session_id: codexMatchId, account_scoped: true, creator_user_id: 'c2-u', creator_account_id: 'c2-a', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.169.0-alpha.11.1', timestamp: '2026-11-17T12:00:00Z' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'C2_CODEX_OK' }] } })
+  ].join('\n') + '\n')
+
+  for (let i = 0; i < 27; i++) {
+    const id = `01a1e000-0000-7000-8000-${String(220 + i).padStart(12, '0')}`
+    writeFileSync(join(codexDir, `rollout-2026-11-17T12-05-${String(i).padStart(2, '0')}-${id}.jsonl`),
+      JSON.stringify({ type: 'session_meta', payload: { id, session_id: id, account_scoped: true, creator_user_id: 'c2-u', creator_account_id: 'c2-a', cwd: otherRepo, runtime_workspace_roots: [otherRepo], cli_version: '0.169.0-alpha.11.1', pad: 'z'.repeat(28000) } }) + '\n')
+  }
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: {
+      codex: { profile: codexProfile, creatorAccountHash: codexAccHash },
+      antigravityApp: { profile: agProfile }
+    }
+  }))
+
+  // 1. Direct Antigravity metadata-only check: 0 transcript files opened, 0 transcript bytes read
+  const agDirect = discoverAntigravityAppSources({ storePath: f.storePath, repositoryId: 'repo-u3', worktreeRoot: f.root, assertCurrent: () => {} })
+  expect(agDirect.sessions).toHaveLength(1)
+  expect(agDirect.sessions[0].sourceSessionId).toBe(agMatch)
+  expect(agDirect.stats).toMatchObject({ usedIndex: true, transcriptFilesOpened: 0, transcriptBytesRead: 0 })
+
+  // 2. Agent filter in mcp.ts skips excluded provider completely
+  const observedProviders: Array<{ provider: string; bytesRead: number; filesOpened: number; truncated: boolean }> = []
+  const runList = async (extra: object) => {
+    observedProviders.length = 0
+    const res = await executeSessionTool(
+      f.getStore(), {}, 'list_agent_sessions', { ...f.target, ...extra }, () => {}, f.target,
+      [{ ...f.target, root: f.root, fingerprint: 'fp' }], undefined, f.root, undefined, undefined, undefined, undefined, undefined, false,
+      report => observedProviders.push(report)
+    )
+    return JSON.parse((res.content[0] as { text: string }).text)
+  }
+
+  const onlyAg = await runList({ agent: 'antigravity' })
+  expect(observedProviders.map(p => p.provider)).toEqual(['antigravity'])
+  expect(onlyAg.sessions.map((s: any) => s.sourceSessionId)).toEqual([agMatch])
+
+  const onlyClaude = await runList({ agent: 'claude' })
+  expect(observedProviders).toEqual([])
+  expect(onlyClaude.sessions).toEqual([])
+
+  // 3. Unindexed Codex surfaces explicit truncation when >24 candidates or >512 KiB total header bytes exist
+  const codexUnindexed = discoverCodexSources({ storePath: f.storePath, repositoryId: 'repo-u3', worktreeRoot: f.root, assertCurrent: () => {} })
+  expect(codexUnindexed.truncated).toBe(true)
+  expect(codexUnindexed.coverageReason).toBe('SOURCE_DISCOVERY_LIMIT_REACHED')
+  expect(codexUnindexed.stats.filesOpened).toBeLessThanOrEqual(24)
+  expect(codexUnindexed.stats.headerBytesRead).toBeLessThanOrEqual(512 * 1024 + 64 * 1024)
+
+  const mcpTruncated = await runList({ agent: 'codex' })
+  expect(observedProviders.map(p => p.provider)).toEqual(['codex'])
+  expect(mcpTruncated.sourceDiscoveryCoverage).toBe('PARTIAL')
+  expect(mcpTruncated.coverageReasons).toEqual({ SOURCE_DISCOVERY_LIMIT_REACHED: 1 })
+
+  // 4. Adding Codex state_5.sqlite narrows candidates so ONLY the 1 matching checkout header is opened (massive I/O savings)
+  const codexDb = new Database(join(codexProfile, 'state_5.sqlite'))
+  try {
+    codexDb.exec('CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, cwd TEXT, updated_at INTEGER)')
+    const ins = codexDb.prepare('INSERT INTO threads (id, rollout_path, cwd, updated_at) VALUES (?, ?, ?, ?)')
+    ins.run(codexMatchId, codexMatchPath, `\\\\?\\${f.root}`, 2000)
+    for (let i = 0; i < 27; i++) {
+      const id = `01a1e000-0000-7000-8000-${String(220 + i).padStart(12, '0')}`
+      ins.run(id, join(codexDir, `rollout-2026-11-17T12-05-${String(i).padStart(2, '0')}-${id}.jsonl`), otherRepo, 1900 - i)
+    }
+  } finally {
+    codexDb.close()
+  }
+
+  const codexIndexed = discoverCodexSources({ storePath: f.storePath, repositoryId: 'repo-u3', worktreeRoot: f.root, assertCurrent: () => {} })
+  expect(codexIndexed.truncated).toBe(false)
+  expect(codexIndexed.sessions).toHaveLength(1)
+  expect(codexIndexed.stats.usedIndex).toBe(true)
+  expect(codexIndexed.stats.filesOpened).toBe(1)
+  expect(codexIndexed.stats.headerBytesRead).toBeLessThan(codexUnindexed.stats.headerBytesRead / 10)
+
+  const indexedList = await runList({ agent: 'codex' })
+  expect(indexedList.sessions).toHaveLength(1)
+  expect(indexedList.sourceDiscoveryCoverage).toBeUndefined()
+
+  // Inspect + read remain functional without storing transcripts
+  const insp = await f.call('inspect_agent_session', indexedList.sessions[0].deepen.arguments)
+  expect(insp.isError).toBe(false)
+  const evs = await f.call('list_agent_session_events', { ...indexedList.sessions[0].deepen.arguments, expectedRevision: insp.data.revision })
+  const read = await f.call('read_agent_session_event', { ...indexedList.sessions[0].deepen.arguments, expectedRevision: insp.data.revision, eventId: evs.data.events[0].eventId })
+  expect(read.data.content).toBe('C2_CODEX_OK')
+  expect(f.getStore().count()).toBe(0)
+
+  // 5. Removing Antigravity conversation_summaries.db returns honest NO_METADATA_INDEX without crawling brain/
+  execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { force: true })", join(agProfile, 'conversation_summaries.db')], { windowsHide: true })
+  const noIdx = await runList({ agent: 'antigravity' })
+  expect(noIdx.sessions).toEqual([])
+  expect(noIdx.sourceDiscoveryCoverage).toBe('PARTIAL')
+  expect(noIdx.coverageReasons).toEqual({ NO_METADATA_INDEX: 1 })
+  expect(noIdx.reason).toBe('NO_METADATA_INDEX')
+  expect(observedProviders[0].filesOpened).toBe(0)
+  expect(observedProviders[0].bytesRead).toBe(0)
 }, 30000)

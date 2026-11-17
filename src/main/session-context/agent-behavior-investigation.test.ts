@@ -1,7 +1,9 @@
+import Database from 'better-sqlite3'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { afterEach, expect, it } from 'vitest'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
@@ -176,10 +178,39 @@ it('U4 decodes Antigravity App behavior without fabricating call pairs, plus rep
 
   const hErr = nativeDigest(JSON.stringify(['repo-u4', 'antigravity', convErr]))
   const hReply = nativeDigest(JSON.stringify(['repo-u4', 'antigravity', convReplyOnly]))
+  const convForeign = '019ba000-0000-7000-8000-000000000044'
+  const hForeign = nativeDigest(JSON.stringify(['repo-u4', 'antigravity', convForeign]))
+  const pForeign = antigravityAppTranscriptPath(profile, convForeign)
+  mkdirSync(dirname(pForeign), { recursive: true })
+  writeFileSync(pForeign, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-17T10:00:00Z', content: `Active Workspaces:\n- ${f.root}\n` },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-17T10:00:02Z', content: 'SHOULD_NOT_READ' }
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+
+  const otherRoot = join(f.dir, 'other-repo')
+  mkdirSync(otherRoot, { recursive: true })
+  const db = new Database(join(profile, 'conversation_summaries.db'))
+  try {
+    db.exec('CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT, last_modified_time TEXT)')
+    const insert = db.prepare('INSERT INTO conversation_summaries (conversation_id, workspace_uris, last_modified_time) VALUES (?, ?, ?)')
+    insert.run(convErr, JSON.stringify([pathToFileURL(f.root).href]), '2026-11-17 10:00:08+00:00')
+    insert.run(convReplyOnly, JSON.stringify([pathToFileURL(f.root).href]), '2026-11-17 10:00:02+00:00')
+    insert.run(convForeign, JSON.stringify([pathToFileURL(otherRoot).href]), '2026-11-17 10:00:02+00:00')
+  } finally {
+    db.close()
+  }
+
   writeFileSync(f.configPath, JSON.stringify({
     repositoryId: 'repo-u4',
-    nativeSources: { antigravityApp: { profile, sessionHashes: [hErr, hReply] } }
+    nativeSources: { antigravityApp: { profile, sessionHashes: [hErr, hReply, hForeign] } }
   }))
+
+  const foreignEvenWithHash = await f.call('inspect_agent_session', {
+    sourceSessionId: convForeign,
+    nativeSession: { provider: 'antigravity-native', id: hForeign, ...f.target }
+  })
+  expect(foreignEvenWithHash.isError).toBe(true)
+  expect(foreignEvenWithHash.data.code).toBe('ORIGIN_UNVERIFIED')
 
   const argsErr = { sourceSessionId: convErr, nativeSession: { provider: 'antigravity-native', id: hErr, ...f.target } }
   const inspErr = await f.call('inspect_agent_session', argsErr)
