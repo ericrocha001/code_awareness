@@ -255,7 +255,7 @@ it('U1 surfaces discriminative Entire diagnostic through get_system_health(sourc
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
     sessionContext: { call: (name, args) => executeSessionTool(f.store(), new EntireProvider(f.store(), f.root, () => {}, f.run), name, args, () => {}, f.target, [], f.run, f.root) } })
   writeFileSync(join(f.root, '.entire/settings.local.json'), JSON.stringify({ enabled: true, telemetry: true, strategy_options: { push_sessions: false } }))
-  const health = JSON.parse((await adapter.callTool('get_system_health', { feature: 'session_context', source: 'entire', worktreeId: f.target.worktreeId, generation: f.target.generation })).content[0].text)
+  const health = JSON.parse(((await adapter.callTool('get_system_health', { feature: 'session_context', source: 'entire', worktreeId: f.target.worktreeId, generation: f.target.generation })).content[0] as { text: string }).text)
   expect(health).toMatchObject({
     feature: 'session_context', source: 'entire', state: 'UNAVAILABLE', reason: 'PROVIDER_CONFIG_UNSAFE',
     nextEvidence: 'INSPECT_PROVIDER_CONFIGURATION',
@@ -263,7 +263,7 @@ it('U1 surfaces discriminative Entire diagnostic through get_system_health(sourc
   })
   const liveErr = await adapter.callTool('discover_entire_sessions', { worktreeId: f.target.worktreeId, generation: f.target.generation })
   expect(liveErr.isError).toBe(true)
-  expect(JSON.parse(liveErr.content[0].text)).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'privacy-policy', reason: 'TELEMETRY_ENABLED', action: 'DISABLE_TELEMETRY' })
+  expect(JSON.parse((liveErr.content[0] as { text: string }).text)).toMatchObject({ code: 'PROVIDER_CONFIG_UNSAFE', stage: 'privacy-policy', reason: 'TELEMETRY_ENABLED', action: 'DISABLE_TELEMETRY' })
   expect(JSON.stringify(health)).not.toContain(f.root)
   expect(JSON.stringify(liveErr)).not.toContain(f.root)
 }, 20000)

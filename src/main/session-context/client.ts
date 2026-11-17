@@ -193,6 +193,9 @@ export class SessionContextClient implements SessionContextPort {
             try {
               const query = parseSessionList(args)
               indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
+              if (query.worktreeId && this.resolveTarget?.discover) {
+                liveTargets = await this.resolveTarget.discover().catch(() => undefined)
+              }
             } catch { throw new Error('INVALID_ARGUMENT') }
           }
           const health = name === 'inspect_capture_health' ? parseCaptureHealth(args) : undefined

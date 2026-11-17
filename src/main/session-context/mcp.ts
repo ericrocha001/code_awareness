@@ -18,7 +18,8 @@ import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
 import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import { reconcileRegistry, registrySelector } from './registry-reconciliation'
-import type { RegistryReader } from './checkpoint-registry'
+import type { RegistryReader, RegistrySessionRecord, SessionWitness, WorktreeRef } from './checkpoint-registry'
+import { provenanceClass } from './provenance-evidence'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { nativeSessionProjection, nativeSessionSelector } from './native-session-query'
 import { nativeHookEvents } from './native-hooks'
@@ -76,8 +77,9 @@ const schemas = {
     generation: z.string().regex(/^[a-f0-9]{64}$/).optional()
   }).strict().refine(q => (!q.worktreeId === !q.generation) && (!!q.checkpointId || !!q.commit)),
   list_agent_sessions: z.object({ state: z.enum(['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(), after: date, before: date,
-    ...historicalSelectors, source: z.enum(['IMPORTED', 'NATIVE_HOOK']).optional(), includeArchived: z.boolean().optional(), archiveCursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict()
-    .refine(q => (!q.archiveCursor || q.includeArchived === true) && (q.source !== 'NATIVE_HOOK' || (![q.state,q.agent,q.after,q.before,q.executionId,q.artifactId,q.includeArchived,q.archiveCursor].some(v => v !== undefined) && !(q.commitSha && q.pullRequest)))),
+    worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    ...historicalSelectors, source: z.enum(['IMPORTED', 'NATIVE_HOOK']).optional(), view: z.enum(['FOCAL', 'LEGACY']).optional(), includeArchived: z.boolean().optional(), archiveCursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict()
+    .refine(q => (!q.worktreeId === !q.generation) && (!q.archiveCursor || q.includeArchived === true) && (q.source !== 'NATIVE_HOOK' || (![q.state, q.includeArchived, q.archiveCursor].some(v => v !== undefined) && !(q.commitSha && q.pullRequest)))),
   inspect_agent_session: z.union([legacySessionDetail, nativeSessionDetail]),
   list_agent_session_events: z.union([legacySessionEvents, nativeSessionEvents]),
   read_agent_session_event: z.union([legacyEventRead, nativeEventRead]),
@@ -122,8 +124,8 @@ const definitions: [SessionToolName, string, Record<string, unknown>, string[]][
     { file: { type: 'string', minLength: 1, maxLength: 500 }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 }, mode: { type: 'string', enum: ['MAP', 'DETAIL'], default: 'MAP' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['file']],
   ['inspect_entire_checkpoint', 'Inspect local Entire checkpoint metadata, candidate sessions, or selectively read literal prompt/intent fields from a specific session without loading transcripts or neighboring sessions. Requires checkpointId or verified commit SHA. READ_FIELD is bounded and pageable.',
     { checkpointId: { type: 'string', pattern: '^[A-Za-z0-9]{10,40}$' }, commit: { type: 'string', pattern: '^[a-f0-9]{40}$' }, mode: { type: 'string', enum: ['INSPECT', 'DISAMBIGUATE', 'READ_FIELD'], default: 'INSPECT' }, file: { type: 'string', minLength: 1, maxLength: 500 }, includePromptPreview: { type: 'boolean', default: false }, sessionIndex: { type: 'integer', minimum: 0 }, field: { type: 'string', enum: ['STORED_PROMPT', 'INTENT'] }, promptIndex: { type: 'integer', minimum: 0, default: 0 }, cursor: cur, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, []],
-  ['list_agent_sessions', 'Discover at most 20 sessions. source=NATIVE_HOOK returns native identities. Select at most one of commitSha and pullRequest to read verified native associations from the persisted Registry without refresh. Otherwise filter imported sessions by executionId, artifactId, commitSha or repository-scoped pullRequest. Metadata only; evidence levels never prove authorship. includeArchived reports partial Entire local/checkpoint coverage; private vendor archives are never queried. Continue with the same filters. Never imports transcripts or runs Entire.',
-    { source: { type: 'string', enum: ['IMPORTED', 'NATIVE_HOOK'] }, state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' }, after: time, before: time, executionId: str, artifactId: str, commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' }, pullRequest: { type: 'integer', minimum: 1 }, includeArchived: { type: 'boolean' }, archiveCursor: cur, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
+  ['list_agent_sessions', 'Discover at most 20 sessions. Supports paired worktreeId+generation, executionId, artifactId, commitSha, or pullRequest, plus agent/after/before filters and optional view=FOCAL (compact witness without global graph/archive dumps). source=NATIVE_HOOK queries native identities. Select at most one of commitSha and pullRequest when source=NATIVE_HOOK. Never imports transcripts or runs Entire.',
+    { source: { type: 'string', enum: ['IMPORTED', 'NATIVE_HOOK'] }, view: { type: 'string', enum: ['FOCAL', 'LEGACY'] }, state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' }, after: time, before: time, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, executionId: str, artifactId: str, commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' }, pullRequest: { type: 'integer', minimum: 1 }, includeArchived: { type: 'boolean' }, archiveCursor: cur, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
   ['inspect_agent_session', 'Inspect a selected session map. Native observations are available by nativeSession. Add the exact authorized sourceSessionId and Worktree selection to qualify its original source. Returns metadata without bodies or inferred authorship.',
     { ...session, mapView: { type: 'string', enum: ['SEGMENTS', 'TURNS'] }, limit: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, cursor: cur }, []],
   ['list_agent_session_events', 'List at most 15 event references from one session. Native hook observations and authorized original-source events have distinct revisions. Follow with read_agent_session_event for a selected original event. Bodies are omitted.',
@@ -162,14 +164,51 @@ function metadata(row: SessionRow) {
     importState: row.importState, coverageReasons: JSON.parse(row.coverageReasons), lastObserved: row.lastObserved, revision: row.revision, eventCount: row.eventCount, payloadBytes: row.payloadBytes, coverage: row.coverage,
     provenance: 'OBSERVED_FROM_PROVIDER', executionId: null, associationCoverage: 'UNAVAILABLE' }
 }
-function associationMetadata(store: SessionStore, row: SessionRow, filter: SessionFilter = {}) {
+function worktreeStatus(store: SessionStore, worktreeId: string, generation: string, selectedTarget?: { worktreeId: string; generation: string }, liveTargets: LiveSessionTarget[] = []): 'ACTIVE' | 'HISTORICAL_ONLY' | 'ORIGIN_UNVERIFIED' {
+  if ((selectedTarget?.worktreeId === worktreeId && selectedTarget?.generation === generation) || liveTargets.some(t => t.worktreeId === worktreeId && t.generation === generation)) {
+    return 'ACTIVE'
+  }
+  return store.registry.hasWorktreeHistory(worktreeId, generation) ? 'HISTORICAL_ONLY' : 'ORIGIN_UNVERIFIED'
+}
+function nextDiscoveryFor(query: { source?: 'IMPORTED' | 'NATIVE_HOOK'; view?: 'FOCAL' | 'LEGACY'; artifactId?: string; executionId?: string }, selectedTarget?: { worktreeId: string; generation: string }, liveTargets: LiveSessionTarget[] = []) {
+  if (!query.artifactId && !query.executionId) return undefined
+  const candidate = selectedTarget ?? liveTargets[0]
+  if (!candidate) return undefined
+  return {
+    reason: 'NO_FORMAL_LINK_TO_PLAN',
+    candidateWorktree: { worktreeId: candidate.worktreeId, generation: candidate.generation },
+    tool: 'list_agent_sessions',
+    arguments: {
+      worktreeId: candidate.worktreeId,
+      generation: candidate.generation,
+      ...(query.source ? { source: query.source } : {}),
+      ...(query.view ? { view: query.view } : {})
+    },
+    provesPlanMembership: false
+  }
+}
+function associationMetadata(store: SessionStore, row: SessionRow, filter: SessionFilter = {}, focal = false, worktreeAvailability: 'NOT_RECHECKED' | 'ACTIVE' | 'HISTORICAL_ONLY' = 'NOT_RECHECKED', extra?: { witness?: SessionWitness; worktrees?: WorktreeRef[]; aliasState?: string }) {
   const links = store.associations(row.id, 3, filter)
-  return { ...metadata(row), associationCoverage: links.length ? 'ASSOCIATIONS_OBSERVED' : 'UNAVAILABLE',
+  const worktrees = extra?.worktrees ?? store.worktreesForSession(row.id)
+  const witness = extra?.witness ?? (links[0] ? {
+    kind: links[0].evidence,
+    relation: links[0].sourceArtifactId && links[0].artifactId ? 'declared-link' : 'associated',
+    revision: String(links[0].sourceRevision ?? row.revision),
+    strength: provenanceClass(links[0].evidence, 'OBSERVED'),
+    state: links[0].evidence === 'HANDOFF_DECLARED' ? 'DECLARED' : 'OBSERVED'
+  } : undefined)
+  const base = { ...metadata(row), associationCoverage: links.length || witness ? 'ASSOCIATIONS_OBSERVED' : 'UNAVAILABLE',
     ...(row.historicalState ? { revision: null, lastObserved: null, associationObservedAt: row.lastObserved } : {}),
-    reason: row.historicalState ?? (links.length ? row.importState === 'METADATA_ONLY' ? 'TRANSCRIPT_NOT_IMPORTED' : 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED'),
-    claimsVerified: false, associations: links.map(link => ({ evidence: link.evidence, origin: link.origin, executionId: link.executionId, artifactId: link.artifactId,
+    reason: row.historicalState ?? (links.length ? row.importState === 'METADATA_ONLY' ? 'TRANSCRIPT_NOT_IMPORTED' : 'COVERAGE_PARTIAL' : witness ? 'REGISTRY_LINK_OBSERVED' : 'NO_ASSOCIATION_OBSERVED'),
+    claimsVerified: false, worktrees, worktreeAvailability,
+    ...(extra?.aliasState ? { aliasState: extra.aliasState } : {}),
+    ...(witness ? { witness } : {}),
+    deepen: { tool: 'inspect_agent_session', arguments: { sessionId: row.id } } }
+  if (focal) return base
+  return { ...base,
+    associations: links.map(link => ({ evidence: link.evidence, origin: link.origin, executionId: link.executionId, artifactId: link.artifactId,
       sourceArtifactId: link.sourceArtifactId, sourceRevision: link.sourceRevision, sourceHash: link.sourceHash, commitSha: link.commitSha, pullRequest: link.pullRequest, proofIds: link.proofIds })),
-    associationDetails: 'BOUNDED', worktreeAvailability: 'NOT_RECHECKED', archiveState: links.some(link => link.archived) ? 'ARCHIVED_OBSERVED' : 'UNAVAILABLE' }
+    associationDetails: 'BOUNDED', archiveState: links.some(link => link.archived) ? 'ARCHIVED_OBSERVED' : 'UNAVAILABLE' }
 }
 function page<T>(store: SessionStore, scope: object, offset: number, rows: T[], limit: number, budget: number, base: object, project: (row: T) => object, key: string): object {
   const selected: object[] = []
@@ -396,42 +435,124 @@ export async function executeSessionTool(
       }
     } else if (name === 'list_agent_sessions') {
       const actualStore = store as SessionStore
-      const nativeQuery = q as z.infer<typeof schemas.list_agent_sessions>
-      if (nativeQuery.source === 'NATIVE_HOOK') {
+      const query = q as z.infer<typeof schemas.list_agent_sessions>
+      const wtState = query.worktreeId && query.generation ? worktreeStatus(actualStore, query.worktreeId, query.generation, selectedTarget, liveTargets) : undefined
+      const focal = query.view === 'FOCAL' || !!(query.worktreeId && query.generation)
+      if (query.source === 'NATIVE_HOOK') {
         const result = actualStore.registry.readSnapshot(() => {
           const registry = actualStore.registry
           const source = registry.source('NATIVE_HOOK')
-          const selector = registrySelector(nativeQuery)
-          const delivery = selector && registry.nativeDeliverySessions(selector, archiveAccountHash)
+          const selector = registrySelector(query)
+          const nativeResult = registry.queryNativeSessions(query, archiveAccountHash)
           const scope = { name, source: 'NATIVE_HOOK', repositoryId: actualStore.repositoryId, accountHash: archiveAccountHash ?? null,
-            selector: selector ?? null, revision: delivery?.revision ?? source?.revision ?? 'empty', limit: nativeQuery.limit }
-          const offset = actualStore.offset(nativeQuery.cursor, scope)
-          const rows = delivery ? delivery.rows.slice(offset, offset + nativeQuery.limit + 1) : registry.nativeSessions(offset, nativeQuery.limit + 1, archiveAccountHash)
+            filter: { worktreeId: query.worktreeId ?? null, generation: query.generation ?? null, agent: query.agent ?? null, after: query.after ?? null, before: query.before ?? null,
+              artifactId: query.artifactId ?? null, executionId: query.executionId ?? null, commitSha: query.commitSha ?? null, pullRequest: query.pullRequest ?? null },
+            revision: nativeResult.revision, limit: query.limit }
+          const offset = actualStore.offset(query.cursor, scope)
+          const rows = nativeResult.rows.slice(offset, offset + query.limit + 1)
+          const emptyReason = !nativeResult.rows.length
+            ? (nativeResult.isDelivery ? 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED'
+              : wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED'
+                : query.worktreeId ? 'NO_SESSION_OBSERVED_FOR_WORKTREE' : 'NO_ASSOCIATION_OBSERVED')
+            : undefined
+          const nextDiscovery = !nativeResult.rows.length ? nextDiscoveryFor(query, selectedTarget, liveTargets) : undefined
           const base = { repositoryId: actualStore.repositoryId, source: 'NATIVE_HOOK', captureState: source?.status ?? 'UNOBSERVED',
-            transcriptImported: false, authorship: 'NOT_INFERRED' }
-          return page(actualStore, scope, offset, rows, nativeQuery.limit, budget, delivery ? { ...base, selector, revision: delivery.revision,
-            coverage: !delivery.rows.length || delivery.reasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', coverageReasons: delivery.reasons,
-            ...(delivery.rows.length ? {} : { reason: 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED' })
-          } : { ...base, ...nativeCaptureDiagnostics(registry, root) }, row => row, 'sessions')
+            transcriptImported: false, authorship: 'NOT_INFERRED',
+            ...(wtState ? { worktreeState: wtState } : {}) }
+          const meta = nativeResult.isDelivery
+            ? { ...base, selector, revision: nativeResult.revision, coverage: nativeResult.coverage, coverageReasons: nativeResult.reasons,
+              ...(emptyReason ? { reason: emptyReason } : {}) }
+            : (focal || query.artifactId || query.executionId)
+              ? { ...base, ...(selector ? { selector } : {}), revision: nativeResult.revision, coverage: nativeResult.coverage, coverageReasons: nativeResult.reasons,
+                ...(emptyReason ? { reason: emptyReason } : {}), ...(nextDiscovery ? { nextDiscovery } : {}) }
+              : { ...base, ...nativeCaptureDiagnostics(registry, root), ...(emptyReason ? { reason: emptyReason } : {}) }
+          return page(actualStore, scope, offset, rows, query.limit, budget, meta, row => ({
+            ...row, ...(wtState && wtState !== 'ORIGIN_UNVERIFIED' ? { worktreeAvailability: wtState } : {})
+          }), 'sessions')
         })
         assertActive()
         return wrap(result)
       }
-      const selector = registrySelector(q as z.infer<typeof schemas.list_agent_sessions>)
-      if (selector && !('cursor' in q && q.cursor)) await reconcileRegistry(actualStore, runner, root!, selector, assertActive, registryReader)
-      const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_sessions>
-      const contextMap = selector ? actualStore.registry.map(selector, 10) : undefined
+      const selector = registrySelector(query)
+      if (selector && !query.cursor) await reconcileRegistry(actualStore, runner, root!, selector, assertActive, registryReader)
+      const { cursor, view: _view, ...filter } = query
+      const contextMap = !focal && selector ? actualStore.registry.map(selector, 10) : undefined
       if (contextMap) {
         contextMap.sources = contextMap.sources.filter(s => !s.source.includes(':')).slice(0, 4)
         while (!fits(contextMap, 4500) && contextMap.edges.length) { contextMap.edges.pop(); contextMap.coverage = 'PARTIAL' }
       }
-      const scope = { name, repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), accountHash: archiveAccountHash ?? null, filter }, offset = actualStore.offset(cursor, scope)
-      const rows = actualStore.sessions(filter, offset, filter.limit + 1, archiveAccountHash)
-      for (const row of rows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
-      data = page(actualStore, scope, offset, rows, filter.limit, budget,
-        { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL', reason: rows.some(row => actualStore.associations(row.id, 1).length) ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED',
-          ...(contextMap ? { contextMap } : {}), nativeCapture: { state: actualStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', deepen: { tool: 'list_agent_sessions', arguments: { source: 'NATIVE_HOOK' } } },
-          archiveCoverage: { code: filter.includeArchived ? 'COVERAGE_PARTIAL' : 'ARCHIVE_NOT_QUERIED', source: 'ENTIRE_LOCAL_AND_CHECKPOINT_INDEX', reason: 'PRIVATE_VENDOR_ARCHIVES_NOT_QUERIED', ...(filter.archiveCursor ? { cursorState: 'ARCHIVE_CURSOR_UNSUPPORTED' } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
+      const mergeRegistry = query.source !== 'IMPORTED' && (!!selector || !!(filter.worktreeId && filter.generation))
+      const importedLimit = mergeRegistry ? 200 : filter.limit + 1
+      const registryLinked = mergeRegistry
+        ? (selector ? actualStore.registry.linkedSessions(selector, filter, archiveAccountHash).rows : actualStore.registry.queryNativeSessions(filter, archiveAccountHash).rows)
+        : []
+      const scopeRevision = digest(JSON.stringify([actualStore.catalogRevision(), mergeRegistry ? actualStore.registry.source('NATIVE_HOOK')?.revision ?? 'empty' : null,
+        registryLinked.map(r => [r.provider, r.providerSessionId, r.agent, r.witness])]))
+      const scope = { name, repositoryId: actualStore.repositoryId, revision: scopeRevision, accountHash: archiveAccountHash ?? null, filter, view: focal ? 'FOCAL' : 'LEGACY' }
+      const offset = actualStore.offset(cursor, scope)
+      const importedRows = actualStore.sessions(filter, mergeRegistry ? 0 : offset, importedLimit, archiveAccountHash)
+      for (const row of importedRows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
+      const availability: 'NOT_RECHECKED' | 'ACTIVE' | 'HISTORICAL_ONLY' = wtState === 'ACTIVE' || wtState === 'HISTORICAL_ONLY' ? wtState : 'NOT_RECHECKED'
+      type UnifiedItem = { sortTime: string; sortId: string; project: () => object }
+      let pageRows: UnifiedItem[]
+      let anyAssociation = importedRows.some(row => actualStore.associations(row.id, 1).length > 0)
+      if (mergeRegistry) {
+        const byIdentity = new Map<string, { row?: SessionRow; registry?: RegistrySessionRecord; worktrees: WorktreeRef[] }>()
+        const keyOf = (provider: string, agent: string, providerSessionId: string) => `${provider}\0${agent}\0${providerSessionId}`
+        for (const row of importedRows) {
+          const k = keyOf(row.provider ?? 'entire', row.agent, row.providerSessionId)
+          byIdentity.set(k, { row, worktrees: actualStore.worktreesForSession(row.id) })
+        }
+        for (const reg of registryLinked) {
+          anyAssociation = true
+          const k = keyOf(reg.provider, reg.agent, reg.providerSessionId)
+          const existing = byIdentity.get(k)
+          if (existing) {
+            existing.registry = reg
+            const seenWt = new Set(existing.worktrees.map(w => `${w.worktreeId}:${w.generation}`))
+            for (const w of reg.worktrees) if (!seenWt.has(`${w.worktreeId}:${w.generation}`)) { seenWt.add(`${w.worktreeId}:${w.generation}`); existing.worktrees.push(w) }
+          } else {
+            byIdentity.set(k, { registry: reg, worktrees: reg.worktrees })
+          }
+        }
+        const merged = [...byIdentity.values()].map((entry): UnifiedItem => {
+          if (entry.row) {
+            const row = entry.row
+            return {
+              sortTime: row.lastObserved ?? '', sortId: row.providerSessionId,
+              project: () => associationMetadata(actualStore, row, filter, focal, availability, {
+                witness: entry.registry?.witness, worktrees: entry.worktrees, aliasState: entry.registry?.aliasState
+              })
+            }
+          }
+          const reg = entry.registry!
+          return {
+            sortTime: reg.lastObserved ?? '', sortId: reg.providerSessionId,
+            project: () => ({ ...reg, worktrees: entry.worktrees, worktreeAvailability: availability, claimsVerified: false })
+          }
+        }).sort((a, b) => b.sortTime.localeCompare(a.sortTime) || a.sortId.localeCompare(b.sortId))
+        pageRows = merged.slice(offset, offset + filter.limit + 1)
+      } else {
+        pageRows = importedRows.map(row => ({
+          sortTime: row.lastObserved ?? '', sortId: row.providerSessionId,
+          project: () => associationMetadata(actualStore, row, filter, focal, availability)
+        }))
+      }
+      const nextDiscovery = !pageRows.length ? nextDiscoveryFor(query, selectedTarget, liveTargets) : undefined
+      const emptyReason = wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED' : anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED'
+      data = page(actualStore, scope, offset, pageRows, filter.limit, budget,
+        { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL',
+          ...(wtState ? { worktreeState: wtState } : {}),
+          reason: pageRows.length ? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED') : emptyReason,
+          ...(nextDiscovery ? { nextDiscovery } : {}),
+          ...(contextMap ? { contextMap } : {}),
+          ...(!focal ? {
+            nativeCapture: { state: actualStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', deepen: { tool: 'list_agent_sessions', arguments: { source: 'NATIVE_HOOK' } } },
+            archiveCoverage: { code: filter.includeArchived ? 'COVERAGE_PARTIAL' : 'ARCHIVE_NOT_QUERIED', source: 'ENTIRE_LOCAL_AND_CHECKPOINT_INDEX', reason: 'PRIVATE_VENDOR_ARCHIVES_NOT_QUERIED', ...(filter.archiveCursor ? { cursorState: 'ARCHIVE_CURSOR_UNSUPPORTED' } : {}) }
+          } : filter.includeArchived ? {
+            archiveCoverage: { code: 'COVERAGE_PARTIAL', source: 'ENTIRE_LOCAL_AND_CHECKPOINT_INDEX', reason: 'PRIVATE_VENDOR_ARCHIVES_NOT_QUERIED', ...(filter.archiveCursor ? { cursorState: 'ARCHIVE_CURSOR_UNSUPPORTED' } : {}) }
+          } : {}) },
+        item => item.project(), 'sessions')
     } else if ('nativeSession' in q) {
       const target = nativeLiteralTarget(name, q)
       if (target) {
