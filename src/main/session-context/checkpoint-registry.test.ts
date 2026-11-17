@@ -144,6 +144,11 @@ it('F2 drains more than one quota of Artifacts, PRs, commits and proofs across e
   const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
   cleanup.push(continuum.close)
   const artifacts = Array.from({ length: 27 }, (_, index) => continuum.service.publish(markdown('Item' + index, 'pullRequest: ' + (100 + index % 4) + '\n').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF')))
+  f.store().registry.applyAll([{ repositoryId: 'repo', source: 'DIRECTED_FIXTURE', revision: '1', status: 'COMPLETE',
+    edges: artifacts.map((artifact, index) => ({ from: { kind: 'ARTIFACT', id: artifact.artifactId + ':1' }, relation: 'implements',
+      to: { kind: 'ARTIFACT', id: artifacts[(index + 1) % artifacts.length].artifactId }, evidenceKind: 'CONTINUUM_TYPED_RELATION',
+      evidenceRef: artifact.artifactId, digest: digest(artifact.artifactId), freshness: 'EXACT_REVISION' })) }], () => {})
+  expect(f.store().registry.pendingArtifactLabels(60).length).toBeGreaterThan(20)
   const proofs = Array.from({ length: 23 }, (_, index) => source.ledger.recordProof({ kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
     startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: [artifacts[0].artifactId], deduplicationKey: String(index) }))
   const commits = Array.from({ length: 12 }, (_, index) => (index + 1).toString(16).padStart(40, '0'))
@@ -156,6 +161,7 @@ it('F2 drains more than one quota of Artifacts, PRs, commits and proofs across e
   const coordinator = new SessionProjectionCoordinator(async () => {
     try {
     const result = await reconcileRegistry(f.store(), absent, f.base, undefined, () => {}, async request => {
+      expect(request.artifactTargets?.length ?? 0).toBeLessThanOrEqual(5)
       const batches = await readSource(request)
       if (rounds === 0) await Promise.all([0, 1].map(index => Promise.resolve(continuum.service.update(artifacts[index].artifactId, 1,
         markdown('Edited' + index, 'pullRequest: ' + (100 + index % 4) + '\n').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF')))))
@@ -172,6 +178,9 @@ it('F2 drains more than one quota of Artifacts, PRs, commits and proofs across e
     expect(rounds).toBeGreaterThan(2); expect(rounds).toBeLessThan(15)
     for (const artifact of artifacts) expect(f.store().registry.source('CONTINUUM_CURRENT:' + artifact.artifactId)).toBeDefined()
     for (const artifact of artifacts.slice(0, 2)) expect(f.store().registry.source('CONTINUUM_CURRENT:' + artifact.artifactId)?.revision.startsWith('2:')).toBe(true)
+    expect(f.store().registry.pendingArtifactLabels()).toEqual([])
+    const graph = f.store().registry.contextGraph({ kind: 'PR', id: '100' }, undefined, 2, true)
+    expect(graph.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Edited0', artifactRevision: 2, metadataCoverage: 'PROJECTED' })]))
     for (const sha of commits) expect(f.store().registry.source('GIT:' + sha)).toBeDefined()
     for (const number of [100, 101, 102, 103]) expect(f.store().registry.source('GITHUB:PR:' + number)?.status).toBe('COMPLETE')
     for (const proof of proofs) expect(f.store().registry.source('LEDGER:' + proof.proofId)).toBeDefined()
@@ -410,6 +419,17 @@ it('respects network policy, Ledger repository provenance and project changes; l
   await expect(reader({ cursors: {} })).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
 })
 
+it('preserves read-only discovery on a v8 Registry that predates Artifact labels', () => {
+  const f = fixture(), db = new Database(f.path)
+  db.exec('DROP INDEX registry_pending_artifact_label; ALTER TABLE registry_entities DROP COLUMN artifactLabel; ALTER TABLE registry_entities DROP COLUMN artifactDescription')
+  db.close()
+  const readOnly = new SessionStore(f.path, 'repo', true)
+  try {
+    expect(readOnly.registry.pendingArtifactLabels()).toEqual([])
+    expect(readOnly.registry.artifactLabel('unindexed', true)).toEqual({ metadataCoverage: 'NOT_INDEXED' })
+    expect(readOnly.registry.reconciliationBacklog().drainable).toBe(false)
+  } finally { readOnly.close() }
+})
 it('rolls back a malformed v4 migration without changing the schema version', () => {
   const f = fixture(), db = new Database(f.path)
   db.exec('DROP TABLE registry_edges; DROP TABLE registry_sources; CREATE TABLE registry_edges(id TEXT PRIMARY KEY)')

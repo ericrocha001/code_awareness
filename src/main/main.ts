@@ -190,6 +190,7 @@ let activeValidationExecution: ValidationExecution | null = null
 let activeCliExecution: CliExecutionService | null = null
 let activeSessionContext: SessionContextClient | undefined
 let sessionProjectionSubscriptions: (() => void)[] = []
+let requestDeliveryProjection: ((repositoryId: string) => void) | undefined
 let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
 let repositoryCatalog: RepositoryCatalogService | null = null
@@ -554,6 +555,7 @@ app.whenReady().then(async () => {
     boundProjectRevision = revision
     for (const unsubscribe of sessionProjectionSubscriptions) unsubscribe()
     sessionProjectionSubscriptions = []
+    requestDeliveryProjection = undefined
     activeSessionContext?.dispose()
     activeSessionContext = undefined
     if (!project) {
@@ -685,6 +687,7 @@ app.whenReady().then(async () => {
       })
       void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
       const projection = new SessionProjectionCoordinator(() => sessionContext.reconcileProjection(), sessionIsCurrent)
+      requestDeliveryProjection = repositoryId => { if (repositoryId === gitRepositoryId) projection.request() }
       sessionProjectionSubscriptions = [projection.stop, continuumSession.onChanged(projection.request), validationLedger.onRecorded(projection.request), settingsService.onChanged(projection.request)]
       projection.request()
     }
@@ -855,6 +858,7 @@ app.whenReady().then(async () => {
   const githubIntegration = new GitHubIntegrationService(
     githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell, {
       receiptDirectory: join(app.getPath('userData'), 'github', 'pr-operations'),
+      onDeliveryObserved: repositoryId => requestDeliveryProjection?.(repositoryId),
       approveMutation: async request => {
         const project = activeProjects?.getState()
         if (!mainWindow || mainWindow.isDestroyed() || !project?.project || repositoryCatalog?.findByPath(project.project.path)?.id !== request.repositoryId) return false

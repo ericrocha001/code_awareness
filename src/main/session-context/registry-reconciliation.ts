@@ -38,7 +38,7 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
       const cursor = registry.source(prefix + entity.id)?.cursor
       if (cursor) cursors[prefix + entity.id] = cursor
     }
-    batches = await read({ selector, neighbors, cursors })
+    batches = await read({ selector, neighbors, artifactTargets: registry.pendingArtifactLabels(5), cursors })
   }
   assertCurrent()
   registry.applyAll(batches, assertCurrent)

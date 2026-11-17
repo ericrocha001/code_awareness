@@ -17,7 +17,7 @@ export function registrySources(options: {
 }): RegistryReader {
   const { repositoryId, assertCurrent } = options
   const discoveryEpoch = randomUUID()
-  return async ({ selector, neighbors = [], cursors }) => {
+  return async ({ selector, neighbors = [], artifactTargets = [], cursors }) => {
     assertCurrent()
     const batches: RegistryBatch[] = [], artifacts = new Map<string, Artifact>(), prs = new Set<number>(), verifiedPrs = new Map<number, 'VALID' | 'CONFLICT'>()
     for (const neighbor of neighbors) if (neighbor.kind === 'PR') prs.add(Number(neighbor.id))
@@ -46,6 +46,10 @@ export function registrySources(options: {
       diagnostic(source, reasonCode, stage)
     }
     if (service) {
+      for (const target of artifactTargets.slice(0, 5)) {
+        addArtifact(target.id)
+        addArtifact(target.id.replace(/:([1-9][0-9]*)$/, ''))
+      }
       if (!selector) try {
         continuumStage = 'INVENTORY_CURSOR'
         const saved = JSON.parse(cursors.CONTINUUM ?? '{}')

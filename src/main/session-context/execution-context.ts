@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { RegistryEntity } from './checkpoint-registry'
 import type { SessionStore } from './store'
+import { projectWorkView } from './execution-work-view'
 import { digest } from './privacy'
 import { sessionIdentity } from './session-identity'
 import { nativeCorrelationSourceCoverage } from './native-hook-diagnostics'
@@ -18,7 +19,7 @@ export const executionSelector = z.discriminatedUnion('type', [
   z.object({ type: z.literal('WORKTREE'), id: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 ]).refine(selector => selector.type !== 'SESSION' || !!selector.provider || z.string().uuid().safeParse(selector.id).success)
 export const executionContextQuery = z.object({ selector: executionSelector, mode: z.enum(['MAP', 'RELATION_DETAIL']).default('MAP'),
-  depth: z.number().int().min(1).max(4).default(4),
+  view: z.enum(['WORK', 'GRAPH']).optional(), depth: z.number().int().min(1).max(4).default(4),
   limit: z.number().int().min(1).max(24).default(20), cursor: z.string().max(512).optional() }).strict()
 export type ExecutionSelector = z.infer<typeof executionSelector>
 export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, revision: { type: 'integer', minimum: 1, description: 'Exact Artifact revision when selecting publication provenance.' }, type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'INVOCATION', 'WORKTREE'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex', 'codex-native', 'antigravity-native'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
@@ -34,7 +35,7 @@ export function discoverExecutionContext(store: SessionStore, query: z.infer<typ
 }
 function contextSnapshot(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash: string | undefined, pageLimit: number, allowArtifactMetadata: boolean) {
   const selector = executionEntity(store, query.selector, accountHash)
-  const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth, allowArtifactMetadata) : { nodes: [], edges: [], paths: [], bounded: false }
+  const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth, allowArtifactMetadata && query.view !== 'WORK') : { nodes: [], edges: [], paths: [], bounded: false }
   const nativeSources = nativeCorrelationSourceCoverage(store.registry, graph.nodes.flatMap(node =>
     node.type === 'EXECUTION' && node.id.startsWith('native-invocation:') ? [node.id.slice('native-invocation:'.length)] : []))
   const sourceCoverage = [...store.registry.coverageSources().map(s => {
@@ -62,6 +63,13 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
   const discoveryReason = observedRelations ? undefined : gatedSource ? 'GATE_REQUIRED' : unavailableSource ? 'SOURCE_UNAVAILABLE' : 'NO_INDEXED_EDGE'
   const coverage = { state: reasons.size ? observedRelations ? 'PARTIAL' : 'UNKNOWN' : 'SELECTED_SCOPE', reasons: [...reasons].sort(), negativeInference: 'NOT_AUTHORIZED' }
   const revision = digest(JSON.stringify([graph, sourceCoverage.map(({ observedAt: _observedAt, ...source }) => source), coverage]))
+  if (query.view === 'WORK') {
+    const root = selector ? store.registry.key(selector) : ''
+    const backlog = store.registry.reconciliationBacklog()
+    const projection = projectWorkView(store, graph, root, query, pageLimit, allowArtifactMetadata, accountHash, revision, sourceCoverage)
+    return { repositoryId: store.repositoryId, selector: query.selector, view: 'WORK' as const, coverage, authorship: 'NOT_INFERRED', sourceCoverage,
+      reconciliation: { backlog, state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } }, ...projection }
+  }
   const scope = { name: 'discover_execution_context', repositoryId: store.repositoryId, selector: query.selector, mode: query.mode, depth: query.depth, limit: query.limit, revision, accountHash, allowArtifactMetadata }
   const offset = store.offset(query.cursor, scope)
   if (offset > graph.edges.length) throw new Error('CURSOR_STALE')

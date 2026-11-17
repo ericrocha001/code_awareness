@@ -94,10 +94,12 @@ it('projects governed delivery and GitHub membership bidirectionally through MCP
   const api = { getPullRequestPermissions: async () => ({ create: true }), getBranchSha: async () => sha,
     listPullRequests: async () => ({ pullRequests: created ? [pr()] : [] }), getPullRequest: async () => pr(),
     createPullRequest: async () => { created = true; return pr() } }
-  const pullRequests = new GitHubPullRequests(api as any, async () => context, { receiptDirectory, approve: async () => true })
+  const onDeliveryObserved = vi.fn()
+  const pullRequests = new GitHubPullRequests(api as any, async () => context, { receiptDirectory, approve: async () => true, onDeliveryObserved })
   await pullRequests.create({ headBranch: 'main', baseBranch: 'release', expectedHeadSha: sha, title: 'Fixture', body: 'PRIVATE_PR_BODY', operationId: 'create-pr-111', worktreeId: before.worktreeId, deliveryContext: f.request },
     { isActive: () => true, inspectWorktree: async () => ({ branch: 'main', head: sha }), prepareDelivery: request => f.service.prepareDeliveryContext(f.authority, request, f.observe) })
   expect(pullRequestDeliveryPage(receiptDirectory, 'fixture').observations).toHaveLength(1)
+  expect(onDeliveryObserved).toHaveBeenCalledExactlyOnceWith('fixture')
   const github = { deliveryRepository: async () => 'owner/repo', commitPullRequests: async () => [111],
     getPullRequest: async () => ({ ...context, pullRequest: pr() }),
     deliveryProjectionPage: (id: string, cursor?: string) => pullRequestDeliveryPage(receiptDirectory, id, cursor),
@@ -257,6 +259,13 @@ it('accepts opt-in only through authenticated callback and preserves all argumen
       const graph = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', { selector, mode: 'RELATION_DETAIL', depth: 1 }, () => {})
       expect(graph.isError, graph.content[0].text).toBeFalsy()
       expect(JSON.parse(graph.content[0].text).edges).toContainEqual(expect.objectContaining({ evidenceKind: 'NATIVE_GIT_CAUSAL', confidenceClass: 'VERIFIED_CAUSAL', relation: selector.type === 'SESSION' ? 'invoked' : 'committed' }))
+    }
+    const reference = sessions.registry.contextGraph({ kind: 'COMMIT', id: sha }).edges.find(edge => edge.relation === 'committed' && edge.evidenceKind === 'NATIVE_GIT_CAUSAL')!.evidenceRef
+    for (const selector of [{ type: 'PR', id: '89' }, { type: 'COMMIT', id: sha }]) {
+      const queried = await executeSessionTool(sessions, provider, 'discover_execution_context', { selector, view: 'WORK' }, () => {},
+        undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+      expect(queried.isError, queried.content[0].text).toBeFalsy()
+      expect(JSON.parse(queried.content[0].text)).toMatchObject({ authorship: 'NOT_INFERRED', causalSession: { state: 'VERIFIED_CAUSAL', evidenceRefs: [reference] } })
     }
     const db = new Database(path, { readonly: true })
     try {

@@ -19,7 +19,7 @@ export interface RegistryBatch {
   cursor?: string; edges: RegistryEdge[]; entities?: RegistryEntity[]
   artifactLabels?: { id: string; snapshot: ArtifactLabelSnapshot | null }[]
 }
-export type RegistryReader = (request: { selector?: RegistryEntity; neighbors?: RegistryEntity[]; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
+export type RegistryReader = (request: { selector?: RegistryEntity; neighbors?: RegistryEntity[]; artifactTargets?: RegistryEntity[]; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
 type ObservedEdge = RegistryEdge & { sourceSystem: string; sourceRevision: string; observedAt: string; state: string }
 type NativeAuditEdge = { id: string; source: string; sourceRevision: string; fromId: string; toId: string; payload: string; integrity: string }
 export const REGISTRY_SCHEMA = `
@@ -37,7 +37,10 @@ export const REGISTRY_SCHEMA = `
 `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
-  constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  private readonly supportsArtifactLabels: boolean
+  constructor(private readonly db: Database.Database, readonly repositoryId: string) {
+    this.supportsArtifactLabels = (db.pragma('table_info(registry_entities)') as { name: string }[]).some(column => column.name === 'artifactLabel')
+  }
   pendingReconciliation(kind: 'PR' | 'COMMIT', limit = 5): RegistryEntity[] {
     const prefix = kind === 'PR' ? 'GITHUB:PR:' : 'GIT:'
     return (this.db.prepare(`SELECT e.externalId FROM registry_entities e LEFT JOIN registry_sources s ON s.source=?||e.externalId
@@ -50,6 +53,16 @@ export class CheckpointRegistry {
     return (this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='PR' AND externalId>? ORDER BY externalId LIMIT ?").all(after, limit) as { externalId: string }[])
       .map(row => ({ kind: 'PR', id: row.externalId }))
   }
+  pendingArtifactLabels(limit = 10): RegistryEntity[] {
+    if (!this.supportsArtifactLabels) return []
+    const rows = this.db.prepare(`SELECT e.externalId FROM registry_entities e
+      LEFT JOIN registry_sources s ON s.source=(CASE WHEN instr(e.externalId, ':')>0 THEN 'CONTINUUM:' ELSE 'CONTINUUM_CURRENT:' END)||e.externalId
+      WHERE e.kind='ARTIFACT' AND e.artifactLabel IS NULL AND coalesce(s.revision,'')<>'ARTIFACT_NOT_FOUND'
+        AND (EXISTS (SELECT 1 FROM registry_edges r WHERE r.fromId=e.id AND r.state='OBSERVED')
+          OR EXISTS (SELECT 1 FROM registry_edges r WHERE r.toId=e.id AND r.state='OBSERVED'))
+      ORDER BY e.externalId LIMIT ?`).all(limit) as { externalId: string }[]
+    return rows.map(row => ({ kind: 'ARTIFACT', id: row.externalId }))
+  }
   reconciliationBacklog() {
     const sources = this.coverageSources()
     const github = this.source('GITHUB')?.status
@@ -60,7 +73,8 @@ export class CheckpointRegistry {
     const discoveryPending = discovery.phase === 'FULL' || discovery.phase === 'PREFIX'
     const remote = discoveryPending || this.pendingReconciliation('PR', 1).length > 0 || this.source('GITHUB_REFRESH')?.status === 'PARTIAL'
     const blocked = remote && ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(github ?? 'UNAVAILABLE')
-    return { pending: local || remote || unavailable.length > 0, drainable: local || remote && !blocked, blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
+    const labels = this.pendingArtifactLabels(1).length > 0
+    return { pending: local || remote || labels || unavailable.length > 0, drainable: local || remote && !blocked || labels && !unavailable.includes('CONTINUUM'), blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
       sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source),
       details: this.source('GITHUB_DISCOVERY') ? [{ source: 'GITHUB_DISCOVERY', scope: 'UPDATED_PR_CATALOG',
         ...(typeof discovery.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(discovery.reasonCode) ? { reasonCode: discovery.reasonCode } : {}),
@@ -368,7 +382,21 @@ export class CheckpointRegistry {
     if (row && (digest(row.payload) !== row.integrity || JSON.parse(row.payload).repositoryId !== this.repositoryId)) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
     return !!row
   }
+  artifactLabel(id: string, allowed: boolean) {
+    if (!allowed) return { metadataCoverage: 'GATE_REQUIRED' as const }
+    if (this.source('CONTINUUM')?.status === 'UNAVAILABLE') return { metadataCoverage: 'SOURCE_UNAVAILABLE' as const }
+    return this.readArtifactLabel(this.key({ kind: 'ARTIFACT', id }))
+  }
+  private readArtifactLabel(key: string) {
+    if (!this.supportsArtifactLabels) return { metadataCoverage: 'NOT_INDEXED' as const }
+    const row = this.db.prepare('SELECT artifactLabel FROM registry_entities WHERE id=?').get(key) as { artifactLabel: string | null } | undefined
+    const label = row?.artifactLabel ? JSON.parse(row.artifactLabel) as Omit<ArtifactLabelSnapshot, 'id' | 'description'> : undefined
+    const metadataCoverage = label?.title || label?.artifactKind || label?.status ? 'PROJECTED' : 'NOT_INDEXED'
+    return { metadataCoverage, ...(label ? { title: label.title, artifactKind: label.artifactKind, status: label.status,
+      artifactRevision: label.revision, metadataFreshness: label.freshness } : {}) }
+  }
   artifactDescription(key: string): { description: string; descriptionTruncated: boolean } | undefined {
+    if (!this.supportsArtifactLabels) return
     const row = this.db.prepare("SELECT artifactDescription AS description, json_extract(artifactLabel,'$.descriptionTruncated') AS truncated FROM registry_entities WHERE id=? AND kind='ARTIFACT' AND artifactLabel IS NOT NULL").get(key) as { description: string | null; truncated: number } | undefined
     if (row && row.description !== null) return { description: row.description, descriptionTruncated: !!row.truncated }
   }
@@ -408,14 +436,8 @@ export class CheckpointRegistry {
         const version = /^(artifact-[a-f0-9-]{36}):([1-9][0-9]*)$/.exec(entity.id)
         if (version) { node.id = version[1]; node.revision = Number(version[2]) }
         if (allowArtifactMetadata) {
-          const unavailable = continuumUnavailable
-          const row = unavailable ? undefined : this.db.prepare('SELECT artifactLabel FROM registry_entities WHERE id=?').get(key) as { artifactLabel: string | null } | undefined
-          const label = row?.artifactLabel ? JSON.parse(row.artifactLabel) as Omit<ArtifactLabelSnapshot, 'id' | 'description'> & { descriptionTruncated: boolean } : undefined
-          node.metadataCoverage = unavailable ? 'SOURCE_UNAVAILABLE' : label?.title || label?.artifactKind || label?.status ? 'PROJECTED' : 'NOT_INDEXED'
-          if (label) {
-            const { title, artifactKind, status, revision: artifactRevision, freshness: metadataFreshness } = label
-            Object.assign(node, { title, artifactKind, status, artifactRevision, metadataFreshness })
-          }
+          if (continuumUnavailable) node.metadataCoverage = 'SOURCE_UNAVAILABLE'
+          else Object.assign(node, this.readArtifactLabel(key))
         } else node.metadataCoverage = 'GATE_REQUIRED'
         if (!version) node.deepen = { tool: 'get_artifact', arguments: { artifactId: node.id } }
       }

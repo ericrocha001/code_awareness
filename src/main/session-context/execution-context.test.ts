@@ -218,14 +218,17 @@ it('serves authorized compact labels and selected rationale through MCP SDK with
   const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js')
   const f = fixture()
   const label = (id: string, title: string, kind: string) => ({ id, snapshot: {
-    id, title, artifactKind: kind, status: 'VALIDATED', revision: 1, contentHash: digest(title),
+    id, title, artifactKind: kind, status: 'VALIDATED', revision: id === handoff ? 3 : 2, contentHash: digest(title),
     description: 'Bounded rationale for ' + title, freshness: 'CURRENT_REVISION_AT_PROJECTION' as const
   } })
   f.store.registry.applyAll([{ repositoryId: 'repo', source: 'CONTINUUM', revision: '1', status: 'COMPLETE',
     artifactLabels: [label(handoff, 'Implementation', 'IMPLEMENTATION_HANDOFF'), label(plan1, 'Purpose', 'EXECUTABLE_PLAN')], edges: [
       edge(entity('COMMIT', commit), entity('PR', '91'), 'GITHUB_COMMIT_LIST', 'member-of'),
-      edge(entity('ARTIFACT', handoff), entity('PR', '91'), 'HANDOFF_DECLARED', 'declares'),
-      edge(entity('ARTIFACT', handoff), entity('ARTIFACT', plan1), 'CONTINUUM_TYPED_RELATION', 'implements')
+      edge(entity('ARTIFACT', handoff + ':1'), entity('PR', '91'), 'HANDOFF_DECLARED', 'declares'),
+      ...[1, 2, 3].map(rev => edge(entity('ARTIFACT', handoff), entity('ARTIFACT', handoff + ':' + rev), 'CONTINUUM_REVISION', 'revision')),
+      ...[1, 2].map(rev => edge(entity('ARTIFACT', plan1), entity('ARTIFACT', plan1 + ':' + rev), 'CONTINUUM_REVISION', 'revision')),
+      edge(entity('ARTIFACT', handoff + ':1'), entity('ARTIFACT', plan1), 'CONTINUUM_TYPED_RELATION', 'implements'),
+      edge(entity('ARTIFACT', plan1), entity('PROOF', proof1), 'LEDGER_EVIDENCE_FOR', 'evidence')
     ] }], () => {})
   const principal = authenticatedAgentPrincipal('MCP', () => true)
   const adapter = new ChannelMcpAdapter({ projectId: 'repo', repoRoot: '/fixture', navigation: {} as any, continuum: { repositoryId: 'repo' } as any,
@@ -248,15 +251,45 @@ it('serves authorized compact labels and selected rationale through MCP SDK with
     expect(forward.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ title: 'Implementation' }), expect.objectContaining({ title: 'Purpose' })]))
     expect(JSON.stringify(forward)).not.toContain('Bounded rationale')
     expect(descriptionReads).not.toHaveBeenCalled()
+
+    const selector = { type: 'PR', id: '91' }
+    const graph = await query(client, { selector })
+    expect(await query(client, { selector, view: 'GRAPH' })).toEqual(graph)
+    const compact = await query(client, { selector, view: 'WORK' })
+    expect(compact).toMatchObject({ workLink: { state: 'FOUND', weakestLink: 'DECLARED' }, causalSession: { state: 'NOT_OBSERVED_IN_SNAPSHOT' }, coverage: { negativeInference: 'NOT_AUTHORIZED' } })
+    expect(compact.work).toHaveLength(2)
+    expect(compact.work).toEqual(expect.arrayContaining([
+      expect.objectContaining({ artifactId: handoff, title: 'Implementation', currentRevision: 3, historicalWitnessCount: 3,
+        witness: [expect.objectContaining({ from: 'ARTIFACT:repo:' + handoff + ':1', evidenceKind: 'HANDOFF_DECLARED' })] }),
+      expect.objectContaining({ artifactId: plan1, title: 'Purpose', currentRevision: 2 })
+    ]))
+    expect(compact.related.PROOF).toEqual([{ type: 'PROOF', id: proof1 }])
+    expect(Buffer.byteLength(JSON.stringify(compact))).toBeLessThan(Buffer.byteLength(JSON.stringify(graph)) * 0.75)
+    expect(JSON.stringify(compact)).not.toContain('Bounded rationale')
+    expect(descriptionReads).not.toHaveBeenCalled()
+    const first = await query(client, { selector, view: 'WORK', limit: 1 })
+    expect(first.nextCursor).toBeTruthy()
+    expect((await query(client, { selector, view: 'WORK', limit: 1, cursor: first.nextCursor })).work[0].artifactId).not.toBe(first.work[0].artifactId)
+    expect(await query(client, { selector, view: 'GRAPH', limit: 1, cursor: first.nextCursor })).toMatchObject({ code: 'CURSOR_STALE' })
+    expect(await query(anonymous, { selector, view: 'WORK', limit: 1, cursor: first.nextCursor })).toMatchObject({ code: 'CURSOR_STALE' })
+    const deniedWork = await query(anonymous, { selector, view: 'WORK' })
+    expect(deniedWork).toMatchObject({ workLink: { state: 'UNRESOLVED', reason: 'GATE_REQUIRED' }, causalSession: { state: 'UNRESOLVED' } })
+    expect(deniedWork.related.PROOF).toEqual([])
+    expect(deniedWork.work[0]).toMatchObject({ metadataCoverage: 'GATE_REQUIRED' })
+    expect(deniedWork.work[0]).not.toHaveProperty('title')
     const reverse = await query(client, { selector: { type: 'ARTIFACT', id: plan1 }, mode: 'RELATION_DETAIL' })
     expect(reverse.nodes).toEqual(expect.arrayContaining([expect.objectContaining({ id: commit }), expect.objectContaining({ description: 'Bounded rationale for Purpose' })]))
     expect(reverse.authorship).toBe('NOT_INFERRED')
+    const readsBeforeDenied = descriptionReads.mock.calls.length
     const denied = await query(anonymous, { selector: { type: 'ARTIFACT', id: plan1 }, mode: 'RELATION_DETAIL' })
     expect(denied.nodes[0]).toMatchObject({ metadataCoverage: 'GATE_REQUIRED' })
     expect(denied.nodes[0]).not.toHaveProperty('description')
-    expect(descriptionReads).toHaveBeenCalledTimes(reverse.nodes.filter((node: { type: string }) => node.type === 'ARTIFACT').length)
+    expect(descriptionReads).toHaveBeenCalledTimes(readsBeforeDenied)
     const missing = await query(client, { selector: { type: 'COMMIT', id: 'f'.repeat(40) } })
+    expect(await query(client, { selector: { type: 'PR', id: '139' }, view: 'WORK' })).toMatchObject({ work: [], workLink: { state: 'NOT_OBSERVED' }, causalSession: { state: 'UNRESOLVED' } })
     expect(missing).toMatchObject({ partial: true, authorship: 'NOT_INFERRED', discovery: { reason: 'NO_INDEXED_EDGE' } })
+    f.store.registry.apply({ repositoryId: 'repo', source: 'GITHUB', revision: 'offline', status: 'UNAVAILABLE', edges: [] }, undefined)
+    expect(await query(client, { selector: { type: 'PR', id: '139' }, view: 'WORK' })).toMatchObject({ workLink: { state: 'UNRESOLVED', reason: 'GITHUB_UNAVAILABLE' }, coverage: { negativeInference: 'NOT_AUTHORIZED' } })
     expect(f.runner).not.toHaveBeenCalled(); expect(f.read).not.toHaveBeenCalled(); expect(f.provider.refresh).not.toHaveBeenCalled()
   } finally {
     await Promise.all([client.close(), anonymous.close()])
