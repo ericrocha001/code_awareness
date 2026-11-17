@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
+import { bindProjectNavigation } from '../core/context/project-context-navigation'
 import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { createMcpHttpServer, type McpOperationalLogEntry } from './mcp-http-server'
 
@@ -33,16 +34,96 @@ afterAll(async () => {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
 })
 
-async function send(message: unknown) {
-  const response = await fetch(endpoint, {
+async function send<Body = unknown>(message: unknown, headers: Record<string, string> = {}, url = endpoint) {
+  const response = await fetch(url, {
     method: 'POST',
-    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json' },
+    headers: { accept: 'application/json, text/event-stream', 'content-type': 'application/json', ...headers },
     body: JSON.stringify(message)
   })
-  return { response, body: await response.json() }
+  return { response, body: await response.json() as Body }
+}
+
+type CatalogResponse = { result: { tools: Array<{
+  name: string; inputSchema: { properties?: { view?: { enum: string[] } } }
+}> } }
+type ToolResponse = { result: Record<string, unknown> }
+
+const modernVersion = '2026-07-28'
+
+function modernRequest(method: string, params: object = {}, version = modernVersion) {
+  return { jsonrpc: '2.0', id: 'modern', method, params: {
+    ...params,
+    _meta: {
+      'io.modelcontextprotocol/protocolVersion': version,
+      'io.modelcontextprotocol/clientInfo': { name: 'wire-test', version: '1' },
+      'io.modelcontextprotocol/clientCapabilities': {}
+    }
+  } }
 }
 
 describe('MCP HTTP server', () => {
+  it('serves the same WORK catalog and result in modern and legacy envelopes on a bound endpoint', async () => {
+    const call = vi.fn(async () => ({ content: [{ type: 'text' as const, text: '{"workLink":"FOUND"}' }] }))
+    const boundServer = createMcpHttpServer(new ChannelMcpAdapter({
+      projectId: 'repo', repoRoot: 'C:/bound-repository',
+      navigation: bindProjectNavigation(navigation, 'C:/bound-repository'),
+      sessionContext: { call }
+    }), () => {}, undefined, (headers) => headers['x-test-binding'] === 'bound')
+    await new Promise<void>((resolve) => boundServer.listen(0, '127.0.0.1', resolve))
+    const address = boundServer.address() as { port: number }
+    const url = `http://127.0.0.1:${address.port}/mcp`
+    const binding = { 'x-test-binding': 'bound' }
+    const identity = { 'io.modelcontextprotocol/serverInfo': { name: 'code-awareness-context-navigation', version: '1.0.0' } }
+    try {
+      const listRequest = modernRequest('tools/list')
+      const listed = await send<CatalogResponse>(listRequest, { ...binding, 'mcp-protocol-version': modernVersion, 'mcp-method': 'tools/list' }, url)
+      const legacyList = await send<CatalogResponse>({ jsonrpc: '2.0', id: 'legacy', method: 'tools/list' }, binding, url)
+      expect(listed.response.status).toBe(200)
+      expect(listed.response.headers.get('cache-control')).toBe('no-store')
+      expect(listed.body).toEqual({ jsonrpc: '2.0', id: 'modern', result: {
+        resultType: 'complete', ttlMs: 0, cacheScope: 'private', _meta: identity, tools: legacyList.body.result.tools
+      } })
+      expect(listed.body.result.tools.find(tool => tool.name === 'discover_execution_context')
+        ?.inputSchema.properties?.view?.enum).toEqual(['WORK', 'GRAPH'])
+      expect((await send(listRequest, {}, url)).response.status).toBe(409)
+
+      const args = { selector: { type: 'PR', id: '141' }, view: 'WORK' }
+      const params = { name: 'discover_execution_context', arguments: args }
+      const request = modernRequest('tools/call', params)
+      const headers = { ...binding, 'mcp-protocol-version': modernVersion, 'mcp-method': 'tools/call', 'mcp-name': params.name }
+      const called = await send(request, headers, url)
+      const relayed = await send(request, binding, url)
+      const legacyCall = await send<ToolResponse>({ jsonrpc: '2.0', id: 'legacy', method: 'tools/call', params }, binding, url)
+      expect(called.response.status).toBe(200)
+      expect(relayed.body).toEqual(called.body)
+      expect(called.body).toEqual({ jsonrpc: '2.0', id: 'modern', result: {
+        ...legacyCall.body.result, resultType: 'complete', _meta: identity
+      } })
+      expect(call).toHaveBeenCalledTimes(3)
+      expect(call).toHaveBeenCalledWith(params.name, args)
+      expect((await send(request, { ...headers, 'mcp-name': 'other' }, url)).body).toMatchObject({ error: { code: -32020 } })
+      expect(call).toHaveBeenCalledTimes(3)
+    } finally {
+      await new Promise<void>((resolve, reject) => boundServer.close(error => error ? reject(error) : resolve()))
+    }
+  })
+
+  it('rejects unsupported versions, mismatched metadata, and legacy methods in the modern era', async () => {
+    const version = '2099-01-01'
+    const unsupported = await send(modernRequest('server/discover', {}, version), { 'mcp-protocol-version': version })
+    expect(unsupported.response.status).toBe(400)
+    expect(unsupported.body).toEqual({ jsonrpc: '2.0', id: 'modern', error: {
+      code: -32022, message: 'Unsupported protocol version',
+      data: { supported: [modernVersion, '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'], requested: version }
+    } })
+    const mismatch = await send(modernRequest('tools/list'), { 'mcp-protocol-version': '2025-11-25' })
+    expect(mismatch.response.status).toBe(400)
+    expect(mismatch.body).toMatchObject({ error: { code: -32020 } })
+    const removed = await send(modernRequest('resources/list'))
+    expect(removed.response.status).toBe(404)
+    expect(removed.body).toMatchObject({ error: { code: -32601 } })
+  })
+
   it('preserves target failures without expanding context or logging sensitive content', async () => {
     vi.mocked(navigation.readCode).mockRejectedValueOnce(
       new ContextNavigationError('ELEMENT_NOT_RETRIEVABLE', 'private failure detail', 'private-target')

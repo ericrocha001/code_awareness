@@ -3,6 +3,7 @@ import { exportJWK, generateKeyPair, SignJWT } from 'jose'
 import { createLocalGateway, MemoryInstallationRegistry } from '../testing/local-gateway'
 import { provisionCanonicalRelayIdentity } from '../testing/canonical-relay-identity-fixture'
 import { type UserId } from '../../../src/shared/distribution/relay-protocol'
+import type { SessionContextPort } from '../../../src/main/session-context/mcp'
 import { McpLifecycle } from '../../../src/main/mcp/mcp-lifecycle'
 import { RelayTransport } from '../../../src/main/mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../../src/main/mcp/connection/connection-lifecycle'
@@ -45,7 +46,7 @@ describe('Cloudflare Access assertion to PublicMcpGateway', () => {
     const gateway = await createLocalGateway(registry, verifier)
     cleanup.push(() => gateway.close())
 
-    async function desktop(user: string) {
+    async function desktop(user: string, sessionContext?: SessionContextPort) {
       const canonicalId = `canonical-${user}` as UserId
       const identity = await provisionCanonicalRelayIdentity({
         identityResolver: gateway.resolver,
@@ -62,20 +63,23 @@ describe('Cloudflare Access assertion to PublicMcpGateway', () => {
       const relay = new RelayTransport(gateway.endpoint, { getId: () => identity.installationId, getCredential: () => identity.credential })
       const connection = new ConnectionLifecycle(mcp, relay, () => ({}), () => {})
       cleanup.push(async () => { await connection.dispose(); await mcp.dispose() })
-      await mcp.activate(user, navigation)
+      await mcp.activateContext({ projectId: user, repoRoot: '', navigation, sessionContext })
       expect((await connection.connect()).success).toBe(true)
-      return { id: identity.installationId, navigation }
+      return { id: identity.installationId, navigation, connection, mcp }
     }
 
-    const call = async (assertion?: string, selected?: string) => {
+    const call = async (assertion?: string, selected?: string, message: unknown = {
+      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'discover_repository', arguments: {} }
+    }, metadataHeaders: Record<string, string> = {}) => {
       const response = await fetch(gateway.endpoint, {
         method: 'POST',
         headers: {
           'content-type': 'application/json',
+          ...metadataHeaders,
           ...(assertion ? { 'Cf-Access-Jwt-Assertion': assertion } : {}),
           ...(selected ? { 'x-code-awareness-installation': selected } : {})
         },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'discover_repository', arguments: {} } })
+        body: JSON.stringify(message)
       })
       return { status: response.status, headers: response.headers, body: await response.json() as any }
     }
@@ -126,6 +130,44 @@ describe('Cloudflare Access assertion to PublicMcpGateway', () => {
     expect((await fixture.call(assertionA, userB.id)).status).toBe(403)
     expect(userB.navigation.discoverRepository).not.toHaveBeenCalled()
     expect((await fixture.call(assertionB, userB.id)).status).toBe(200)
+  })
+
+  it('preserves modern status, cache policy, and JSON across the authenticated Gateway and Relay', async () => {
+    const fixture = await setup()
+    const call = vi.fn<SessionContextPort['call']>(async () => ({
+      content: [{ type: 'text', text: '{"workLink":"FOUND"}' }]
+    }))
+    const desktop = await fixture.desktop('modern-user', { call })
+    const assertion = await signAssertion(fixture.key, 'modern-user')
+    const state = desktop.connection.getState()
+    if (state.status !== 'CONNECTED') throw new Error('Relay did not connect')
+    const version = '2026-07-28'
+    const meta = { 'io.modelcontextprotocol/protocolVersion': version, 'io.modelcontextprotocol/clientCapabilities': {} }
+    const arguments_ = { selector: { type: 'PR', id: '141' }, view: 'WORK' }
+    const calls = [
+      { method: 'server/discover', params: {} },
+      { method: 'tools/list', params: {} },
+      { method: 'tools/call', params: { name: 'discover_execution_context', arguments: arguments_ } }
+    ]
+    for (const { method, params } of calls) {
+      const message = { jsonrpc: '2.0', id: method, method, params: { ...params, _meta: meta } }
+      const headers = { 'mcp-protocol-version': version, 'mcp-method': method, ...(params.name && { 'mcp-name': params.name }) }
+      const local = await fetch(state.localEndpoint, {
+        method: 'POST', headers: { 'content-type': 'application/json', ...desktop.mcp.getAgentBindingHeaders(), ...headers },
+        body: JSON.stringify(message)
+      })
+      const publicResponse = await fixture.call(assertion, desktop.id, message, headers)
+      expect(publicResponse.status).toBe(local.status)
+      expect(publicResponse.status).toBe(200)
+      expect(publicResponse.headers.get('content-type')).toBe(local.headers.get('content-type'))
+      expect(publicResponse.headers.get('cache-control')).toBe('no-store')
+      expect(publicResponse.headers.get('cache-control')).toBe(local.headers.get('cache-control'))
+      expect(publicResponse.body).toEqual(await local.json())
+      expect(publicResponse.body.result.resultType).toBe('complete')
+      expect((await fixture.call(undefined, desktop.id, message, headers)).status).toBe(403)
+    }
+    expect(call).toHaveBeenCalledTimes(2)
+    expect(call).toHaveBeenCalledWith('discover_execution_context', arguments_)
   })
 
   it('rejects verified assertion with 403 IDENTITY_NOT_LINKED when external identity has no canonical link', async () => {
