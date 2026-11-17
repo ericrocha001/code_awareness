@@ -3,12 +3,11 @@
 */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync } from 'fs'
 import { join } from 'path'
-import { tmpdir } from 'os'
 import { DiffService, MAX_FILE_SIZE } from './diff-service'
 import { GitService } from './git-service'
 import {
+  createTempDir,
   createTempGitRepo,
   cleanupTempRepo,
   writeFile,
@@ -177,7 +176,7 @@ describe('DiffService', () => {
   // ─── PA-13 — Robustez ────────────────────────────────────────────────────
   describe('robustez', () => {
     it('caminho não-Git nunca propaga exceção', async () => {
-      const plain = mkdtempSync(join(tmpdir(), 'git_test_')) // sem git init
+      const plain = createTempDir('git_test_') // sem git init
       repo = plain
       const service = makeService()
       const out = await service.generateSemanticDiff(plain)

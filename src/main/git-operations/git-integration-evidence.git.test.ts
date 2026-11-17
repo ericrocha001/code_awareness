@@ -1,8 +1,8 @@
 import { expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
+
 import { join } from 'node:path'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitService } from '../core/git-service'
 import { GitOperationsService } from './git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
@@ -13,7 +13,7 @@ import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 import type { ValidationProof, RecordProofInput } from '../validation-ledger/validation-ledger-types'
 
 it('requires genuine current validation of the exact integrated candidate and explicit requirements', async () => {
-  const root = await createTempGitRepo(), parent = mkdtempSync(join(tmpdir(),'candidate-evidence-')), git = new GitService()
+  const root = await createTempGitRepo(), parent = createTempDir('candidate-evidence-'), git = new GitService()
   let validation: GitWorktreeValidation | undefined
   try {
     writeFileSync(join(root,'file.txt'),'base');await stageAll(root);await commit(root,'base')

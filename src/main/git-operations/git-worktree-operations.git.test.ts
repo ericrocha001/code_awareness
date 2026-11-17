@@ -1,9 +1,8 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readFileSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import { GitOperationsService } from './git-operations-service'
 import { executeGitOperationsTool } from './git-operations-mcp'
@@ -22,7 +21,7 @@ afterEach(async () => { for (const finish of finishers.splice(0)) await finish()
 
 async function fixture(approval?: WorktreeApprovalPort) {
   const root = await createTempGitRepo(); roots.push(root)
-  const external = mkdtempSync(join(tmpdir(), 'IDE worktrees ')); roots.push(external)
+  const external = createTempDir('IDE worktrees '); roots.push(external)
   writeFileSync(join(root, 'file.txt'), 'baseline\n')
   await stageAll(root); await commit(root, 'baseline')
   const a = join(external, 'agent a'), b = join(external, 'agent b')
@@ -242,7 +241,7 @@ describe('canonical worktree operations', () => {
       await new Promise(resolve => setTimeout(resolve, 200))
     }
     expect(secondDone, JSON.stringify(secondDone)).toMatchObject({ status: 'PASSED', freshness: 'CURRENT' })
-    const remote = mkdtempSync(join(tmpdir(), 'worktree-publish-')); roots.push(remote)
+    const remote = createTempDir('worktree-publish-'); roots.push(remote)
     await gitExec(f.root, ['init', '--bare', remote]); await gitExec(f.root, ['remote', 'add', 'origin', remote])
     const publishArgs = { ...secondVerification, snapshot: snapshot(await call('inspect_worktree', { worktreeId: workspace.worktreeId })), operationId: 'publish-second', branch: 'integration-check', remote: 'origin' }
     expect(await call('publish_worktree', publishArgs)).toMatchObject({ result: 'PUBLISHED', integrated: false, pushedHead: secondPrepared.head })

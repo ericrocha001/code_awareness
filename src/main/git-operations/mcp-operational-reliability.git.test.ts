@@ -1,10 +1,9 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
-import { cleanupTempRepo, commit, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
+import { cleanupTempRepo, commit, createTempDir, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
@@ -33,7 +32,7 @@ async function fixture() {
 describe('Operational reliability through real MCP HTTP', () => {
   it('persists dirty pull refusals without changing local state and permits clean fast-forward', async () => {
     const { root, git, service } = await fixture()
-    const remote = mkdtempSync(join(tmpdir(), 'dirty-pull-remote-')); roots.push(remote)
+    const remote = createTempDir('dirty-pull-remote-'); roots.push(remote)
     const upstream = await createTempGitRepo(); roots.push(upstream)
     await gitExec(root, ['branch', '-M', 'main'])
     await gitExec(root, ['init', '--bare', remote])
@@ -77,7 +76,7 @@ describe('Operational reliability through real MCP HTTP', () => {
 
   it('replays commit and push once without publishing receipt refs', async () => {
     const { root, git, service } = await fixture()
-    const remote = mkdtempSync(join(tmpdir(), 'receipt-remote-')); roots.push(remote)
+    const remote = createTempDir('receipt-remote-'); roots.push(remote)
     await gitExec(root, ['init', '--bare', remote])
     await gitExec(root, ['remote', 'add', 'origin', remote])
     writeFile(root, 'a.txt', 'new commit\n')

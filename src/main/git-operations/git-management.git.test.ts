@@ -13,6 +13,7 @@ import { GitService } from '../core/git-service'
 import { GitOperationsService } from './git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import {
+  createTempDir,
   createTempGitRepo,
   gitExec,
   writeFile,
@@ -264,8 +265,9 @@ it('creates and switches branches safely, refuses occupied branches and protects
   expect(await run({ action: 'SWITCH', branch: 'topic' })).toMatchObject({
     value: { branch: 'topic' }
   })
-  const linked = root + '-linked'
-  roots.push(linked)
+  const linkedParent = createTempDir('git_linked_')
+  roots.push(linkedParent)
+  const linked = join(linkedParent, 'linked')
   await gitExec(root, ['worktree', 'add', linked, 'main'])
   const occupied = {
     context: { projectId: 'a', revision: 1 },

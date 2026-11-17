@@ -1,12 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { transformSync } from 'esbuild'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import { WorkOrchestrationService } from './work-orchestration-service'
@@ -14,7 +13,7 @@ const roots: string[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 it('discovers 1, 21 and 101 real worktrees without snapshots or pair analysis, measures the baseline and preserves Git', async () => {
   const root = await createTempGitRepo(); roots.push(root)
-  const parent = mkdtempSync(join(tmpdir(), 'inventory-')); roots.push(parent)
+  const parent = createTempDir('inventory-'); roots.push(parent)
   writeFileSync(join(root, 'file.txt'), 'base\n'); await stageAll(root); await commit(root, 'base')
   await gitExec(root, ['branch', '-m', 'reference-is-not-named-main'])
   const git = new GitService()

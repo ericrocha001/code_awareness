@@ -1,9 +1,9 @@
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
+
 import { join } from 'node:path'
 import { expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from './github-git-transport'
 import { GitHubPullRequests } from './github-pull-requests'
@@ -12,7 +12,7 @@ import { evaluatePullRequestPolicy } from './github-pr-evidence'
 
 it('verifies the source using the real worktree registry while preserving Desktop main, index and files', async () => {
   const root = await createTempGitRepo()
-  const external = mkdtempSync(join(tmpdir(), 'pr-worktree-proof-'))
+  const external = createTempDir('pr-worktree-proof-')
   try {
     writeFileSync(join(root, 'file.txt'), 'baseline\n')
     await stageAll(root); await commit(root, 'baseline')

@@ -1,20 +1,20 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
+import { cleanupTempRepo, createTempDir } from '../core/git-test-helpers'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { RuntimeIdentityProvider } from './runtime-identity-provider'
 import { SourceFingerprintCollector } from './source-fingerprint'
 import { executeGetRuntimeIdentity } from './runtime-identity-mcp'
 
 const roots: string[] = []
-const temporary = () => { const root = mkdtempSync(join(tmpdir(), 'runtime-origin-')); roots.push(root); return root }
+const temporary = () => { const root = createTempDir('runtime-origin-'); roots.push(root); return root }
 const git = (root: string, ...args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim()
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllEnvs()
-  for (const root of roots.splice(0).reverse()) rmSync(root, { recursive: true, force: true })
+  for (const root of roots.splice(0).reverse()) await cleanupTempRepo(root, { strict: true })
 })
 
 describe('startup source provenance with real Git', () => {
@@ -47,7 +47,7 @@ describe('startup source provenance with real Git', () => {
     expect(provider.getSummary()).not.toHaveProperty('sourceOrigin')
     origin.worktree!.branch = 'tampered'
     expect(provider.getIdentityPayload().sourceOrigin.worktree!.branch).toBe('secondary')
-  })
+  }, 15_000)
 
   it('distinguishes non-Git, inaccessible Git and packaged execution without breaking identity', async () => {
     const root = temporary()

@@ -1,10 +1,9 @@
 import { afterEach, expect, it } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await cleanupTempRepo(root) })
@@ -26,7 +25,7 @@ it('preserves exact snapshot/index semantics for unborn, linked, detached, stage
   writeFileSync(join(root, 'file.txt'), 'first\n')
   await equivalent(git, root)
   await stageAll(root); await equivalent(git, root); await commit(root, 'base')
-  const parent = mkdtempSync(join(tmpdir(), 'snapshot economy ')); roots.push(parent)
+  const parent = createTempDir('snapshot economy '); roots.push(parent)
   const linked = join(parent, 'linked')
   await gitExec(root, ['worktree', 'add', '-b', 'nested/topic', linked]); await equivalent(git, linked)
   await gitExec(linked, ['mv', 'file.txt', 'renamed.txt'])

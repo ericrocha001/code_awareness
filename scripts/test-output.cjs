@@ -145,14 +145,16 @@ async function run(command, args = [], options = {}) {
   let before = null
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
-  if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
-    try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
-  }
-  receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
+  receipt.ledger = { association, identity: null, before: null, after: null }
   receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
+  if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
+    try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
+    receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
+    save()
+  }
   let child
   let timer
   let diagnostic = []
@@ -347,6 +349,107 @@ async function observe(id, { afterState, timeoutMs = 30000, signal } = {}) {
   })
 }
 
+async function runSequence(phases, options = {}) {
+  if (!Array.isArray(phases) || phases.length === 0) throw new Error('Sequence requires at least one phase')
+  const started = Date.now()
+  const results = []
+  let state = 'PASS'
+  let exitCode = 0
+  let failedPhaseIndex = null
+
+  for (let index = 0; index < phases.length; index++) {
+    if (options.signal?.aborted) {
+      state = 'CANCELLED'
+      exitCode = 1
+      failedPhaseIndex = index
+      break
+    }
+    const phase = phases[index]
+    if (!phase?.command) throw new Error(`Sequence phase ${index} requires a command`)
+    let phaseTimeoutMs = phase.timeoutMs
+    if (options.timeoutMs !== undefined) {
+      const remainingMs = options.timeoutMs - (Date.now() - started)
+      if (remainingMs <= 0) {
+        state = 'TIMEOUT'
+        exitCode = null
+        failedPhaseIndex = index
+        break
+      }
+      phaseTimeoutMs = phaseTimeoutMs !== undefined ? Math.min(phaseTimeoutMs, remainingMs) : remainingMs
+    }
+    const receipt = await run(phase.command, phase.args || [], {
+      cwd: phase.cwd ?? options.cwd,
+      evidenceRoot: phase.evidenceRoot ?? options.evidenceRoot,
+      expectTests: phase.expectTests ?? options.expectTests,
+      association: phase.association ?? options.association,
+      profile: phase.profile ?? options.profile,
+      register: phase.register ?? options.register,
+      env: options.env || phase.env ? { ...options.env, ...phase.env } : undefined,
+      signal: options.signal,
+      timeoutMs: phaseTimeoutMs
+    })
+    results.push(receipt)
+    if (receipt.state !== 'PASS') {
+      state = receipt.state
+      exitCode = receipt.exitCode === undefined ? 1 : receipt.exitCode
+      failedPhaseIndex = index
+      break
+    }
+  }
+
+  return {
+    version: 1,
+    state,
+    exitCode,
+    durationMs: Date.now() - started,
+    completedPhases: results.length,
+    totalPhases: phases.length,
+    failedPhaseIndex,
+    phases: results
+  }
+}
+
+function projectSequence(sequence) {
+  return JSON.stringify({
+    state: sequence.state,
+    exitCode: sequence.exitCode,
+    durationMs: sequence.durationMs,
+    completedPhases: sequence.completedPhases,
+    totalPhases: sequence.totalPhases,
+    failedPhaseIndex: sequence.failedPhaseIndex,
+    phases: sequence.phases.map(receipt => JSON.parse(project(receipt)))
+  })
+}
+
+function splitSequenceArgs(args) {
+  const groups = [[]]
+  for (const token of args) {
+    if (token === '---') { groups.push([]); continue }
+    groups[groups.length - 1].push(token)
+  }
+  return groups.map((group, index) => {
+    const command = group.shift()
+    if (!command) throw new Error(`Sequence phase ${index} requires a command`)
+    const [executable, parameters] = resolveCommand(command, group)
+    return { command: executable, args: parameters }
+  })
+}
+
+function parseRunOptions(args, allowHuman = true) {
+  let human = false; let timeoutMs; let expectTests = false; let association; let profile
+  while (args.length && args[0] !== '--') {
+    const flag = args.shift()
+    if (allowHuman && flag === '--human') human = true
+    else if (flag === '--expect-tests') expectTests = true
+    else if (flag === '--association') association = JSON.parse(args.shift())
+    else if (flag === '--profile') profile = args.shift()
+    else if (flag === '--timeout-ms') { timeoutMs = Number(args.shift()); if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid timeout') }
+    else throw new Error('Invalid run option')
+  }
+  if (args.shift() !== '--') throw new Error('Options must be terminated by --')
+  return { human, timeoutMs, expectTests, association, profile }
+}
+
 async function cli() {
   const args = process.argv.slice(2)
   const action = args.shift()
@@ -400,18 +503,16 @@ async function cli() {
     if (receipt.state === 'RUNNING') throw new Error('Cannot clean running evidence')
     fs.rmSync(directory, { recursive: true }); console.log(JSON.stringify({ removed: id })); return
   }
-  if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; inspect id; reconcile [--receipt id] [--limit N]; clean id')
-  let human = false; let timeoutMs; let expectTests = false; let association; let profile
-  while (args[0] !== '--') {
-    const flag = args.shift()
-    if (flag === '--human') human = true
-    else if (flag === '--expect-tests') expectTests = true
-    else if (flag === '--association') association = JSON.parse(args.shift())
-    else if (flag === '--profile') profile = args.shift()
-    else if (flag === '--timeout-ms') { timeoutMs = Number(args.shift()); if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid timeout') }
-    else throw new Error('Invalid run option')
+  if (action === 'sequence') {
+    const { timeoutMs, expectTests, association, profile } = parseRunOptions(args, false)
+    const phases = splitSequenceArgs(args)
+    const sequence = await runSequence(phases, { timeoutMs, expectTests, association, profile })
+    console.log(projectSequence(sequence))
+    process.exitCode = sequence.state === 'PASS' ? 0 : sequence.exitCode || 1
+    return
   }
-  args.shift()
+  if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; sequence [--expect-tests] [--timeout-ms N] -- cmd1 --- cmd2; inspect id; reconcile [--receipt id] [--limit N]; clean id')
+  const { human, timeoutMs, expectTests, association, profile } = parseRunOptions(args, true)
   const command = args.shift()
   if (!command) throw new Error('Command required')
   const [executable, parameters] = resolveCommand(command, args)
@@ -427,4 +528,4 @@ async function cli() {
 }
 
 if (require.main === module) cli().catch(error => { console.error(bounded(error.message, 500)); process.exitCode = 1 })
-module.exports = { run, project, inspect, observe, limits, resolveCommand, protectDirectory }
+module.exports = { run, runSequence, project, projectSequence, inspect, observe, limits, resolveCommand, protectDirectory }

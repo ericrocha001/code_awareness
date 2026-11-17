@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { GitService } from '../git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../git-test-helpers'
 import { GitOperationsService } from '../../git-operations/git-operations-service'
 import { GitHubGitTransport } from '../../github/github-git-transport'
 import { WorktreeStructureNavigation } from './worktree-structure-navigation'
@@ -20,7 +19,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await cleanupTempRep
 async function fixture() {
   const root = await createTempGitRepo(); roots.push(root)
   await gitExec(root, ['config', 'core.autocrlf', 'false'])
-  const parent = mkdtempSync(join(tmpdir(), 'generic structure ')); roots.push(parent)
+  const parent = createTempDir('generic structure '); roots.push(parent)
   const initial: Record<string, string> = {
     'app.ts': 'import { helper } from "./helper"\nexport function run(value: number): number { return value + 1 }\n',
     'helper.js': 'export function helper() { return "BASE" }\n',

@@ -1,15 +1,14 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { GitService } from '../core/git-service'
 import { GitOperationsService } from './git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 const roots: string[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 async function fixture() {
-  const root=await createTempGitRepo(), parent=mkdtempSync(join(tmpdir(),'worktree-provenance-'));roots.push(root,parent)
+  const root=await createTempGitRepo(), parent=createTempDir('worktree-provenance-');roots.push(root,parent)
   writeFileSync(join(root,'base.txt'),'one');await stageAll(root);await commit(root,'inherited one')
   writeFileSync(join(root,'base.txt'),'two');await stageAll(root);await commit(root,'inherited two')
   const base=(await gitExec(root,['rev-parse','HEAD'])).trim(),a=join(parent,'a'),b=join(parent,'b')
