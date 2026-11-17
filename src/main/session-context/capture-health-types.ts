@@ -16,6 +16,7 @@ export interface CaptureHealthObservation {
   reason: string
   nextEvidence: 'INSPECT_GIT_HOOKS' | 'INSPECT_CODEX_HOOKS' | 'INSPECT_ENTIRE_INTEGRATION' | 'INSPECT_PROVIDER_CONFIGURATION' | 'OBSERVE_SESSION_EVENTS' | 'INSPECT_CHECKPOINT_METADATA' | 'NONE'
   repairRequiresApproval: boolean
+  providerDiagnostic?: { code: string; stage: string; reason: string; action: string }
   agent?: string
   integrationState?: 'UNSUPPORTED' | 'READY_CONFIGURED' | 'HOOKS_MISSING'
   integrations?: { agent: string; surface: 'CLI' | 'AGENT'; hooks: 'READY' | 'HOOKS_MISSING'; state: string; coverage: string }[]

@@ -110,7 +110,7 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
   const headText = smallText(join(dirs.admin, 'HEAD')).trim()
   if (headText.startsWith('ref: ') && (!headText.slice(5).startsWith('refs/') || headText.slice(5).split('/').includes('..'))) throw new Error('CAPTURE_GIT_UNAVAILABLE')
   const headFile = headText.startsWith('ref: ') ? join(dirs.common, headText.slice(5)) : join(dirs.admin, 'HEAD')
-  const signature = () => digest(JSON.stringify([base, ...cached!.hooks.map(marker), marker(headFile), marker(join(dirs.common, 'packed-refs')),
+  const signature = () => digest(JSON.stringify([base, ...cached!.hooks.map(marker), marker(headFile), marker(join(dirs.common, 'packed-refs')), marker(join(dirs.admin, 'index')),
     ...(prior?.checkpoint.checkpointId ? [marker(join(dirs.common, 'refs/entire/checkpoints', prior.checkpoint.checkpointId.slice(-2), prior.checkpoint.checkpointId))] : [])]))
   const source = sourceFingerprint(root), fingerprint = signature()
   const policyDigest = digest(JSON.stringify([base, ...cached.hooks.map(marker)]))
@@ -158,6 +158,7 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
     nextEvidence: !capture.configured ? 'INSPECT_PROVIDER_CONFIGURATION' : hooks.git !== 'READY' ? 'INSPECT_GIT_HOOKS' : !integrationReady ? 'INSPECT_ENTIRE_INTEGRATION' :
       checkpoint.state === 'CHECKPOINT_MISSING' || checkpoint.state === 'UNAVAILABLE' ? 'INSPECT_CHECKPOINT_METADATA' : !capture.providerSessionId ? 'OBSERVE_SESSION_EVENTS' : 'NONE',
     repairRequiresApproval: !configured,
+    ...(capture.diagnostic && !capture.configured ? { providerDiagnostic: capture.diagnostic } : {}),
     sourceFingerprint: source, observedAt: new Date().toISOString(), state: !configured ? 'UNAVAILABLE' : capture.providerSessionId && capture.agent === agent ? 'CAPTURE_OBSERVED' : 'READY_CONFIGURED',
     reason, hooks, capture: capture.providerSessionId && capture.agent === agent ? { state: 'OBSERVED', providerSessionId: capture.providerSessionId, agent } : { state: 'UNOBSERVED' }, checkpoint }
   return { feature: 'session_context', ...store.recordCaptureHealth(observation, assertActive), source: 'entire', freshness: 'OBSERVED_SNAPSHOT', replay: false }

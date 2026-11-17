@@ -273,7 +273,10 @@ export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvid
   } catch (error) {
     const code = error instanceof z.ZodError ? 'INVALID_ARGUMENT' : error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'
     const phase = code === 'PROVIDER_TIMEOUT' && error && typeof error === 'object' && 'phase' in error && typeof error.phase === 'string' && /^[a-z-]{1,40}$/.test(error.phase) ? error.phase : undefined
-    return { ...wrap({ code, ...(phase ? { phase } : {}) }), isError: true }
+    const diagnostic = error && typeof error === 'object' && 'diagnostic' in error && error.diagnostic && typeof error.diagnostic === 'object' ? error.diagnostic as { stage?: unknown; reason?: unknown; action?: unknown } : undefined
+    const safeField = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(value) ? value : undefined
+    const stage = safeField(diagnostic?.stage), reason = safeField(diagnostic?.reason), action = safeField(diagnostic?.action)
+    return { ...wrap({ code, ...(phase ? { phase } : {}), ...(stage ? { stage } : {}), ...(reason ? { reason } : {}), ...(action ? { action } : {}) }), isError: true }
   }
 }
 export async function executeSessionTool(
