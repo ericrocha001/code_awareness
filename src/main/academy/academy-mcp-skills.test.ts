@@ -69,7 +69,7 @@ afterEach(async () => {
 })
 
 describe('Academy MCP Skills extension (io.modelcontextprotocol/skills 2026-07-28)', () => {
-  it('negotiates 2026-07-28 and skills extension without breaking legacy MCP handshake or declaring directoryRead', async () => {
+  it('serves modern discovery while keeping the Academy extension on the legacy handshake', async () => {
     const dataDir = makeTempDir('academy-mcp-skills-')
     const repoDir = makeTempDir('academy-repo-')
     const service = new AcademyService(join(dataDir, 'academy.db'))
@@ -89,23 +89,33 @@ describe('Academy MCP Skills extension (io.modelcontextprotocol/skills 2026-07-2
     const addr = server.address() as { port: number }
     const endpoint = `http://127.0.0.1:${addr.port}/mcp`
 
-    const discovered = await rpc(endpoint, 1, 'server/discover', { protocolVersion: '2026-07-28' })
+    const version = '2026-07-28'
+    const discovered = await rpc(endpoint, 1, 'server/discover', {
+      _meta: { 'io.modelcontextprotocol/protocolVersion': version, 'io.modelcontextprotocol/clientCapabilities': {} }
+    }, { 'mcp-protocol-version': version, 'mcp-method': 'server/discover' })
     expect(discovered.status).toBe(200)
-    expect(discovered.body.result).toMatchObject({
-      protocolVersion: '2026-07-28',
+    expect(discovered.body.result).toEqual({
+      resultType: 'complete',
+      supportedVersions: [version, '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'],
+      capabilities: { tools: { listChanged: false } },
+      _meta: { 'io.modelcontextprotocol/serverInfo': { name: 'code-awareness-context-navigation', version: '1.0.0' } },
+      ttlMs: 0,
+      cacheScope: 'private'
+    })
+
+    const dirRead = await rpc(endpoint, 99, 'resources/directory/read', { uri: 'skill://global/' })
+    expect(dirRead.body.error?.code).toBe(-32601)
+
+    const legacyInit = await rpc(endpoint, 2, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} })
+    expect(legacyInit.body.result).toMatchObject({
+      protocolVersion: '2025-11-25',
       capabilities: {
         tools: { listChanged: false },
         resources: { directoryRead: false },
         extensions: { 'io.modelcontextprotocol/skills': {} }
       }
     })
-    expect(discovered.body.result.capabilities.extensions['io.modelcontextprotocol/skills']).not.toHaveProperty('directoryRead')
-
-    const dirRead = await rpc(endpoint, 99, 'resources/directory/read', { uri: 'skill://global/' })
-    expect(dirRead.body.error?.code).toBe(-32601)
-
-    const legacyInit = await rpc(endpoint, 2, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} })
-    expect(legacyInit.body.result.protocolVersion).toBe('2025-11-25')
+    expect(legacyInit.body.result.capabilities.extensions['io.modelcontextprotocol/skills']).not.toHaveProperty('directoryRead')
     const listedTools = await rpc(endpoint, 3, 'tools/list', {})
     expect(listedTools.body.result.tools.some((t: { name: string }) => t.name === 'discover_repository')).toBe(true)
     expect(listedTools.body.result.tools.some((t: { name: string }) => t.name === 'list_academy_skills')).toBe(true)

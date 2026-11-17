@@ -2,12 +2,27 @@ import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { MCP_REQUEST_BUDGET_MS } from './operational-guidance'
 import type { ChannelMcpAdapter } from './channel-mcp-adapter'
-import { MCP_SKILLS_EXTENSION_ID, MCP_SKILLS_PROTOCOL_REVISION, McpProtocolError } from '../academy/academy-mcp-skills'
+import { MCP_SKILLS_EXTENSION_ID, McpProtocolError } from '../academy/academy-mcp-skills'
 import { SESSION_RESPONSE_BUDGETS, type SessionToolName } from '../session-context/mcp'
 import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 
-const supportedProtocolVersions = new Set([MCP_SKILLS_PROTOCOL_REVISION, '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
+const modernProtocolVersion = '2026-07-28'
 const defaultProtocolVersion = '2025-11-25'
+const legacyProtocolVersions = [defaultProtocolVersion, '2025-06-18', '2025-03-26', '2024-11-05']
+const supportedProtocolVersions = [modernProtocolVersion, ...legacyProtocolVersions]
+const protocolVersionKey = 'io.modelcontextprotocol/protocolVersion'
+const serverInfo = { name: 'code-awareness-context-navigation', version: '1.0.0' }
+const privateCache = { ttlMs: 0, cacheScope: 'private' }
+const toolsCapability = { tools: { listChanged: false } }
+
+function complete(value: object) {
+  return { ...value, resultType: 'complete', _meta: { 'io.modelcontextprotocol/serverInfo': serverInfo } }
+}
+
+function matchesToolName(header: string, name: unknown): boolean {
+  const encoded = /^=\?base64\?([A-Za-z0-9+/]+={0,2})\?=$/.exec(header)
+  return (encoded ? Buffer.from(encoded[1], 'base64').toString('utf8') : header) === name
+}
 
 export interface McpOperationalLogEntry {
   timestamp: string
@@ -27,8 +42,8 @@ function result(id: unknown, value: unknown) {
   return { jsonrpc: '2.0', id, result: value }
 }
 
-function error(id: unknown, code: number, message: string) {
-  return { jsonrpc: '2.0', id: id ?? null, error: { code, message } }
+function error(id: unknown, code: number, message: string, data?: object) {
+  return { jsonrpc: '2.0', id: id ?? null, error: { code, message, ...(data ? { data } : {}) } }
 }
 
 async function readJson(request: AsyncIterable<Uint8Array>): Promise<Record<string, unknown>> {
@@ -131,61 +146,84 @@ export function createMcpHttpServer(
         return
       }
 
-      const serverCapabilities = () => ({
-        tools: { listChanged: false },
+      const metadata = params?._meta as Record<string, unknown> | undefined
+      const bodyVersion = metadata?.[protocolVersionKey]
+      const headerVersion = request.headers['mcp-protocol-version']
+      const usesMetadata = bodyVersion !== undefined || headerVersion === modernProtocolVersion || method === 'server/discover'
+      const requestedVersion = bodyVersion ?? headerVersion
+
+      // Relay delivers the JSON-RPC body without the optional HTTP copies of its metadata.
+      const methodHeader = request.headers['mcp-method']
+      const nameHeader = request.headers['mcp-name']
+      if (usesMetadata && (typeof bodyVersion !== 'string' ||
+        (headerVersion !== undefined && headerVersion !== bodyVersion) ||
+        (methodHeader !== undefined && methodHeader !== method) ||
+        (nameHeader !== undefined && (typeof nameHeader !== 'string' || !matchesToolName(nameHeader, params?.name))))) {
+        failure = 'HEADER_MISMATCH'
+        responseSize = writeJson(response, 400, error(id, -32020, 'MCP request metadata missing or inconsistent'))
+        return
+      }
+      if (typeof requestedVersion === 'string' && !supportedProtocolVersions.includes(requestedVersion)) {
+        failure = 'UNSUPPORTED_PROTOCOL_VERSION'
+        responseSize = writeJson(response, 400, error(id, -32022, 'Unsupported protocol version', {
+          supported: supportedProtocolVersions, requested: requestedVersion
+        }))
+        return
+      }
+      const modern = method === 'server/discover' || requestedVersion === modernProtocolVersion
+      if (modern) response.setHeader('cache-control', 'no-store')
+
+      const legacyCapabilities = () => ({
+        ...toolsCapability,
         ...(adapter.hasSkillsExtension()
           ? { resources: { directoryRead: false }, extensions: { [MCP_SKILLS_EXTENSION_ID]: {} } }
           : {})
       })
-      const serverInfo = { name: 'code-awareness-context-navigation', version: '1.0.0' }
       let rpcResult: unknown
       emit('mcp-dispatch-started', 'started')
       try {
-        if (method === 'initialize') {
-          const requestedVersion = params?.protocolVersion
+        if (method === 'initialize' && !modern) {
+          const requested = params?.protocolVersion
           rpcResult = {
-            protocolVersion: typeof requestedVersion === 'string' && supportedProtocolVersions.has(requestedVersion)
-              ? requestedVersion
+            protocolVersion: typeof requested === 'string' && legacyProtocolVersions.includes(requested)
+              ? requested
               : defaultProtocolVersion,
-            capabilities: serverCapabilities(),
+            capabilities: legacyCapabilities(),
             serverInfo
           }
         } else if (method === 'server/discover') {
-          const requestedVersion = params?.protocolVersion
-          rpcResult = {
-            protocolVersion: typeof requestedVersion === 'string' && supportedProtocolVersions.has(requestedVersion)
-              ? requestedVersion
-              : MCP_SKILLS_PROTOCOL_REVISION,
-            capabilities: serverCapabilities(),
-            serverInfo
-          }
-        } else if (method === 'skills/list') {
+          rpcResult = complete({ supportedVersions: supportedProtocolVersions, capabilities: toolsCapability, ...privateCache })
+        } else if (method === 'skills/list' && !modern) {
           const cursor = params?.cursor
           if (cursor !== undefined && typeof cursor !== 'string') {
             throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
           }
           rpcResult = adapter.listSkills(cursor !== undefined ? { cursor } : undefined)
-        } else if (method === 'skills/get') {
+        } else if (method === 'skills/get' && !modern) {
           const uri = params?.uri
           if (typeof uri !== 'string' || !uri) {
             throw new McpProtocolError(-32602, 'Invalid params: uri is required')
           }
           rpcResult = adapter.getSkill({ uri })
-        } else if (method === 'resources/read') {
+        } else if (method === 'resources/read' && !modern) {
           const uri = params?.uri
           if (typeof uri !== 'string' || !uri) {
             throw new McpProtocolError(-32602, 'Invalid params: uri is required')
           }
           rpcResult = adapter.readResource({ uri })
-        } else if (method === 'resources/list') {
+        } else if (method === 'resources/list' && !modern) {
           const cursor = params?.cursor
           if (cursor !== undefined && typeof cursor !== 'string') {
             throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
           }
           rpcResult = adapter.listResources(cursor !== undefined ? { cursor } : undefined)
         } else if (method === 'tools/list') {
-          rpcResult = { tools: adapter.listTools() }
-        } else if (method === 'tools/call' && typeof params?.name === 'string') {
+          const tools = adapter.listTools()
+          rpcResult = modern ? complete({ tools, ...privateCache }) : { tools }
+        } else if (method === 'tools/call' && (modern || typeof params?.name === 'string')) {
+          if (typeof params?.name !== 'string' || (modern && !adapter.listTools().some(({ name }) => name === params.name))) {
+            throw new McpProtocolError(-32602, 'Invalid or unknown tool name')
+          }
           if (Object.hasOwn(SESSION_RESPONSE_BUDGETS, params.name) && Buffer.byteLength(JSON.stringify(id)) > 256) {
             responseSize = writeJson(response, 400, error(null, -32600, 'INVALID_REQUEST_ID'))
             return
@@ -195,10 +233,11 @@ export function createMcpHttpServer(
           const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
           const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
           const { postResponse, ...publicResult } = toolResult
-          rpcResult = publicResult
+          rpcResult = modern ? complete(publicResult) : publicResult
           const sessionBudget = SESSION_RESPONSE_BUDGETS[params.name as SessionToolName]
           if (sessionBudget && Buffer.byteLength(JSON.stringify(result(id, rpcResult))) > sessionBudget) {
-            rpcResult = { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'RESPONSE_LIMIT_REACHED' }) }] }
+            const limited = { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'RESPONSE_LIMIT_REACHED' }) }] }
+            rpcResult = modern ? complete(limited) : limited
           }
           emit('codescope-response-produced', 'success')
           emit('codescope-handler-completed', 'success')
@@ -223,13 +262,13 @@ export function createMcpHttpServer(
           }
         } else {
           failure = 'METHOD_NOT_FOUND'
-          responseSize = writeJson(response, 200, error(id, -32601, 'Method not found'))
+          responseSize = writeJson(response, modern ? 404 : 200, error(id, -32601, 'Method not found'))
           return
         }
       } catch (dispatchError) {
         if (dispatchError instanceof McpProtocolError) {
           failure = dispatchError.code === -32601 ? 'METHOD_NOT_FOUND' : 'INVALID_PARAMS'
-          responseSize = writeJson(response, 200, error(id, dispatchError.code, dispatchError.message))
+          responseSize = writeJson(response, modern && dispatchError.code === -32601 ? 404 : 200, error(id, dispatchError.code, dispatchError.message))
           return
         }
         throw dispatchError
