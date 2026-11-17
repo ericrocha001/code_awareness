@@ -3,7 +3,8 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { z } from 'zod'
 import { assertProfilePath, assertUserOwned } from '../local-mcp-clients/safe-config-file'
 import { boundedFile, nativeDigest, sameNativePath } from './native-hooks'
-import { digest } from './privacy'
+import { classifyStructuredOutput, extractTextValue, validTimestamp, type NativeSourceAttemptRef, type NativeSourceEvent } from './native-source-events'
+import { digest, sanitize } from './privacy'
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/)
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
@@ -11,7 +12,7 @@ const grant = z.object({ profile: z.string().max(4096).refine(isAbsolute), creat
 const maxBytes = 8 * 1024 * 1024
 const maxLine = 512 * 1024
 const maxHeaderLine = 16 * 1024
-const maxEvents = 256
+const maxEvents = 512
 const decoder = new TextDecoder('utf-8', { fatal: true })
 
 export interface DiscoveredCodexSource {
@@ -168,9 +169,33 @@ export function codexSourceSnapshot(options: {
     if (fingerprint(fstatSync(fd, { bigint: true })) !== identity) throw new Error('SOURCE_REVISION_CHANGED')
     const buffer = Buffer.alloc(65536)
     let pending = Buffer.alloc(0), position = 0, ordinal = 0, omitted = 0
+    let currentTurnId: string | undefined
     const root = realpathSync.native(worktreeRoot)
-    const events: { eventId: string; ordinal: number; type: 'INPUT' | 'AGENT_UPDATE'; bytes: number; payloadDigest: string; content: string }[] = []
+    const events: NativeSourceEvent[] = []
+    const attempts: NativeSourceAttemptRef[] = []
+    const openCalls = new Map<string, { event: NativeSourceEvent; attempt: NativeSourceAttemptRef }>()
     const checkRoot = (value: unknown) => typeof value === 'string' && isAbsolute(value) && sameNativePath(realpathSync.native(value), root) && sameNativePath(resolve(value), root)
+    const pushEvent = (part: number, type: NativeSourceEvent['type'], rawText: string, extra: Partial<NativeSourceEvent> = {}) => {
+      if (events.length >= maxEvents) { omitted++; return undefined }
+      const content = sanitize(rawText), payloadDigest = digest(content)
+      const event: NativeSourceEvent = {
+        eventId: digest(JSON.stringify([identity, ordinal, part, payloadDigest])),
+        ordinal,
+        type,
+        ...(extra.timestamp ? { timestamp: extra.timestamp } : {}),
+        ...(extra.tool ? { tool: extra.tool } : {}),
+        ...(extra.turnId ? { turnId: extra.turnId } : {}),
+        ...(extra.status ? { status: extra.status } : {}),
+        ...(extra.pairing ? { pairing: extra.pairing } : {}),
+        ...(extra.errorKind ? { errorKind: extra.errorKind } : {}),
+        bytes: Buffer.byteLength(content),
+        payloadDigest,
+        content,
+        sanitized: content !== rawText
+      }
+      events.push(event)
+      return event
+    }
     for (;;) {
       assertCurrent()
       const size = readSync(fd, buffer, 0, buffer.length, position)
@@ -185,6 +210,7 @@ export function codexSourceSnapshot(options: {
         data = data.subarray(newline + 1)
         ordinal++
         const item = record?.payload
+        const timestamp = validTimestamp(record?.timestamp)
         if (ordinal === 1) {
           if (record?.type !== 'session_meta' || item?.id !== sourceSessionId || typeof item.session_id !== 'string' || !uuid.test(item.session_id) ||
             item.account_scoped !== true || typeof item.creator_account_id !== 'string' || typeof item.creator_user_id !== 'string' ||
@@ -193,14 +219,73 @@ export function codexSourceSnapshot(options: {
           if (!checkCodexWorktreeRoots(item, root, profile)) throw new Error('ORIGIN_UNVERIFIED')
           continue
         }
-        if (record?.type === 'turn_context' && !checkRoot(item?.cwd)) throw new Error('ORIGIN_UNVERIFIED')
-        if (record?.type !== 'response_item' || item?.type !== 'message' || item.role !== 'assistant' || !Array.isArray(item.content)) continue
-        for (const [part, entry] of item.content.entries()) {
-          if (entry?.type !== 'output_text' || typeof entry.text !== 'string') continue
-          if (events.length >= maxEvents) { omitted++; continue }
-          const payloadDigest = digest(entry.text)
-          events.push({ eventId: digest(JSON.stringify([identity, ordinal, part, payloadDigest])), ordinal, type: 'AGENT_UPDATE',
-            bytes: Buffer.byteLength(entry.text), payloadDigest, content: entry.text })
+        if (record?.type === 'turn_context') {
+          if (!checkRoot(item?.cwd)) throw new Error('ORIGIN_UNVERIFIED')
+          if (typeof item?.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) currentTurnId = item.turn_id
+          continue
+        }
+        if (record?.type === 'event_msg' && item && typeof item === 'object') {
+          if (item.type === 'task_started' && typeof item.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) {
+            currentTurnId = item.turn_id
+          } else if (item.type === 'turn_aborted' || item.type === 'error') {
+            const turnId = typeof item.turn_id === 'string' && item.turn_id.length <= 128 ? item.turn_id : currentTurnId
+            const reason = typeof item.reason === 'string' ? item.reason : typeof item.message === 'string' ? item.message : String(item.type)
+            const refusal = item.type === 'turn_aborted' || /(?:DENIED|REJECTED|REFUSED|ABORTED|INTERRUPTED)/i.test(reason)
+            pushEvent(0, 'ERROR', reason, { timestamp, turnId, status: refusal ? 'REFUSAL' : 'FAILURE', errorKind: item.type === 'turn_aborted' ? 'TURN_ABORTED' : 'PROVIDER_ERROR' })
+          }
+          continue
+        }
+        if (record?.type !== 'response_item' || !item || typeof item !== 'object') continue
+        if (item.type === 'message' && (item.role === 'assistant' || item.role === 'user') && Array.isArray(item.content)) {
+          const expectedPartType = item.role === 'user' ? 'input_text' : 'output_text'
+          const mappedType = item.role === 'user' ? 'INPUT' : 'AGENT_UPDATE'
+          for (const [part, entry] of item.content.entries()) {
+            if (entry?.type !== expectedPartType || typeof entry.text !== 'string') continue
+            pushEvent(part, mappedType, entry.text, { timestamp, turnId: currentTurnId })
+          }
+          continue
+        }
+        if (item.type === 'function_call' || item.type === 'custom_tool_call' || item.type === 'local_shell_call') {
+          const tool = sanitize(String(item.name || item.type || 'shell')).slice(0, 80)
+          const callId = typeof item.call_id === 'string' && item.call_id.length > 0 ? item.call_id : undefined
+          const rawInput = typeof item.arguments === 'string' ? item.arguments
+            : typeof item.input === 'string' ? item.input
+              : item.action !== undefined ? JSON.stringify(item.action)
+                : '{}'
+          const event = pushEvent(0, 'TOOL_CALL', rawInput, { timestamp, tool, turnId: currentTurnId, status: 'DANGLING', pairing: 'DANGLING' })
+          if (event) {
+            const attempt: NativeSourceAttemptRef = {
+              eventId: event.eventId, ordinal, ...(timestamp ? { timestamp } : {}), tool, ...(currentTurnId ? { turnId: currentTurnId } : {}),
+              status: 'DANGLING', pairing: 'DANGLING'
+            }
+            attempts.push(attempt)
+            if (callId && !openCalls.has(callId)) openCalls.set(callId, { event, attempt })
+          }
+          continue
+        }
+        if (item.type === 'function_call_output' || item.type === 'custom_tool_call_output' || item.type === 'local_shell_call_output') {
+          const callId = typeof item.call_id === 'string' && item.call_id.length > 0 ? item.call_id : undefined
+          const rawOutput = extractTextValue(item.output)
+          const classified = classifyStructuredOutput(rawOutput)
+          const match = callId ? openCalls.get(callId) : undefined
+          const pairing = match ? 'PAIRED' : 'UNPAIRED'
+          const event = pushEvent(0, classified.isError ? 'ERROR' : 'TOOL_RESULT', rawOutput, {
+            timestamp, tool: match?.event.tool, turnId: currentTurnId, status: classified.status, pairing, errorKind: classified.errorKind
+          })
+          if (match && event) {
+            match.event.status = classified.status
+            match.event.pairing = 'PAIRED'
+            match.attempt.status = classified.status
+            match.attempt.pairing = 'PAIRED'
+            match.attempt.resultEventId = event.eventId
+            if (classified.errorKind) match.attempt.errorKind = classified.errorKind
+            openCalls.delete(callId!)
+          } else if (event && classified.isError) {
+            attempts.push({
+              eventId: event.eventId, ordinal, ...(timestamp ? { timestamp } : {}), ...(currentTurnId ? { turnId: currentTurnId } : {}),
+              status: classified.status, ...(classified.errorKind ? { errorKind: classified.errorKind } : {}), pairing: 'UNPAIRED'
+            })
+          }
         }
       }
       if (data.length > maxLine) throw new Error('SOURCE_LIMIT_REACHED')
@@ -212,6 +297,13 @@ export function codexSourceSnapshot(options: {
       boundedFile(configPath, 65536) !== configText) throw new Error('SOURCE_REVISION_CHANGED')
     if (pending.length || !ordinal) throw new Error('SOURCE_FORMAT_UNSUPPORTED')
     if (!events.length) throw new Error('SOURCE_CONTENT_UNAVAILABLE')
-    return { fingerprint: digest(identity), events, omitted }
+    return {
+      fingerprint: digest(identity),
+      events,
+      attempts,
+      omitted,
+      sourceCoverage: 'TYPED_SOURCE_EVENTS_WITH_ATTEMPTS' as const,
+      attemptCoverage: 'EXACT_CALL_ID_PAIRING' as const
+    }
   } finally { closeSync(fd) }
 }

@@ -213,12 +213,13 @@ it('U3 discovers and reads real-shape Antigravity App transcript_full.jsonl with
     contentAvailability: 'AVAILABLE',
     captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE',
     identityEvidence: 'HASH_AND_APP_LOCATOR_VERIFIED',
-    sourceEventCount: 1
+    sourceEventCount: 4
   })
 
   const events = await f.call('list_agent_session_events', {
     ...listed.data.sessions[0].deepen.arguments,
-    expectedRevision: inspected.data.revision
+    expectedRevision: inspected.data.revision,
+    types: ['AGENT_UPDATE']
   })
   const read = await f.call('read_agent_session_event', {
     ...listed.data.sessions[0].deepen.arguments,
@@ -259,6 +260,6 @@ it('U3 discovers and reads real-shape Antigravity App transcript_full.jsonl with
     captureCoverage: 'HOOK_OBSERVED_AND_SOURCE_AVAILABLE',
     identityEvidence: 'HASH_AND_APP_LOCATOR_VERIFIED',
     observedEventCount: 1,
-    sourceEventCount: 1
+    sourceEventCount: 4
   })
 }, 30000)

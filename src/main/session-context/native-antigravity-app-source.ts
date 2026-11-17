@@ -4,12 +4,13 @@ import { dirname, isAbsolute, join, normalize } from 'node:path'
 import { assertProfilePath, assertUserOwned } from '../local-mcp-clients/safe-config-file'
 import { antigravityAppLocatorDigest, antigravityAppSessionId, antigravityAppTranscriptPath } from './antigravity-app-locator'
 import { boundedFile, nativeDigest, sameNativePath } from './native-hooks'
+import type { NativeSourceAttemptRef, NativeSourceEvent } from './native-source-events'
 import { sanitize } from './privacy'
 
 const maxBytes = 8 * 1024 * 1024
 const maxRecordBytes = 512 * 1024
 const maxRecords = 16_384
-const maxEvents = 256
+const maxEvents = 512
 const fingerprint = (s: BigIntStats) => [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':')
 
 export interface DiscoveredAntigravityAppSource {
@@ -180,10 +181,31 @@ export function antigravityAppSourceSnapshot(options: {
   const { identity, text } = readTranscriptChecked(path, profile, assertCurrent)
 
   if (!text.trim() || !text.endsWith('\n')) throw new Error('FORMAT_UNSUPPORTED')
-  const events: { eventId: string; ordinal: number; type: 'AGENT_UPDATE'; bytes: number; payloadDigest: string; content: string; sanitized: boolean }[] = []
+  const events: NativeSourceEvent[] = []
+  const attempts: NativeSourceAttemptRef[] = []
   let omitted = 0
   let ordinal = 0
   let matchedWorktree = false
+  const pushEvent = (part: number, type: NativeSourceEvent['type'], timestamp: string, rawText: string, extra: Partial<NativeSourceEvent> = {}) => {
+    if (events.length >= maxEvents) { omitted++; return undefined }
+    const content = sanitize(rawText), payloadDigest = nativeDigest(content)
+    const event: NativeSourceEvent = {
+      eventId: nativeDigest(JSON.stringify([identity, ordinal, part, payloadDigest])),
+      ordinal,
+      type,
+      timestamp,
+      ...(extra.tool ? { tool: extra.tool } : {}),
+      ...(extra.status ? { status: extra.status } : {}),
+      ...(extra.pairing ? { pairing: extra.pairing } : {}),
+      ...(extra.errorKind ? { errorKind: extra.errorKind } : {}),
+      bytes: Buffer.byteLength(content),
+      payloadDigest,
+      content,
+      sanitized: rawText !== content
+    }
+    events.push(event)
+    return event
+  }
   const normalizedRoot = worktreeRoot ? (() => {
     const p = realpathSync.native(worktreeRoot)
     return process.platform === 'win32' ? p.toLowerCase().replaceAll('\\', '/') : p
@@ -200,10 +222,44 @@ export function antigravityAppSourceSnapshot(options: {
     if (!Number.isSafeInteger(entry?.step_index) || entry.step_index < 0 || typeof entry.type !== 'string' ||
       typeof entry.source !== 'string' || typeof entry.created_at !== 'string' || !Number.isFinite(Date.parse(entry.created_at))) throw new Error('FORMAT_UNSUPPORTED')
     if (normalizedRoot && !matchedWorktree && entryMatchesWorktree(entry, normalizedRoot)) matchedWorktree = true
-    if (entry.type !== 'PLANNER_RESPONSE' || entry.source !== 'MODEL' || typeof entry.content !== 'string' || events.length >= maxEvents) { omitted++; continue }
-    const content = sanitize(entry.content), payloadDigest = nativeDigest(content)
-    events.push({ eventId: nativeDigest(JSON.stringify([identity, ordinal, payloadDigest])), ordinal, type: 'AGENT_UPDATE',
-      bytes: Buffer.byteLength(content), payloadDigest, content, sanitized: entry.content !== content })
+    const ts = entry.created_at as string
+    if (entry.type === 'USER_INPUT' && (entry.source === 'USER_EXPLICIT' || entry.source === 'USER') && typeof entry.content === 'string') {
+      pushEvent(0, 'INPUT', ts, entry.content)
+      continue
+    }
+    if (entry.type === 'PLANNER_RESPONSE' && entry.source === 'MODEL') {
+      let part = 0
+      if (Array.isArray(entry.tool_calls)) {
+        for (const tc of entry.tool_calls as { name?: unknown; args?: unknown }[]) {
+          if (!tc || typeof tc.name !== 'string') continue
+          const tool = sanitize(tc.name).slice(0, 80)
+          const rawArgs = tc.args !== undefined ? JSON.stringify(tc.args) : '{}'
+          const ev = pushEvent(part++, 'TOOL_CALL', ts, rawArgs, { tool, status: entry.status === 'ERROR' ? 'FAILURE' : 'UNKNOWN', pairing: 'NO_NATIVE_CALL_PAIR_ID' })
+          if (ev) attempts.push({ eventId: ev.eventId, ordinal, timestamp: ts, tool, status: ev.status!, pairing: 'NO_NATIVE_CALL_PAIR_ID' })
+        }
+      }
+      if (typeof entry.content === 'string' && entry.content.length > 0) {
+        pushEvent(part++, 'AGENT_UPDATE', ts, entry.content)
+      }
+      if (entry.status === 'ERROR' || typeof entry.error === 'string') {
+        const errorKind = typeof entry.error_code === 'string' ? entry.error_code : 'PLANNER_ERROR'
+        const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
+        pushEvent(part++, 'ERROR', ts, rawErr, { status: 'FAILURE', errorKind })
+      }
+      continue
+    }
+    if (entry.type === 'ERROR_MESSAGE' || entry.status === 'ERROR' || typeof entry.error === 'string') {
+      const errorKind = typeof entry.error_code === 'string' ? entry.error_code : entry.type === 'ERROR_MESSAGE' ? 'ERROR_MESSAGE' : `${entry.type}_ERROR`
+      const refusal = /(?:DENIED|REJECTED|REFUSED)/i.test(errorKind)
+      const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
+      pushEvent(0, 'ERROR', ts, rawErr, { status: refusal ? 'REFUSAL' : 'FAILURE', errorKind })
+      continue
+    }
+    if ((entry.type === 'GENERIC' || entry.type === 'GENERATE_IMAGE') && entry.source === 'MODEL' && typeof entry.content === 'string' && entry.content.length > 0) {
+      pushEvent(0, 'TOOL_RESULT', ts, entry.content, { status: 'UNKNOWN', pairing: 'NO_NATIVE_CALL_PAIR_ID' })
+      continue
+    }
+    omitted++
   }
   assertCurrent()
   try {
@@ -215,5 +271,12 @@ export function antigravityAppSourceSnapshot(options: {
     throw new Error('ORIGIN_UNVERIFIED')
   }
   if (!events.length) throw new Error('SOURCE_CONTENT_UNAVAILABLE')
-  return { fingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])), events, omitted }
+  return {
+    fingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])),
+    events,
+    attempts,
+    omitted,
+    sourceCoverage: 'TYPED_SOURCE_EVENTS_UNPAIRED_TOOLS' as const,
+    attemptCoverage: 'NO_NATIVE_CALL_PAIR_ID' as const
+  }
 }
