@@ -67,7 +67,7 @@ import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../rep
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orchestration/runtime-preview/mcp'
-import { nativeLiteralTarget, SESSION_CONTEXT_TOOLS, scopedSessionReadTools, type SessionToolName } from '../session-context/mcp'
+import { assertValidSessionRepositoryId, nativeLiteralTarget, SESSION_CONTEXT_TOOLS, scopedSessionReadTools, type SessionToolName } from '../session-context/mcp'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
 import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
@@ -455,9 +455,8 @@ export class ChannelMcpAdapter {
       if (!this.sessionContext) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
       if (scopedSessionReadTools.has(name) && args && typeof args === 'object' && 'repositoryId' in args) {
         const { repositoryId, ...selected } = args
-        if (typeof repositoryId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/.test(repositoryId)) {
-          return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
-        }
+        try { assertValidSessionRepositoryId(repositoryId) }
+        catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] } }
         if (repositoryId !== this.repositoryId) {
           try {
             assertArtifactAgent(authority, this.repositoryId ?? '')

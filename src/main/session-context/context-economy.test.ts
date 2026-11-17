@@ -22,8 +22,8 @@ import { nativeDigest } from './native-hooks'
 import { SessionStore, sessionStorePath } from './store'
 import { sourceFingerprint } from './target'
 
-const cleanup: Array<() => void> = []
-afterEach(() => { cleanup.splice(0).reverse().forEach(fn => fn()) })
+const cleanup: Array<() => void | Promise<void>> = []
+afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
 function safeRemove(dir: string) {
   execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })", dir], { windowsHide: true })
@@ -236,25 +236,51 @@ it('U5 executes the end-to-end focal investigation through an authenticated HTTP
     requestInit: { headers: { Authorization: `Bearer ${token}` } }
   }))
 
-  const listed = JSON.parse(((await mcpClient.callTool({ name: 'list_agent_sessions', arguments: target })).content as any)[0].text)
+  const listed = JSON.parse(((await mcpClient.callTool({ name: 'list_agent_sessions', arguments: { repositoryId: 'repo-http', ...target } })).content as any)[0].text)
   expect(listed.sessions, JSON.stringify(listed)).toHaveLength(1)
   expect(listed.sessions[0].captureCoverage).toBe('SOURCE_AVAILABLE_NO_HOOK_CAPTURE')
 
-  const inspected = JSON.parse(((await mcpClient.callTool({ name: 'inspect_agent_session', arguments: listed.sessions[0].deepen.arguments })).content as any)[0].text)
+  const deepen = listed.sessions[0].deepen.arguments
+  expect(deepen.repositoryId).toBe('repo-http')
+  const inspected = JSON.parse(((await mcpClient.callTool({ name: 'inspect_agent_session', arguments: deepen })).content as any)[0].text)
   expect(inspected.errors, JSON.stringify(inspected)).toHaveLength(1)
+
+  const listedEvents = JSON.parse(((await mcpClient.callTool({
+    name: 'list_agent_session_events',
+    arguments: { ...deepen, expectedRevision: inspected.revision, types: ['ERROR'] }
+  })).content as any)[0].text)
+  expect(listedEvents.events).toHaveLength(1)
 
   const read = JSON.parse(((await mcpClient.callTool({
     name: 'read_agent_session_event',
-    arguments: { ...listed.sessions[0].deepen.arguments, expectedRevision: inspected.revision, eventId: inspected.errors[0].eventId }
+    arguments: { ...deepen, expectedRevision: inspected.revision, eventId: listedEvents.events[0].eventId }
   })).content as any)[0].text)
   expect(read.content).toContain(expectedErr)
+
+  // C4: Direct SessionContextClient internal continuity preserves identical results with/without matching repositoryId and refuses mismatched/invalid ones
+  const clientWithRepo = JSON.parse(((await clientWorker.call('list_agent_sessions', { repositoryId: 'repo-http', ...target })).content as any)[0].text)
+  const clientWithoutRepo = JSON.parse(((await clientWorker.call('list_agent_sessions', target)).content as any)[0].text)
+  expect(clientWithRepo.sessions).toEqual(clientWithoutRepo.sessions)
+  const clientDeepen = clientWithRepo.sessions[0].deepen.arguments
+  const clientInsp = JSON.parse(((await clientWorker.call('inspect_agent_session', clientDeepen)).content as any)[0].text)
+  const clientEvents = JSON.parse(((await clientWorker.call('list_agent_session_events', { ...clientDeepen, expectedRevision: clientInsp.revision, types: ['ERROR'] })).content as any)[0].text)
+  const clientRead = JSON.parse(((await clientWorker.call('read_agent_session_event', { ...clientDeepen, expectedRevision: clientInsp.revision, eventId: clientEvents.events[0].eventId })).content as any)[0].text)
+  expect(clientRead.content).toBe(read.content)
+
+  const wrongRepoClient = await clientWorker.call('inspect_agent_session', { ...clientDeepen, repositoryId: 'other-repo' })
+  expect(wrongRepoClient.isError).toBe(true)
+  expect(JSON.parse((wrongRepoClient.content[0] as { text: string }).text)).toEqual({ code: 'INVALID_ARGUMENT' })
+
+  const badRepoClient = await clientWorker.call('list_agent_sessions', { repositoryId: 'bad/repo', ...target })
+  expect(badRepoClient.isError).toBe(true)
+  expect(JSON.parse((badRepoClient.content[0] as { text: string }).text)).toEqual({ code: 'INVALID_ARGUMENT' })
 
   const verifyStore = new SessionStore(storePath, 'repo-http', true)
   try {
     expect(verifyStore.count()).toBe(0)
     expect(verifyStore.diagnostics().payloadBytes).toBe(0)
   } finally { verifyStore.close() }
-}, 30000)
+}, 60000)
 
 
 it('C2 proves focal native discovery saves real disk I/O bytes vs unindexed scans without importing transcripts', async () => {

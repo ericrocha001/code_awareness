@@ -106,6 +106,25 @@ export function nativeLiteralTarget(name: SessionToolName, args: unknown) {
 export type SessionToolName = keyof typeof schemas
 export interface SessionContextPort { call(name: SessionToolName, args: unknown, allowArtifactMetadata?: boolean): Promise<McpToolResult> }
 export const scopedSessionReadTools = new Set<string>(['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event', 'discover_execution_context'])
+const continuityReadTools = new Set<SessionToolName>(['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event'])
+export const SESSION_REPOSITORY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/
+
+export function assertValidSessionRepositoryId(value: unknown): asserts value is string {
+  if (typeof value !== 'string' || !SESSION_REPOSITORY_ID_PATTERN.test(value)) {
+    throw new Error('INVALID_ARGUMENT')
+  }
+}
+
+// Preserve deepen.arguments.repositoryId for continuity reads while verifying store scope before strict domain parsing.
+export function normalizeScopedReadArgs(name: SessionToolName, raw: unknown, expectedRepositoryId: string): unknown {
+  if (!continuityReadTools.has(name) || !raw || typeof raw !== 'object' || Array.isArray(raw) || !('repositoryId' in raw)) {
+    return raw
+  }
+  const { repositoryId, ...selected } = raw as { repositoryId?: unknown }
+  assertValidSessionRepositoryId(repositoryId)
+  if (repositoryId !== expectedRepositoryId) throw new Error('INVALID_ARGUMENT')
+  return selected
+}
 const str = { type: 'string', minLength: 1, maxLength: 200 }, uuid = { type: 'string', format: 'uuid' }, rev = { type: 'integer', minimum: 1 }
 const cur = { type: 'string', maxLength: 512 }, time = { type: 'string', format: 'date-time' }
 const hex = { type: 'string', pattern: '^[a-f0-9]{64}$' }
@@ -442,7 +461,8 @@ export async function executeSessionTool(
   try {
     assertActive()
     if (!(name in schemas)) throw new Error('INVALID_ARGUMENT')
-    const q = schemas[name].parse(raw ?? {})
+    const normalized = normalizeScopedReadArgs(name, raw, store.repositoryId)
+    const q = schemas[name].parse(normalized ?? {})
     const budget = SESSION_RESPONSE_BUDGETS[name]
     let data: object
     if (name === 'discover_execution_context') {

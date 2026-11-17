@@ -586,3 +586,116 @@ it('C2 discovers via metadata/indexes with zero Antigravity transcript opens, st
   expect(observedProviders[0].filesOpened).toBe(0)
   expect(observedProviders[0].bytesRead).toBe(0)
 }, 30000)
+
+
+it('C4 normalizes repositoryId safely on continuity read boundary for Codex and Antigravity without weakening strict checks or authorization', async () => {
+  const f = setup()
+  const agProfile = join(f.dir, 'ag-c4')
+  const codexProfile = join(f.dir, 'codex-c4')
+  const codexDir = join(codexProfile, 'sessions', '2026', '11', '15')
+  mkdirSync(codexDir, { recursive: true })
+
+  const agConv = '019ba000-0000-7000-8000-000000000401'
+  const codexConv = '01a1e000-0000-7000-8000-000000000401'
+  const accHash = nativeDigest(JSON.stringify(['c4-u', 'c4-a']))
+
+  const agPath = antigravityAppTranscriptPath(agProfile, agConv)
+  mkdirSync(dirname(agPath), { recursive: true })
+  writeFileSync(agPath, [
+    { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: '2026-11-15T10:00:00Z', content: 'C4 user prompt' },
+    { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: '2026-11-15T10:00:05Z', content: 'C4_AG_LITERAL_REPLY' }
+  ].map(r => JSON.stringify(r)).join('\n') + '\n')
+  seedAntigravitySummariesDb(agProfile, [{ id: agConv, workspaceUris: [pathToFileURL(f.root).href] }])
+
+  writeFileSync(join(codexDir, `rollout-2026-11-15T10-00-00-${codexConv}.jsonl`), [
+    JSON.stringify({ type: 'session_meta', payload: { id: codexConv, session_id: codexConv, account_scoped: true, creator_user_id: 'c4-u', creator_account_id: 'c4-a', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.169.0-alpha.11.1', timestamp: '2026-11-15T10:00:00Z' } }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'C4_CODEX_LITERAL_REPLY' }] } })
+  ].join('\n') + '\n')
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: {
+      codex: { profile: codexProfile, creatorAccountHash: accHash },
+      antigravityApp: { profile: agProfile }
+    }
+  }))
+
+  const direct = async (name: Parameters<typeof executeSessionTool>[2], args: unknown, accountHash?: string) => {
+    const res = await executeSessionTool(
+      f.getStore(), {}, name, args, () => {}, f.target, [{ ...f.target, root: f.root, fingerprint: 'fp' }], undefined, f.root, undefined, undefined, accountHash
+    )
+    return { isError: !!res.isError, data: JSON.parse((res.content[0] as { text: string }).text) }
+  }
+
+  // 1. Same repo with vs without repositoryId yields equivalent results; literal round-trip works without stripping repositoryId manually
+  const listWithRepo = await direct('list_agent_sessions', { repositoryId: 'repo-u3', ...f.target })
+  const listWithoutRepo = await direct('list_agent_sessions', f.target)
+  expect(listWithRepo.isError).toBe(false)
+  expect(listWithRepo.data.sessions).toEqual(listWithoutRepo.data.sessions)
+  expect(listWithRepo.data.sessions).toHaveLength(2)
+
+  for (const [id, expectedText] of [[agConv, 'C4_AG_LITERAL_REPLY'], [codexConv, 'C4_CODEX_LITERAL_REPLY']] as const) {
+    const session = listWithRepo.data.sessions.find((s: any) => s.sourceSessionId === id)
+    expect(session.deepen.arguments.repositoryId).toBe('repo-u3')
+
+    const insp = await direct('inspect_agent_session', session.deepen.arguments)
+    expect(insp.isError).toBe(false)
+
+    const evs = await direct('list_agent_session_events', {
+      ...session.deepen.arguments,
+      expectedRevision: insp.data.revision,
+      types: ['AGENT_UPDATE']
+    })
+    expect(evs.isError).toBe(false)
+    expect(evs.data.events).toHaveLength(1)
+
+    const read = await direct('read_agent_session_event', {
+      ...session.deepen.arguments,
+      expectedRevision: insp.data.revision,
+      eventId: evs.data.events[0].eventId
+    })
+    expect(read.isError).toBe(false)
+    expect(read.data.content).toBe(expectedText)
+
+    // 2. Divergent repositoryId refuses access on internal read boundary without changing store/checkout
+    const wrongRepoInsp = await direct('inspect_agent_session', { ...session.deepen.arguments, repositoryId: 'other-repo' })
+    expect(wrongRepoInsp).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+
+    const wrongRepoRead = await direct('read_agent_session_event', {
+      ...session.deepen.arguments,
+      repositoryId: 'other-repo',
+      expectedRevision: insp.data.revision,
+      eventId: evs.data.events[0].eventId
+    })
+    expect(wrongRepoRead).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+
+    // 3. Invalid repositoryId format and extra unknown fields are rejected strictly
+    for (const badRepo of ['', 'bad/repo', 123, undefined]) {
+      const bad = await direct('inspect_agent_session', { ...session.deepen.arguments, repositoryId: badRepo })
+      expect(bad).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+    }
+    const extraKey = await direct('inspect_agent_session', { ...session.deepen.arguments, extraField: 'rejected' })
+    expect(extraKey).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+
+    // 4. Incompatible generation fails ORIGIN_UNVERIFIED even with valid repositoryId
+    const badGen = await direct('inspect_agent_session', {
+      ...session.deepen.arguments,
+      nativeSession: { ...session.deepen.arguments.nativeSession, generation: '9'.repeat(64) }
+    })
+    expect(badGen).toEqual({ isError: true, data: { code: 'ORIGIN_UNVERIFIED' } })
+  }
+
+  // 5. Mutative and non-continuity tools remain strict against repositoryId
+  const mutative = await direct('refresh_agent_sessions', { repositoryId: 'repo-u3', discardLegacyText: true })
+  expect(mutative).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+  const nonContinuity = await direct('inspect_capture_health', { repositoryId: 'repo-u3', ...f.target })
+  expect(nonContinuity).toEqual({ isError: true, data: { code: 'INVALID_ARGUMENT' } })
+
+  // 6. Revoked grant fails even when repositoryId matches store
+  writeFileSync(f.configPath, JSON.stringify({ repositoryId: 'repo-u3', nativeSources: {} }))
+  const agSession = listWithRepo.data.sessions.find((s: any) => s.sourceSessionId === agConv)
+  const codexSession = listWithRepo.data.sessions.find((s: any) => s.sourceSessionId === codexConv)
+  expect(await direct('inspect_agent_session', agSession.deepen.arguments)).toMatchObject({ isError: false, data: { sourceDiagnostic: 'PROFILE_UNAVAILABLE' } })
+  expect(await direct('inspect_agent_session', codexSession.deepen.arguments)).toEqual({ isError: true, data: { code: 'SOURCE_NOT_AUTHORIZED' } })
+  expect(f.getStore().count()).toBe(0)
+}, 30000)

@@ -5,7 +5,7 @@ import type { PublicationProvenancePort, PublicationAssociation } from '../../sh
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
-import { parseSessionRefresh, parseSessionList, parseCaptureHealth, nativeLiteralTarget } from './mcp'
+import { normalizeScopedReadArgs, parseSessionRefresh, parseSessionList, parseCaptureHealth, nativeLiteralTarget } from './mcp'
 import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
@@ -184,6 +184,8 @@ export class SessionContextClient implements SessionContextPort {
         try {
           await this.retiring
           if (!this.pending.has(id) || !this.active()) return
+          const normalizedArgs = normalizeScopedReadArgs(name, args, this.repositoryId)
+          args = normalizedArgs
           let target
           let liveTargets
           let nativeTargets
@@ -191,7 +193,7 @@ export class SessionContextClient implements SessionContextPort {
           let indexOnlyNativeDelivery = false
           if (name === 'list_agent_sessions') {
             try {
-              const query = parseSessionList(args)
+              const query = parseSessionList(normalizedArgs)
               indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
               if (query.worktreeId && this.resolveTarget?.discover) {
                 liveTargets = await this.resolveTarget.discover().catch(() => undefined)
@@ -206,8 +208,8 @@ export class SessionContextClient implements SessionContextPort {
               }
             } catch { throw new Error('INVALID_ARGUMENT') }
           }
-          const health = name === 'inspect_capture_health' ? parseCaptureHealth(args) : undefined
-          if (!indexOnlyNativeDelivery && !health?.source && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+          const health = name === 'inspect_capture_health' ? parseCaptureHealth(normalizedArgs) : undefined
+          if (!indexOnlyNativeDelivery && !health?.source && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(normalizedArgs && typeof normalizedArgs === 'object' && 'cursor' in normalizedArgs && normalizedArgs.cursor)) {
             request.phase = 'native-target-resolution'
             const available = (await this.resolveTarget.discover()).filter(target =>
               existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')) ||
