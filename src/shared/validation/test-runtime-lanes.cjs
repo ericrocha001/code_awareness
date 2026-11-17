@@ -25,6 +25,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/session-context/entire-live.test.ts',
   'src/main/session-context/mcp.test.ts',
   'src/main/session-context/focal-discovery.test.ts',
+  'src/main/session-context/hookless-source-recovery.test.ts',
   'src/main/session-context/target.test.ts',
   'src/main/continuum/bundle-builder.test.ts',
   'src/main/continuum/bundle-result-history.test.ts',

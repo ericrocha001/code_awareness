@@ -195,6 +195,14 @@ export class SessionContextClient implements SessionContextPort {
               indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
               if (query.worktreeId && this.resolveTarget?.discover) {
                 liveTargets = await this.resolveTarget.discover().catch(() => undefined)
+                const matched = liveTargets?.find(t => t.worktreeId === query.worktreeId && t.generation === query.generation)
+                if (matched && this.resolveTarget) {
+                  const resolved = await this.resolveTarget({ worktreeId: matched.worktreeId, generation: matched.generation }).catch(() => undefined)
+                  if (resolved) {
+                    target = { ...resolved, selection: { worktreeId: matched.worktreeId, generation: matched.generation } }
+                    request.validate = resolved.validate
+                  }
+                }
               }
             } catch { throw new Error('INVALID_ARGUMENT') }
           }

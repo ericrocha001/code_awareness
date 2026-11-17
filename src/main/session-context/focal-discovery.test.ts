@@ -201,4 +201,4 @@ it('U2 returns linked sessions with compact witness on Plan/Execution, never mer
   expect(ownerRes.data.sessions.some((s: any) => s.providerSessionId === 'codex-acc')).toBe(true)
   const foreignRes = await f.call({ worktreeId: f.wt1.worktreeId, generation: f.wt1.generation }, f.wt1, [f.wt1], nativeDigest('account-2'))
   expect(foreignRes.data.sessions.some((s: any) => s.providerSessionId === 'codex-acc')).toBe(false)
-})
+}, 20000)

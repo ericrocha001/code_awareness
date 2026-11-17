@@ -23,9 +23,9 @@ import { provenanceClass } from './provenance-evidence'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { nativeSessionProjection, nativeSessionSelector } from './native-session-query'
 import { nativeHookEvents } from './native-hooks'
-import { codexSourceSnapshot } from './native-codex-source'
+import { codexSourceSnapshot, discoverCodexSources } from './native-codex-source'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
-import { antigravityAppSourceSnapshot } from './native-antigravity-app-source'
+import { antigravityAppSourceSnapshot, discoverAntigravityAppSources } from './native-antigravity-app-source'
 import { searchReferencedEvents } from './session-event-search'
 import { executionContextQuery, executionSelector, executionEntity, discoverExecutionContext, EXECUTION_SELECTOR_SCHEMA } from './execution-context'
 
@@ -225,50 +225,91 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   query: z.infer<typeof nativeSessionDetail> | z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>,
   target: NonNullable<ReturnType<typeof nativeLiteralTarget>>, root: string, assertCurrent: () => void, budget: number, accountHash?: string) {
   const { nativeSession, expectedRevision, cursor, sourceSessionId } = query
-  const observation = nativeSessionProjection(store, { nativeSession, limit: 1 }, 'MAP', accountHash)
   const app = nativeSession.provider === 'antigravity-native'
-  const appObservations = app ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
-  const locators = [...new Set(appObservations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []))]
-  if (appObservations && locators.length && (appObservations.bounded || appObservations.events.some(event =>
-    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) throw new Error('ORIGIN_UNVERIFIED')
-  if (app && !locators.length) {
-    const sourceDiagnostic = antigravitySourceDiagnostic(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent)
-    if (expectedRevision !== undefined && expectedRevision !== observation.revision) throw new Error('REVISION_CONFLICT')
-    if (name === 'inspect_agent_session') return { ...observation, sourceDiagnostic }
-    throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic })
+  let observation: ReturnType<typeof nativeSessionProjection> | undefined
+  let hookObserved = false
+  try {
+    observation = nativeSessionProjection(store, { nativeSession, limit: 1 }, 'MAP', accountHash)
+    hookObserved = true
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'SESSION_UNAVAILABLE') throw error
+    if (!store.registry.visible({ kind: 'SESSION', id: `${nativeSession.provider}:${nativeSession.id}` }, accountHash)) {
+      throw new Error('SESSION_UNAVAILABLE')
+    }
   }
+  const appObservations = app && hookObserved ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
+  const locators = [...new Set(appObservations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []) ?? [])]
+  if (appObservations && (appObservations.bounded || appObservations.events.some(event =>
+    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) throw new Error('ORIGIN_UNVERIFIED')
   if ('hookEvents' in query && query.hookEvents || 'after' in query && (query.after || query.before)) throw new Error('INVALID_ARGUMENT')
   const source = { storePath: store.path, repositoryId: store.repositoryId, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!, assertCurrent }
+  const hooklessBase = observation ?? {
+    repositoryId: store.repositoryId,
+    nativeSession,
+    revision: 0,
+    source: app ? 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1' : 'CODEX_LOCAL_TRANSCRIPT_V1',
+    transcriptImported: false,
+    identityEvidence: app ? 'HASH_AND_APP_LOCATOR_VERIFIED' : 'HASH_AND_PROVIDER_HEADER_VERIFIED',
+    contentAvailability: 'SOURCE_UNAVAILABLE',
+    captureCoverage: hookObserved ? 'HOOK_OBSERVED_SOURCE_UNAVAILABLE' : 'NO_HOOK_AND_SOURCE_UNAVAILABLE',
+    causalEvidence: 'NOT_INFERRED',
+    coverage: 'PARTIAL',
+    sourceCoverage: 'NO_HOOK_OBSERVED',
+    origin: 'WORKTREE_REVALIDATED',
+    untrusted: true,
+    claimsVerified: false,
+    worktrees: [{ worktreeId: target.worktreeId, generation: target.generation }],
+    omittedWorktrees: 0,
+    observedEventCount: 0,
+    turnCoverage: 'UNKNOWN',
+    omittedTurns: 0,
+    turns: [],
+    fileCoverage: { state: 'NOT_OBSERVED' },
+    hookEvents: [],
+    events: []
+  }
   const snapshot = (() => {
     if (!app) return codexSourceSnapshot({ ...source, worktreeRoot: root })
-    if (locators.length !== 1) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: 'IDENTITY_MISMATCH' })
-    try { return antigravityAppSourceSnapshot({ ...source, locatorDigest: locators[0] }) }
+    if (locators.length > 1) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: 'IDENTITY_MISMATCH' })
+    try { return antigravityAppSourceSnapshot({ ...source, ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}), worktreeRoot: root }) }
     catch (error) {
-      if (error instanceof Error && ['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE'].includes(error.message)) {
+      if (error instanceof Error && ['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE', 'SOURCE_CONTENT_UNAVAILABLE'].includes(error.message)) {
         if (expectedRevision !== undefined && error.message === 'SOURCE_STALE') throw new Error('REVISION_CONFLICT')
+        if (!locators.length && error.message === 'PROFILE_UNAVAILABLE') {
+          const ideDiag = antigravitySourceDiagnostic(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent)
+          return { sourceDiagnostic: ideDiag === 'PROFILE_UNAVAILABLE' ? 'PROFILE_UNAVAILABLE' : ideDiag }
+        }
         return { sourceDiagnostic: error.message }
       }
       throw error
     }
   })()
+  const baseRevision = observation?.revision ?? 0
   if ('sourceDiagnostic' in snapshot) {
-    if (name === 'inspect_agent_session') return { ...observation, sourceDiagnostic: snapshot.sourceDiagnostic }
+    const captureCoverage = hookObserved ? 'HOOK_OBSERVED_SOURCE_UNAVAILABLE' : 'NO_HOOK_AND_SOURCE_UNAVAILABLE'
+    const identityEvidence = snapshot.sourceDiagnostic === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : hooklessBase.identityEvidence
+    if (name === 'inspect_agent_session') {
+      if (expectedRevision !== undefined && observation && expectedRevision !== observation.revision) throw new Error('REVISION_CONFLICT')
+      return { ...hooklessBase, contentAvailability: 'SOURCE_UNAVAILABLE', captureCoverage, identityEvidence, sourceDiagnostic: snapshot.sourceDiagnostic }
+    }
     throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: snapshot.sourceDiagnostic })
   }
-  const revision = parseInt(digest(JSON.stringify([observation.revision, snapshot.fingerprint])).slice(0, 13), 16) || 1
+  const revision = parseInt(digest(JSON.stringify([baseRevision, snapshot.fingerprint])).slice(0, 13), 16) || 1
   if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
   const scope = { name, repositoryId: store.repositoryId, nativeSession, target, revision, accountHash, event: 'eventId' in query ? query.eventId : null,
     limit: 'limit' in query ? query.limit : null,
     filters: name === 'list_agent_session_events' ? { query: (query as z.infer<typeof nativeSessionEvents>).query, file: (query as z.infer<typeof nativeSessionEvents>).file,
       turnId: (query as z.infer<typeof nativeSessionEvents>).turnId } : undefined }
   const offset = store.offset(cursor, scope)
+  const identityEvidence = app ? (locators.length === 1 ? 'HASH_AND_HOOK_LOCATOR_VERIFIED' : 'HASH_AND_APP_LOCATOR_VERIFIED') : 'HASH_AND_PROVIDER_HEADER_VERIFIED'
+  const captureCoverage = hookObserved ? 'HOOK_OBSERVED_AND_SOURCE_AVAILABLE' : 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE'
   const base = { repositoryId: store.repositoryId, nativeSession, revision,
     source: app ? 'ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1' : 'CODEX_LOCAL_TRANSCRIPT_V1', contentAvailability: 'AVAILABLE',
-    identityEvidence: app ? 'HASH_AND_HOOK_LOCATOR_VERIFIED' : 'HASH_AND_PROVIDER_HEADER_VERIFIED', origin: 'WORKTREE_REVALIDATED', causalEvidence: 'NOT_INFERRED',
+    captureCoverage, identityEvidence, origin: hookObserved ? 'WORKTREE_REVALIDATED' : 'LOCAL_SOURCE_VERIFIED_NO_HOOK', causalEvidence: 'NOT_INFERRED',
     sourceCoverage: 'SUPPORTED_ASSISTANT_OUTPUT_ONLY', transcriptImported: false, untrusted: true, claimsVerified: false }
   if (name === 'inspect_agent_session') {
-    if (cursor || 'mapView' in query && query.mapView === 'TURNS' || !('events' in observation)) throw new Error('INVALID_ARGUMENT')
-    const { events: observedEvents, ...map } = observation
+    if (cursor || 'mapView' in query && query.mapView === 'TURNS' || !('events' in hooklessBase)) throw new Error('INVALID_ARGUMENT')
+    const { events: observedEvents, ...map } = hooklessBase
     return { ...map, ...base, observedEvents, sourceEventCount: snapshot.events.length, omittedSourceEvents: snapshot.omitted }
   }
   if (name === 'list_agent_session_events' && 'limit' in query) {
@@ -486,18 +527,36 @@ export async function executeSessionTool(
       const registryLinked = mergeRegistry
         ? (selector ? actualStore.registry.linkedSessions(selector, filter, archiveAccountHash).rows : actualStore.registry.queryNativeSessions(filter, archiveAccountHash).rows)
         : []
+      const activeRoot = filter.worktreeId && filter.generation
+        ? (selectedTarget?.worktreeId === filter.worktreeId && selectedTarget?.generation === filter.generation
+          ? root
+          : liveTargets.find(t => t.worktreeId === filter.worktreeId && t.generation === filter.generation)?.root)
+        : undefined
+      const localGranted = mergeRegistry && activeRoot && filter.worktreeId && filter.generation && !selector
+        ? [
+          ...discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, assertCurrent: assertActive }),
+          ...discoverAntigravityAppSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, assertCurrent: assertActive })
+        ].filter(item =>
+          (!filter.agent || item.agent === filter.agent) &&
+          (!filter.after || (!!item.lastObserved && Date.parse(item.lastObserved) >= Date.parse(filter.after))) &&
+          (!filter.before || (!!item.lastObserved && Date.parse(item.lastObserved) <= Date.parse(filter.before))) &&
+          actualStore.registry.visible({ kind: 'SESSION', id: `${item.provider}:${item.providerSessionId}` }, archiveAccountHash)
+        )
+        : []
       const scopeRevision = digest(JSON.stringify([actualStore.catalogRevision(), mergeRegistry ? actualStore.registry.source('NATIVE_HOOK')?.revision ?? 'empty' : null,
-        registryLinked.map(r => [r.provider, r.providerSessionId, r.agent, r.witness])]))
+        registryLinked.map(r => [r.provider, r.providerSessionId, r.agent, r.witness]),
+        localGranted.map(g => [g.provider, g.providerSessionId, g.lastObserved ?? null])]))
       const scope = { name, repositoryId: actualStore.repositoryId, revision: scopeRevision, accountHash: archiveAccountHash ?? null, filter, view: focal ? 'FOCAL' : 'LEGACY' }
       const offset = actualStore.offset(cursor, scope)
       const importedRows = actualStore.sessions(filter, mergeRegistry ? 0 : offset, importedLimit, archiveAccountHash)
       for (const row of importedRows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       const availability: 'NOT_RECHECKED' | 'ACTIVE' | 'HISTORICAL_ONLY' = wtState === 'ACTIVE' || wtState === 'HISTORICAL_ONLY' ? wtState : 'NOT_RECHECKED'
+      type LocalGranted = typeof localGranted[number]
       type UnifiedItem = { sortTime: string; sortId: string; project: () => object }
       let pageRows: UnifiedItem[]
       let anyAssociation = importedRows.some(row => actualStore.associations(row.id, 1).length > 0)
       if (mergeRegistry) {
-        const byIdentity = new Map<string, { row?: SessionRow; registry?: RegistrySessionRecord; worktrees: WorktreeRef[] }>()
+        const byIdentity = new Map<string, { row?: SessionRow; registry?: RegistrySessionRecord; granted?: LocalGranted; worktrees: WorktreeRef[] }>()
         const keyOf = (provider: string, agent: string, providerSessionId: string) => `${provider}\0${agent}\0${providerSessionId}`
         for (const row of importedRows) {
           const k = keyOf(row.provider ?? 'entire', row.agent, row.providerSessionId)
@@ -515,6 +574,19 @@ export async function executeSessionTool(
             byIdentity.set(k, { registry: reg, worktrees: reg.worktrees })
           }
         }
+        const wtRef = filter.worktreeId && filter.generation ? { worktreeId: filter.worktreeId, generation: filter.generation } : undefined
+        for (const granted of localGranted) {
+          const k = keyOf(granted.provider, granted.agent, granted.providerSessionId)
+          const existing = byIdentity.get(k)
+          if (existing) {
+            existing.granted = granted
+            if (wtRef && !existing.worktrees.some(w => w.worktreeId === wtRef.worktreeId && w.generation === wtRef.generation)) {
+              existing.worktrees.push(wtRef)
+            }
+          } else {
+            byIdentity.set(k, { granted, worktrees: wtRef ? [wtRef] : [] })
+          }
+        }
         const merged = [...byIdentity.values()].map((entry): UnifiedItem => {
           if (entry.row) {
             const row = entry.row
@@ -525,10 +597,59 @@ export async function executeSessionTool(
               })
             }
           }
-          const reg = entry.registry!
+          if (entry.registry) {
+            const reg = entry.registry
+            const granted = entry.granted
+            return {
+              sortTime: reg.lastObserved ?? granted?.lastObserved ?? '', sortId: reg.providerSessionId,
+              project: () => ({
+                ...reg,
+                worktrees: entry.worktrees,
+                worktreeAvailability: availability,
+                claimsVerified: false,
+                ...(granted ? {
+                  sourceSessionId: granted.sourceSessionId,
+                  contentAvailability: granted.contentAvailability,
+                  captureCoverage: 'HOOK_OBSERVED_AND_SOURCE_AVAILABLE',
+                  identityEvidence: granted.identityEvidence,
+                  deepen: {
+                    tool: 'inspect_agent_session',
+                    arguments: {
+                      repositoryId: actualStore.repositoryId,
+                      sourceSessionId: granted.sourceSessionId,
+                      nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...(wtRef ? wtRef : {}) }
+                    }
+                  }
+                } : {})
+              })
+            }
+          }
+          const granted = entry.granted!
           return {
-            sortTime: reg.lastObserved ?? '', sortId: reg.providerSessionId,
-            project: () => ({ ...reg, worktrees: entry.worktrees, worktreeAvailability: availability, claimsVerified: false })
+            sortTime: granted.lastObserved ?? '', sortId: granted.providerSessionId,
+            project: () => ({
+              provider: granted.provider,
+              providerSessionId: granted.providerSessionId,
+              sourceSessionId: granted.sourceSessionId,
+              agent: granted.agent,
+              origin: 'LOCAL_SOURCE_GRANT',
+              aliasState: 'NOT_RECONCILED',
+              contentAvailability: granted.contentAvailability,
+              captureCoverage: granted.captureCoverage,
+              identityEvidence: granted.identityEvidence,
+              lastObserved: granted.lastObserved,
+              worktrees: entry.worktrees,
+              worktreeAvailability: availability,
+              claimsVerified: false,
+              deepen: {
+                tool: 'inspect_agent_session',
+                arguments: {
+                  repositoryId: actualStore.repositoryId,
+                  sourceSessionId: granted.sourceSessionId,
+                  nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...(wtRef ? wtRef : {}) }
+                }
+              }
+            })
           }
         }).sort((a, b) => b.sortTime.localeCompare(a.sortTime) || a.sortId.localeCompare(b.sortId))
         pageRows = merged.slice(offset, offset + filter.limit + 1)
