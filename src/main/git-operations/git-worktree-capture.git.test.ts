@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitOperationsService } from './git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
 
@@ -12,7 +11,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await cleanupTempRep
 async function fixture() {
   const root = await createTempGitRepo(); roots.push(root)
   await gitExec(root, ['config', 'core.autocrlf', 'false'])
-  const parent = mkdtempSync(join(tmpdir(), 'structural capture ')); roots.push(parent)
+  const parent = createTempDir('structural capture '); roots.push(parent)
   writeFileSync(join(root, 'file.ts'), '\ufeffexport function value() { return "Δ 🚀" }\r\n')
   await stageAll(root); await commit(root, 'base')
   const git = new GitService()

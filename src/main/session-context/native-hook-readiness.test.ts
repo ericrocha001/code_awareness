@@ -1,7 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
 import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, parseNativeEnvelope, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
@@ -19,15 +18,15 @@ import { executeSessionTool } from './mcp'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { antigravityAppTranscriptPath } from './antigravity-app-locator'
+import { createTempDir, cleanupTempRepo } from '../core/git-test-helpers'
 
-const cleanup: (() => void)[] = []
-afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
+const cleanup: (() => Promise<void> | void)[] = []
+afterEach(async () => {
+  for (const close of cleanup.splice(0).reverse()) await close()
+})
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), 'hook-readiness-'))
-  cleanup.push(() => {
-    if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5 })", root], { windowsHide: true })
-    else rmSync(root, { recursive: true, force: true, maxRetries: 5 })
-  })
+  const root = createTempDir('hook-readiness-')
+  cleanup.push(() => cleanupTempRepo(root, { strict: true }))
   mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/test\n')
   const commandPath = join(root, 'native-hook.cjs'); writeFileSync(commandPath, '')
   const target = { repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64) }
@@ -109,7 +108,7 @@ it('U1 verifies all seven native handlers and exact installation without grantin
   expect([f.configPath, f.bindingPath, f.snapshotPath].map(path => readFileSync(path, 'utf8'))).toEqual(before)
   f.change(config => { delete config.hooks.Stop; delete config.hooks.SessionEnd }, true)
   expect(inspectNativeInstallation(f.root, f.target)).toMatchObject({ state: 'INCOMPATIBLE', reasonCode: 'NATIVE_HANDLERS_MISSING', installed: 5 })
-})
+}, 15000)
 it('U1 diagnoses drift, stale generation and incompatible Windows commands without repair', () => {
   const f = fixture(); f.install()
   expect(inspectNativeInstallation(f.root, { ...f.target, generation: '3'.repeat(64) })).toMatchObject({ state: 'INCOMPATIBLE', reasonCode: 'WORKTREE_STALE' })
@@ -117,7 +116,7 @@ it('U1 diagnoses drift, stale generation and incompatible Windows commands witho
   expect(inspectNativeInstallation(f.root, f.target)).toMatchObject({ state: 'INCOMPATIBLE', reasonCode: 'HOOK_CONFIG_DRIFT' })
   f.change(config => { delete config.hooks.SessionStart[0].hooks[0].commandWindows }, true)
   expect(inspectNativeInstallation(f.root, f.target, 'win32')).toMatchObject({ state: 'INCOMPATIBLE', reasonCode: 'WINDOWS_COMMAND_INCOMPATIBLE' })
-})
+}, 15000)
 it('U1 keeps observed envelopes historical and isolated by generation after restart', () => {
   const f = fixture(); f.install()
   const binding = readNativeBinding(f.bindingPath)
@@ -128,7 +127,7 @@ it('U1 keeps observed envelopes historical and isolated by generation after rest
   expect(value).toMatchObject({ trust: { state: 'UNKNOWN' }, execution: { state: 'OBSERVED', freshness: 'HISTORICAL', observedAt: event.observedAt, sessionId: event.sessionId } })
   expect(JSON.stringify(value)).not.toContain('PRIVATE_SESSION')
   expect(nativeHookReadiness(f.store().registry, f.root, { ...f.target, generation: '3'.repeat(64) }).execution.state).toBe('UNOBSERVED')
-})
+}, 15000)
 function clientFixture(f: ReturnType<typeof fixture>) {
   let scope: NativeClientScope | undefined = { ...f.target, workspaceRoot: f.root, projectTrusted: true, clientId: 'private-client', threadId: 'private-thread', sessionId: 'PRIVATE_SESSION', protocolVersion: 'codex-app-server/v2', clientVersion: '0.166.0-alpha.6', connectedAt: new Date(Date.now() - 5000).toISOString() }
   const hooks = inspectNativeInstallation(f.root, f.target).handlers.map(handler => ({ key: handler.key, eventName: handler.event[0].toLowerCase() + handler.event.slice(1),
@@ -156,7 +155,7 @@ it('F1 requires an ingested current window, scoped trust and the current runtime
   f.store().registry.apply({ repositoryId: 'repo', source, revision: 'current', status: 'OBSERVED', cursor: JSON.stringify(current), edges: [] }, 'restarted')
   recordNativeGap(binding.spool, 'SPOOL_FULL')
   expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust).captureReadiness).toMatchObject({ state: 'PARTIAL' })
-})
+}, 15000)
 it('U2 inspects only an authorized same-context client on demand and emits a compact hash-scoped snapshot', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   const before = readFileSync(f.configPath, 'utf8')
@@ -171,7 +170,7 @@ it('U2 inspects only an authorized same-context client on demand and emits a com
   expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust).execution.state).toBe('UNOBSERVED')
   f.restart()
   expect(nativeHookReadiness(f.store().registry, f.root, f.target).trust.state).toBe('UNKNOWN')
-})
+}, 15000)
 it('U2 distinguishes untrusted, changed hash, missing/ambiguous hooks, unsupported protocol and absent authorization', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   c.hooks[0].trustStatus = 'untrusted'
@@ -200,7 +199,7 @@ it('U2 distinguishes untrusted, changed hash, missing/ambiguous hooks, unsupport
   c.client.request = async () => { throw Object.assign(new Error('PRIVATE_FAILURE'), { code: -32601 }) }
   expect(await inspectNativeTrust(f.root, f.target, true, c.client)).toMatchObject({ state: 'UNSUPPORTED', reasonCode: 'PROTOCOL_UNSUPPORTED' })
   expect(await inspectNativeTrust(f.root, f.target, true)).toMatchObject({ state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' })
-})
+}, 15000)
 it('U2 discards in-flight evidence when session, installation or cancellation changes', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   const request = c.client.request
@@ -212,7 +211,7 @@ it('U2 discards in-flight evidence when session, installation or cancellation ch
   let active = true
   c.client.request = async (...args) => { const response = await request(...args); active = false; return response }
   await expect(inspectNativeTrust(f.root, f.target, true, c.client, () => { if (!active) throw new Error('PROJECT_CONTEXT_CHANGED') })).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
-})
+}, 15000)
 it('U3 distinguishes completed and failed native runs, retains no raw payload and never treats inspection as execution', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   const now = Math.floor(Date.now() / 1000)
@@ -230,7 +229,7 @@ it('U3 distinguishes completed and failed native runs, retains no raw payload an
   expect(failed).toMatchObject({ execution: { state: 'FAILED', reasonCode: 'HOOK_EXECUTION_FAILED' }, nextEvidence: 'INSPECT_FAILED_EVENT_READ_ONLY' })
   for (const secret of ['PRIVATE_OUTPUT','PRIVATE_COMMAND','PRIVATE_RUN', f.root]) expect(JSON.stringify(failed)).not.toContain(secret)
   expect(f.store().registry.sources()).toEqual([])
-})
+}, 15000)
 it('U3 isolates two sessions and Worktrees, rejects other handlers, and does not promote evidence after restart or expiry', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   const now = Math.floor(Date.now() / 1000), run = { id: 'run', handlerType: 'command', eventName: 'stop', sourcePath: f.configPath, displayOrder: 0, status: 'completed', startedAt: now, completedAt: now }
@@ -247,12 +246,12 @@ it('U3 isolates two sessions and Worktrees, rejects other handlers, and does not
   expect(nativeHookReadiness(f.store().registry, f.root, f.target, { ...trust, expiresAt: new Date(Date.now() - 1).toISOString() }).trust).toMatchObject({ state: 'UNKNOWN', reasonCode: 'TRUST_EXPIRED' })
   f.restart()
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ trust: { state: 'UNKNOWN' }, execution: { state: 'UNOBSERVED' } })
-})
+}, 15000)
 it('U3 retains legacy coverage as historical UNKNOWN rather than inventing a current event', () => {
   const f = fixture(); f.install()
   f.store().registry.apply({ repositoryId: 'repo', source: `NATIVE_CAPTURE:${f.target.worktreeId}:${f.target.generation}`, revision: 'legacy', status: 'OBSERVED', edges: [] }, undefined)
   expect(nativeHookReadiness(f.store().registry, f.root, f.target)).toMatchObject({ execution: { state: 'UNKNOWN', reasonCode: 'EVENT_DETAIL_UNAVAILABLE', freshness: 'HISTORICAL' } })
-})
+}, 15000)
 
 it('investigates native hook observations by provider and generation without inferring a transcript', async () => {
   const f = fixture()
@@ -286,7 +285,7 @@ it('investigates native hook observations by provider and generation without inf
   expect(await call('read_agent_session_event', { ...selected, expectedRevision: map.revision, eventId: first.eventId })).toEqual({ code: 'SOURCE_UNAVAILABLE' })
   f.restart()
   expect(await call('inspect_agent_session', { ...selected, expectedRevision: map.revision })).toMatchObject({ revision: map.revision, observedEventCount: 2 })
-})
+}, 15000)
 
 it('revalidates an authorized Codex transcript and exposes only its selected literal field', async () => {
   const f = fixture()

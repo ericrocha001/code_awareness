@@ -1,9 +1,9 @@
 import { expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { writeFileSync } from 'node:fs'
+
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitService } from '../core/git-service'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
@@ -37,7 +37,7 @@ it('resolves modified consumer scopes for public interface and class member sign
   }
 })
 it('discovers a changed direct contract without selecting pairs and rejects unrelated symbols', async () => {
-  const root = await createTempGitRepo(), parent = mkdtempSync(join(tmpdir(), 'contract-gate-'))
+  const root = await createTempGitRepo(), parent = createTempDir('contract-gate-')
   try {
     writeFileSync(join(root, 'service.ts'), 'export function service(value: number): number { return value + 1 }\n')
     writeFileSync(join(root, 'consumer.ts'), 'import { service } from "./service"\nexport function consume(): number { return service(1) }\n')

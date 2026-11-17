@@ -1,12 +1,11 @@
 import Database from 'better-sqlite3'
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, readdirSync, realpathSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { GitService } from '../core/git-service'
-import { cleanupTempRepo, createTempGitRepo, gitExec } from '../core/git-test-helpers'
+import { cleanupTempRepo, createTempDir, createTempGitRepo, gitExec } from '../core/git-test-helpers'
 import { GitAtlasReader } from './git-atlas'
 import { GitAtlasSqliteCache } from './git-atlas-sqlite-cache'
 import { GitOperationsService } from './git-operations-service'
@@ -23,7 +22,7 @@ afterEach(async () => {
 })
 
 async function fixture() {
-  const root = await createTempGitRepo(), directory = mkdtempSync(join(tmpdir(), 'atlas-sql-'))
+  const root = await createTempGitRepo(), directory = createTempDir('atlas-sql-')
   roots.push(root, directory)
   const records: string[] = [], now = Math.floor(Date.now() / 1000) - 600
   for (let i = 1; i <= 240; i++) records.push(`commit refs/heads/main\nmark :${i}\ncommitter Proof <proof@example.com> ${now + i} +0000\ndata 4\ntest\n\n`)

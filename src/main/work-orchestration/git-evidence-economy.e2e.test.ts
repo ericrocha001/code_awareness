@@ -1,12 +1,11 @@
 import { expect, it } from 'vitest'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { performance } from 'node:perf_hooks'
 import { execFileSync } from 'node:child_process'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitService } from '../core/git-service'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
@@ -21,7 +20,7 @@ it.skipIf(!['before', 'after'].includes(process.env.CA_GIT_ECONOMY_PHASE ?? ''))
   let root: string, parent: string, roots: string[]
   if (phase === 'after' && existsSync(fixtureFile)) ({ root, parent, roots } = JSON.parse(readFileSync(fixtureFile, 'utf8')))
   else {
-    root = await createTempGitRepo(); parent = mkdtempSync(join(tmpdir(), 'git-economy-'))
+    root = await createTempGitRepo(); parent = createTempDir('git-economy-')
     writeFileSync(join(root, 'service.ts'), 'export function service(value: number): number { return value + 1 }\n')
     writeFileSync(join(root, 'consumer.ts'), 'import { service } from "./service"\nexport function consume(): number { return service(1) }\n')
     writeFileSync(join(root, 'other.ts'), 'export function service(value: number): number { return value - 1 }\n')

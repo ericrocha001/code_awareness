@@ -1,9 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { GitService } from '../core/git-service'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitOperationsService } from './git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import { executeGitOperationsTool } from './git-operations-mcp'
@@ -24,7 +23,7 @@ afterEach(async () => { duringRead.effect = null; vi.restoreAllMocks(); for (con
 
 async function fixture() {
   const root = await createTempGitRepo(); roots.push(root)
-  const parent = mkdtempSync(join(tmpdir(), 'read safety ')); roots.push(parent)
+  const parent = createTempDir('read safety '); roots.push(parent)
   writeFileSync(join(root, 'file.txt'), '\ufefffirst\r\nΔ 🚀 second\r\nthird\r\n')
   await stageAll(root); await commit(root, 'initial')
   const external = join(parent, 'external')

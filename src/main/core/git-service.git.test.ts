@@ -3,11 +3,11 @@
 */
 
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { GitService } from './git-service'
 import {
+  createTempDir,
   createTempGitRepo,
   cleanupTempRepo,
   gitExec,
@@ -46,7 +46,7 @@ describe('GitService', () => {
     })
 
     it('retorna false para um diretório temporário sem .git', async () => {
-      const plain = mkdtempSync(join(tmpdir(), 'git_test_')) // sem git init
+      const plain = createTempDir('git_test_') // sem git init
       await expect(gitService.isGitRepository(plain)).resolves.toBe(false)
       await cleanupTempRepo(plain)
     })
@@ -148,7 +148,7 @@ it('exclui pastas internas da listagem', async () => {
     })
 
     it('retorna [] para diretório que não é repositório Git', async () => {
-      const plain = mkdtempSync(join(tmpdir(), 'git_test_')) // sem git init
+      const plain = createTempDir('git_test_') // sem git init
       await expect(gitService.getModifiedFiles(plain)).resolves.toEqual([])
       await cleanupTempRepo(plain)
     })

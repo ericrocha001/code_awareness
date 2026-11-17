@@ -1,8 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
-import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
+import { createTempDir, createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '../core/git-test-helpers'
 import { GitService } from '../core/git-service'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from '../github/github-git-transport'
@@ -16,7 +15,7 @@ import { recommendOperation } from './operational-recommendations'
 const roots: string[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 async function fixture() {
-  const root = await createTempGitRepo(), parent = mkdtempSync(join(tmpdir(), 'workline-history-')); roots.push(root, parent)
+  const root = await createTempGitRepo(), parent = createTempDir('workline-history-'); roots.push(root, parent)
   await gitExec(root, ['branch', '-m', 'technical-reference'])
   writeFileSync(join(root, 'service.ts'), 'export function service(value: number): number { return value }\nexport function helper(value: number): number { return value }\n')
   writeFileSync(join(root, 'consumer.ts'), 'import { service, helper } from "./service"\nexport function consume() { return service(1) + helper(1) }\n')

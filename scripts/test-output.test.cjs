@@ -4,7 +4,9 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
-const { run, project, inspect, observe, limits } = require('./test-output.cjs')
+delete process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR
+delete process.env.CODE_AWARENESS_VALIDATION_KIND
+const { run, runSequence, project, projectSequence, inspect, observe, limits } = require('./test-output.cjs')
 
 test('noisy success preserves bytes, reduces presentation by at least 80%, and never invents counts', async () => {
   const receipt = await run(process.execPath, ['-e', "process.stdout.write('noise '.repeat(50000));process.stderr.write('last error stream\\n')"])
@@ -286,4 +288,80 @@ test('receipt and compact output retain discovery and register diagnostics witho
     assert.equal(JSON.stringify(receipt).includes('private-token'), false)
     assert.equal(fs.existsSync(path.join(receipt.directory, 'receipt.json')), true)
   }
+})
+
+test('runSequence executes phases strictly sequentially, preserves per-phase receipts, and stops on first failure', async t => {
+  const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'test-output-seq-'))
+  t.after(() => fs.rmSync(fixtures, { recursive: true, force: true }))
+  const traceFile = path.join(fixtures, 'trace.log')
+  const phaseScript = (name, exitCode = 0) => [
+    '-e',
+    `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(traceFile)}, ${JSON.stringify(name)} + ':start\\n');setTimeout(()=>{fs.appendFileSync(${JSON.stringify(traceFile)}, ${JSON.stringify(name)} + ':end\\n');process.exit(${exitCode})},30)`
+  ]
+
+  const passed = await runSequence([
+    { command: process.execPath, args: phaseScript('p1') },
+    { command: process.execPath, args: phaseScript('p2') }
+  ])
+  assert.equal(passed.state, 'PASS')
+  assert.equal(passed.exitCode, 0)
+  assert.equal(passed.completedPhases, 2)
+  assert.equal(passed.failedPhaseIndex, null)
+  assert.equal(fs.readFileSync(traceFile, 'utf8'), 'p1:start\np1:end\np2:start\np2:end\n')
+  for (const receipt of passed.phases) {
+    assert.equal(fs.existsSync(path.join(receipt.directory, 'receipt.json')), true)
+  }
+  const compact = JSON.parse(projectSequence(passed))
+  assert.equal(compact.phases.length, 2)
+  assert.notEqual(compact.phases[0].id, compact.phases[1].id)
+
+  fs.writeFileSync(traceFile, '')
+  const failed = await runSequence([
+    { command: process.execPath, args: phaseScript('first-pass', 0) },
+    { command: process.execPath, args: phaseScript('second-fail', 7) },
+    { command: process.execPath, args: phaseScript('third-skipped', 0) }
+  ])
+  assert.equal(failed.state, 'FAIL')
+  assert.equal(failed.exitCode, 7)
+  assert.equal(failed.completedPhases, 2)
+  assert.equal(failed.totalPhases, 3)
+  assert.equal(failed.failedPhaseIndex, 1)
+  assert.equal(fs.readFileSync(traceFile, 'utf8'), 'first-pass:start\nfirst-pass:end\nsecond-fail:start\nsecond-fail:end\n')
+})
+
+test('runSequence propagates overall timeout and abort signal cleanly across phases', async t => {
+  const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'test-output-seq-abort-'))
+  t.after(() => fs.rmSync(fixtures, { recursive: true, force: true }))
+  const marker = path.join(fixtures, 'second-ran')
+
+  const timedOut = await runSequence([
+    { command: process.execPath, args: ['-e', 'setTimeout(()=>{}, 5000)'] },
+    { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`] }
+  ], { timeoutMs: 120 })
+  assert.equal(timedOut.state, 'TIMEOUT')
+  assert.equal(timedOut.completedPhases, 1)
+  assert.equal(timedOut.failedPhaseIndex, 0)
+  assert.equal(fs.existsSync(marker), false)
+
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(), 80)
+  const cancelled = await runSequence([
+    { command: process.execPath, args: ['-e', 'setTimeout(()=>{}, 5000)'] },
+    { command: process.execPath, args: ['-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes')`] }
+  ], { signal: controller.signal })
+  assert.equal(cancelled.state, 'CANCELLED')
+  assert.equal(cancelled.completedPhases, 1)
+  assert.equal(fs.existsSync(marker), false)
+
+  const { spawnSync } = require('node:child_process')
+  const cliResult = spawnSync(process.execPath, [
+    path.join(__dirname, 'test-output.cjs'), 'sequence', '--',
+    'node', '-e', "console.log('phase1')",
+    '---',
+    'node', '-e', "console.log('phase2')"
+  ], { encoding: 'utf8', env: { ...process.env, CODE_AWARENESS_TEST_CAPTURE: '' } })
+  assert.equal(cliResult.status, 0, cliResult.stderr)
+  const cliSummary = JSON.parse(cliResult.stdout)
+  assert.equal(cliSummary.state, 'PASS')
+  assert.equal(cliSummary.completedPhases, 2)
 })

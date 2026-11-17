@@ -3,12 +3,20 @@
 */
 
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
-import { tmpdir } from 'os'
 import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { scanRepository } from './repository-scanner'
 import { closeRepositoryDatabase } from './repository-database'
+import {
+  createOwnedTempDir,
+  registerOwnedTempDir,
+  safeCleanupTempDir,
+  type CleanupOptions,
+  type CleanupResult
+} from './temp-cleanup'
+
+export type { CleanupOptions, CleanupResult }
 
 // ─── Bloco 1 — Tipos e Função-Oráculo ──────────────────────────────────────
 
@@ -191,24 +199,15 @@ export async function verifyInvariant(
 
 /** Cria um diretório temporário único e isolado para testes. */
 export function createTempRepo(): string {
-  return mkdtempSync(join(tmpdir(), 'codemap_test_'))
+  return createOwnedTempDir('codemap_test_')
 }
 
-/** Fecha conexões abertas e remove o repositório temporário por completo. */
-export async function cleanupTempRepo(repoPath: string): Promise<void> {
-  closeRepositoryDatabase(repoPath)
-  // BUGFIX (Windows): o lock do WAL do SQLite pode segurar um handle após fechar a
-  // conexão, impedindo a remoção imediata do diretório; faz um pequeno loop de retry e,
-  // se persistir, desiste silenciosamente para não abortar os testes.
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      rmSync(repoPath, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 })
-      return
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
-  }
+/** Fecha conexões abertas e remove o repositório temporário possuído pelo helper. */
+export async function cleanupTempRepo(repoPath: string, options: CleanupOptions = {}): Promise<void> {
+  await safeCleanupTempDir(repoPath, { ...options, beforeRemove: closeRepositoryDatabase })
 }
+
+export { registerOwnedTempDir as registerTempDir }
 
 /** Escreve um arquivo de teste, criando diretórios intermediários se necessário. */
 export function writeTestFile(repoPath: string, relativePath: string, content: string): void {
@@ -413,19 +412,8 @@ export function buildDerived(name: string): DerivedEntity {
  * Encapsula o loop de retry do BUGFIX Windows (lock do WAL do SQLite).
  * Substitui a duplicação do padrão em múltiplos afterEach.
  */
-export async function cleanupTestDir(testDir: string): Promise<void> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      if (existsSync(testDir)) {
-        rmSync(testDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 })
-      }
-      return
-    } catch {
-      await new Promise(resolve => setTimeout(resolve, 100))
-    }
-  }
-  // Último esforço: ignora falha para não bloquear outros testes
-  console.warn(`[test-helpers] cleanupTestDir falhou após 4 tentativas: ${testDir}`)
+export async function cleanupTestDir(testDir: string, options: CleanupOptions = {}): Promise<void> {
+  await safeCleanupTempDir(testDir, options)
 }
 
 /**
