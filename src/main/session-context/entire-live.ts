@@ -99,3 +99,157 @@ export function projectLiveUsage(raw: unknown, providerId: string): object {
   return { dataSource: 'ENTIRE_REPORTED', coverage: complete ? 'COMPLETE' : tokens ? 'PARTIAL' : 'UNAVAILABLE',
     ...(!tokens ? { code: 'TOKEN_USAGE_UNAVAILABLE' } : {}), metrics, signals, billingCoverage: 'UNAVAILABLE' }
 }
+
+export interface EntireLiveProviderEvidence {
+  id?: unknown
+  version?: unknown
+  sha256?: unknown
+  pin?: unknown
+  source?: unknown
+}
+
+export interface EntireLiveAcceptanceInput {
+  id?: string
+  expectedPin?: { version?: unknown; sha256?: unknown }
+  provider?: EntireLiveProviderEvidence | null
+  coverage?: unknown
+  sessions?: unknown
+  usageCoverage?: unknown
+  transcriptImported?: unknown
+  outcome?: 'VERIFIED' | 'VERSION_MISMATCH' | 'PIN_MISMATCH' | 'SOURCE_UNAVAILABLE' | 'SKIPPED' | 'ERROR' | 'INCOMPLETE'
+  code?: string
+  reason?: string
+}
+
+const ACCEPTANCE_VERSION_PATTERN = /^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]{1,32})?$/
+const ACCEPTANCE_SHA256_PATTERN = /^[a-f0-9]{64}$/
+const ACCEPTANCE_CODE_PATTERN = /^[A-Z][A-Z0-9_]{2,64}$/
+const ACCEPTANCE_COVERAGE_VALUES = new Set(['COMPLETE', 'PARTIAL', 'UNAVAILABLE'])
+
+export function buildEntireLiveAcceptanceSummary(input: EntireLiveAcceptanceInput) {
+  const provider = input.provider ?? undefined
+  const version = typeof provider?.version === 'string' && ACCEPTANCE_VERSION_PATTERN.test(provider.version) ? provider.version : null
+  const sha256 = typeof provider?.sha256 === 'string' && ACCEPTANCE_SHA256_PATTERN.test(provider.sha256) ? provider.sha256 : null
+  const source = provider?.source === 'PROVIDER_PIN_AND_CLI_VERSION' || provider?.source === 'PROVIDER_PIN_CONFIG'
+    ? provider.source
+    : 'UNAVAILABLE'
+  let pin: 'VERIFIED' | 'MISMATCH' | 'UNVERIFIED' =
+    provider?.pin === 'VERIFIED' ? 'VERIFIED' : provider?.pin === 'MISMATCH' ? 'MISMATCH' : 'UNVERIFIED'
+  let outcome = input.outcome
+  let reason = input.reason
+
+  if (pin === 'VERIFIED' && input.expectedPin) {
+    if (version !== null && input.expectedPin.version !== undefined && input.expectedPin.version !== version) {
+      pin = 'MISMATCH'
+      outcome ??= 'VERSION_MISMATCH'
+      reason ??= 'EXPECTED_VERSION_MISMATCH'
+    } else if (sha256 !== null && input.expectedPin.sha256 !== undefined && input.expectedPin.sha256 !== sha256) {
+      pin = 'MISMATCH'
+      outcome ??= 'PIN_MISMATCH'
+      reason ??= 'EXPECTED_SHA256_MISMATCH'
+    }
+  }
+
+  const sessions = Array.isArray(input.sessions)
+    ? input.sessions.length
+    : typeof input.sessions === 'number' && Number.isSafeInteger(input.sessions) && input.sessions >= 0
+      ? input.sessions
+      : undefined
+  const coverage = typeof input.coverage === 'string' && ACCEPTANCE_COVERAGE_VALUES.has(input.coverage)
+    ? (input.coverage as 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE')
+    : undefined
+  const usageCoverage = typeof input.usageCoverage === 'string' && ACCEPTANCE_COVERAGE_VALUES.has(input.usageCoverage)
+    ? (input.usageCoverage as 'COMPLETE' | 'PARTIAL' | 'UNAVAILABLE')
+    : undefined
+
+  if (!outcome) {
+    if (!version || !sha256 || pin !== 'VERIFIED' || source !== 'PROVIDER_PIN_AND_CLI_VERSION' || (sessions !== undefined && sessions < 1)) {
+      outcome = 'INCOMPLETE'
+      reason ??= !version
+        ? 'PROVIDER_VERSION_MISSING'
+        : !sha256
+          ? 'PROVIDER_SHA256_MISSING'
+          : sessions !== undefined && sessions < 1
+            ? 'NO_LIVE_SESSIONS_OBSERVED'
+            : 'PROVIDER_PIN_UNVERIFIED'
+    } else {
+      outcome = 'VERIFIED'
+    }
+  }
+
+  return {
+    id: input.id && /^[A-Z0-9_]{3,64}$/.test(input.id) ? input.id : 'ENTIRE_LIVE_CHANNEL',
+    provider: 'entire',
+    version,
+    sha256,
+    pin,
+    source,
+    outcome,
+    ...(coverage ? { coverage } : {}),
+    ...(sessions !== undefined ? { sessions } : {}),
+    ...(usageCoverage ? { usageCoverage } : {}),
+    transcriptImported: input.transcriptImported === undefined ? false : input.transcriptImported,
+    ...(input.code && ACCEPTANCE_CODE_PATTERN.test(input.code) ? { code: input.code } : {}),
+    ...(reason && ACCEPTANCE_CODE_PATTERN.test(reason) ? { reason } : {})
+  }
+}
+
+export function classifyEntireLiveAcceptanceError(
+  error: unknown,
+  expectedPin?: { version?: unknown; sha256?: unknown },
+  provider?: EntireLiveProviderEvidence | null
+) {
+  let code: string | undefined
+  let reason: string | undefined
+  const errObj = error && typeof error === 'object' ? (error as { code?: unknown; reason?: unknown; diagnostic?: { code?: unknown; reason?: unknown }; message?: unknown }) : undefined
+  if (typeof errObj?.code === 'string' && ACCEPTANCE_CODE_PATTERN.test(errObj.code)) code = errObj.code
+  if (typeof errObj?.reason === 'string' && ACCEPTANCE_CODE_PATTERN.test(errObj.reason)) reason = errObj.reason
+  if (!code && typeof errObj?.diagnostic?.code === 'string' && ACCEPTANCE_CODE_PATTERN.test(errObj.diagnostic.code)) code = errObj.diagnostic.code
+  if (!reason && typeof errObj?.diagnostic?.reason === 'string' && ACCEPTANCE_CODE_PATTERN.test(errObj.diagnostic.reason)) reason = errObj.diagnostic.reason
+
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+  const jsonMatch = message.match(/\{[^{}]*"code"\s*:\s*"[A-Z0-9_]+"[^{}]*\}/)
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[0]) as { code?: unknown; reason?: unknown }
+      if (!code && typeof parsed.code === 'string' && ACCEPTANCE_CODE_PATTERN.test(parsed.code)) code = parsed.code
+      if (!reason && typeof parsed.reason === 'string' && ACCEPTANCE_CODE_PATTERN.test(parsed.reason)) reason = parsed.reason
+    } catch {}
+  }
+  if (!code) {
+    const codeMatch = message.match(/\b(PROVIDER_[A-Z_]+|CAPTURE_NOT_ENABLED|WORKTREE_[A-Z_]+|SOURCE_[A-Z_]+|SESSION_[A-Z_]+|PROJECT_CONTEXT_CHANGED|ACCEPTANCE_SKIPPED|INVALID_ARGUMENT)\b/)
+    if (codeMatch) code = codeMatch[1]
+  }
+
+  let outcome: 'VERSION_MISMATCH' | 'PIN_MISMATCH' | 'SOURCE_UNAVAILABLE' | 'SKIPPED' | 'ERROR' = 'ERROR'
+  let forcedProvider = provider
+  if (code === 'PROVIDER_VERSION_MISMATCH') {
+    if (reason === 'EXECUTABLE_HASH_MISMATCH') {
+      outcome = 'PIN_MISMATCH'
+    } else {
+      outcome = 'VERSION_MISMATCH'
+    }
+    forcedProvider = { ...(provider ?? {}), pin: 'MISMATCH' }
+  } else if (code === 'PROVIDER_SCHEMA_UNSUPPORTED' && reason === 'UNSUPPORTED_ENTIRE_VERSION') {
+    outcome = 'VERSION_MISMATCH'
+    forcedProvider = { ...(provider ?? {}), pin: 'MISMATCH' }
+  } else if (code === 'ACCEPTANCE_SKIPPED' || reason === 'ACCEPTANCE_SKIPPED') {
+    outcome = 'SKIPPED'
+  } else if (
+    code &&
+    ['PROVIDER_UNAVAILABLE', 'PROVIDER_CONFIG_UNSAFE', 'CAPTURE_NOT_ENABLED', 'WORKTREE_STALE', 'WORKTREE_IDENTITY_UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'ENOENT'].includes(code)
+  ) {
+    outcome = 'SOURCE_UNAVAILABLE'
+  } else if (/\bENOENT\b/.test(message)) {
+    outcome = 'SOURCE_UNAVAILABLE'
+    code ??= 'PROVIDER_CONFIG_MISSING'
+  }
+
+  return buildEntireLiveAcceptanceSummary({
+    expectedPin,
+    provider: forcedProvider,
+    outcome,
+    code,
+    reason
+  })
+}

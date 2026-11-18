@@ -20,10 +20,27 @@ const source = z.object({ version: z.literal(1), repositoryId: z.string().nullab
   worktreeId: hash, generation: hash, head: z.string().regex(/^[a-f0-9]{40,64}$/), branch: z.string().nullable(), indexRevision: hash, worktreeRevision: hash }).strict()
 const counts = z.object({ passed: z.number().int().nonnegative(), failed: z.number().int().nonnegative(), skipped: z.number().int().nonnegative(),
   todo: z.number().int().nonnegative(), total: z.number().int().positive(), executed: z.number().int().positive() }).strict()
+const acceptanceSchema = z.object({
+  id: z.string().regex(/^[A-Z0-9_]{3,64}$/),
+  provider: z.string().regex(/^[a-z][a-z0-9_-]{1,31}$/),
+  version: z.string().regex(/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]{1,32})?$/).nullable(),
+  sha256: hash.nullable(),
+  pin: z.enum(['VERIFIED', 'MISMATCH', 'UNVERIFIED']),
+  source: z.enum(['PROVIDER_PIN_AND_CLI_VERSION', 'PROVIDER_PIN_CONFIG', 'UNAVAILABLE']),
+  outcome: z.enum(['VERIFIED', 'VERSION_MISMATCH', 'PIN_MISMATCH', 'SOURCE_UNAVAILABLE', 'SKIPPED', 'ERROR', 'INCOMPLETE']),
+  sourceIdentity: z.enum(['BEFORE_AFTER_CAPTURED', 'SOURCE_CHANGED_DURING_RUN', 'SOURCE_UNAVAILABLE']),
+  coverage: z.enum(['COMPLETE', 'PARTIAL', 'UNAVAILABLE']).optional(),
+  sessions: z.number().int().min(0).max(10000).optional(),
+  usageCoverage: z.enum(['COMPLETE', 'PARTIAL', 'UNAVAILABLE']).optional(),
+  transcriptImported: z.literal(false),
+  code: z.string().regex(/^[A-Z][A-Z0-9_]{2,64}$/).optional(),
+  reason: z.string().regex(/^[A-Z][A-Z0-9_]{2,64}$/).optional()
+}).strict()
 const schema = z.object({ version: z.literal(1), id: z.string().uuid(), digest: hash, cwd: z.string(), startedAt: z.string().datetime(),
   command: z.array(z.string().max(2048)).min(1).max(100),
   finishedAt: z.string().datetime(), durationMs: z.number().int().nonnegative(), exitCode: z.number().int().nullable(), signal: z.string().nullable().optional(),
   state: z.string(), processState: z.string(), validation: z.object({ state: z.string(), runs: z.array(counts).max(100).optional() }).passthrough(),
+  acceptance: acceptanceSchema.optional(),
   ledger: z.object({ association, identity: selection.nullable(), before: source.nullable(), after: source.nullable() }).strict() }).passthrough()
 
 async function readReceipt(root: string, id: string): Promise<z.infer<typeof schema>> {
@@ -122,16 +139,31 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         ? command.some(value => /(?:^|\/)(?:typecheck-gate\.cjs|tsc(?:\.js)?)$/.test(value)) || command.includes('run') && command.includes('typecheck')
         : command.includes('build') && (command.includes('run') || command.some(value => /(?:^|\/)electron-vite(?:\.js)?$/.test(value))))
       const success = receipt.processState === 'PASS' && receipt.state === 'PASS' && receipt.exitCode === 0 && !receipt.signal && observable && (!tests || sufficient)
+      const expectedSourceIdentity = changed ? 'SOURCE_CHANGED_DURING_RUN' : before && after ? 'BEFORE_AFTER_CAPTURED' : 'SOURCE_UNAVAILABLE'
+      if (receipt.acceptance && receipt.acceptance.sourceIdentity !== expectedSourceIdentity) throw new Error('RECEIPT_IDENTITY_MISMATCH')
+      const acceptanceOk = !receipt.acceptance || (
+        receipt.acceptance.outcome === 'VERIFIED' &&
+        receipt.acceptance.pin === 'VERIFIED' &&
+        receipt.acceptance.source === 'PROVIDER_PIN_AND_CLI_VERSION' &&
+        typeof receipt.acceptance.version === 'string' &&
+        typeof receipt.acceptance.sha256 === 'string' &&
+        receipt.acceptance.transcriptImported === false &&
+        (receipt.acceptance.sessions === undefined || receipt.acceptance.sessions >= 1)
+      )
       const incompleteSource = !!before !== !!after
-      const status = changed || incompleteSource ? 'ERROR' : success ? 'PASSED' : receipt.processState === 'FAIL' ? 'FAILED' : 'ERROR'
+      const status = changed || incompleteSource ? 'ERROR' : success && acceptanceOk ? 'PASSED' : receipt.processState === 'FAIL' ? 'FAILED' : 'ERROR'
+      const acceptanceSummary = receipt.acceptance
+        ? `; provider=${receipt.acceptance.provider}@${receipt.acceptance.version ?? 'unverified'}; pin=${receipt.acceptance.pin}; outcome=${receipt.acceptance.outcome}`
+        : ''
       const input: RecordProofInput = { kind: declared.kind, producer: 'IMPLEMENTER', status,
         startedAt: receipt.startedAt, finishedAt: receipt.finishedAt, durationMs: receipt.durationMs, scope: declared.scope, evidenceFor: declared.evidenceFor,
         sourceFingerprint: before ? validationSourceFingerprint(before) : null,
-        summary: `Test Output: ${status}; EXECUTOR_REPORTED; ${changed ? 'SOURCE_CHANGED_DURING_RUN' : before && after ? 'SOURCE_REPORTED' : 'SOURCE_UNAVAILABLE'}`,
+        summary: `Test Output: ${status}; EXECUTOR_REPORTED; ${changed ? 'SOURCE_CHANGED_DURING_RUN' : before && after ? 'SOURCE_REPORTED' : 'SOURCE_UNAVAILABLE'}${acceptanceSummary}`,
         metrics: { durationMs: receipt.durationMs, ...(sufficient ? { testsPassed: runs!.reduce((n, c) => n + c.passed, 0) } : {}) },
         deduplicationKey: `test-output:${request.repositoryId}:${tree.worktreeId}:${tree.generation}:${receipt.id}`,
         commandProfile: { command: 'test-output', cwd: receipt.cwd, exitCode: receipt.exitCode ?? undefined, ...(before ? { source: before } : {}),
-          receipt: { id: receipt.id, digest: receipt.digest, trust: 'EXECUTOR_REPORTED', association: request.association ? 'POST_RUN_DECLARED' : 'RUN_CONFIGURED' } } }
+          receipt: { id: receipt.id, digest: receipt.digest, trust: 'EXECUTOR_REPORTED', association: request.association ? 'POST_RUN_DECLARED' : 'RUN_CONFIGURED',
+            ...(receipt.acceptance ? { acceptance: receipt.acceptance } : {}) } } }
       await select(request, connected)
       assertCurrent()
       return { input, assertCurrent }

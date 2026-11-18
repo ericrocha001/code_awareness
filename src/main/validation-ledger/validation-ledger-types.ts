@@ -1,4 +1,7 @@
 import type { ValidationSource } from '../validation-execution/validation-source'
+import type { ProviderAcceptanceSummary } from '../../shared/validation/test-output-receipt.cjs'
+
+export type { ProviderAcceptanceSummary }
 
 export type ProofKind =
   | 'TARGETED_TEST'
@@ -30,7 +33,7 @@ export interface ProofMetrics {
 }
 
 export interface CommandProfile {
-  receipt?: { id: string; digest: string; trust: 'EXECUTOR_REPORTED'; association: 'RUN_CONFIGURED' | 'POST_RUN_DECLARED' }
+  receipt?: { id: string; digest: string; trust: 'EXECUTOR_REPORTED'; association: 'RUN_CONFIGURED' | 'POST_RUN_DECLARED'; acceptance?: ProviderAcceptanceSummary }
   source?: ValidationSource
   checkout?: { repositoryId: string; worktreeId: string; generation: string; head: string; issuer: 'VALIDATION_EXECUTION'; runId: string }
   command: string

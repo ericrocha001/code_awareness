@@ -6,7 +6,8 @@ import { EntireProvider, runReadOnly, type CommandRunner } from './entire-provid
 import { SessionStore, sessionStorePath } from './store'
 import { digest } from './privacy'
 import { executeSessionTool, SESSION_CONTEXT_TOOLS, SESSION_RESPONSE_BUDGETS } from './mcp'
-import { parseLiveSessionQuery, projectLiveUsage, type LiveSessionToolName } from './entire-live'
+import { parseLiveSessionQuery, projectLiveUsage, buildEntireLiveAcceptanceSummary, classifyEntireLiveAcceptanceError, type LiveSessionToolName } from './entire-live'
+import { recordTestAcceptance } from '../../shared/validation/test-output-receipt.cjs'
 import { sourceFingerprint, type LiveSessionTarget } from './target'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
@@ -62,15 +63,29 @@ describe('Entire live consultative contracts', () => {
   it.each(['0.12.2', '0.13.4'])('publishes exactly three additional tools and projects mixed live sources without importing or leaking bodies on %s', async version => {
     const f = await setup(version), revision = f.store.catalogRevision(), before = readFileSync(f.store.path)
     const catalog = data(await f.call('discover_entire_sessions', {}))
-    expect(catalog).toMatchObject({ source: 'ENTIRE_LIVE', transcriptImported: false, coverage: 'COMPLETE', matched: 2 })
+    expect(catalog).toMatchObject({
+      source: 'ENTIRE_LIVE',
+      transcriptImported: false,
+      coverage: 'COMPLETE',
+      matched: 2,
+      provider: { id: 'entire', version, sha256: digest('live pinned fixture'), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' }
+    })
     expect(catalog.sessions.map((s: any) => s.worktreeId)).toEqual(f.targets.map(t => t.worktreeId))
     const selected = { providerSessionId: 'session-0', ...f.targets[0] }
     const { root: _root, fingerprint: _fingerprint, ...query } = selected
-    expect(data(await f.call('inspect_entire_session', query))).toMatchObject({ pendingTurns: 4, turns: 63, checkpointCoverage: 'UNAVAILABLE' })
+    expect(data(await f.call('inspect_entire_session', query))).toMatchObject({
+      pendingTurns: 4,
+      turns: 63,
+      checkpointCoverage: 'UNAVAILABLE'
+    })
     const detail = data(await f.call('inspect_entire_session', { ...query, includeFiles: true, fileLimit: 1 }))
     expect(detail).toMatchObject({ files: ['src/sample.ts'], filesCoverage: 'PARTIAL', fileCount: 4 })
     const usage = data(await f.call('get_entire_session_usage', query))
-    expect(usage).toMatchObject({ dataSource: 'ENTIRE_REPORTED', metrics: { total: 8004182, cacheRead: 7824128, apiCalls: 63 }, signals: [{ code: 'HIGH_CONTEXT_INPUT_SHARE', classification: 'HEURISTIC' }] })
+    expect(usage).toMatchObject({
+      dataSource: 'ENTIRE_REPORTED',
+      metrics: { total: 8004182, cacheRead: 7824128, apiCalls: 63 },
+      signals: [{ code: 'HIGH_CONTEXT_INPUT_SHARE', classification: 'HEURISTIC' }]
+    })
     for (const result of [catalog, detail, usage]) {
       const text = JSON.stringify(result)
       for (const forbidden of ['PRIVATE_', 'last_prompt', 'worktree_path', f.root, 'UNTRUSTED_', 'checkpoints']) expect(text).not.toContain(forbidden)
@@ -132,39 +147,123 @@ describe('Entire live consultative contracts', () => {
     expect(f.store.sessions({}, 0, 10)).toEqual([])
   })
 
+  it('projects verified provider acceptance summaries and distinguishes mismatch, unavailable, error, skipped and missing-version cases without leaks', () => {
+    const expectedPin = { version: '0.13.4', sha256: 'a'.repeat(64) }
+    const verified = buildEntireLiveAcceptanceSummary({
+      expectedPin,
+      provider: { id: 'entire', version: '0.13.4', sha256: 'a'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' },
+      coverage: 'COMPLETE',
+      sessions: 2,
+      usageCoverage: 'COMPLETE',
+      transcriptImported: false
+    })
+    expect(verified).toEqual({
+      id: 'ENTIRE_LIVE_CHANNEL',
+      provider: 'entire',
+      version: '0.13.4',
+      sha256: 'a'.repeat(64),
+      pin: 'VERIFIED',
+      source: 'PROVIDER_PIN_AND_CLI_VERSION',
+      outcome: 'VERIFIED',
+      coverage: 'COMPLETE',
+      sessions: 2,
+      usageCoverage: 'COMPLETE',
+      transcriptImported: false
+    })
+
+    const versionMismatch = buildEntireLiveAcceptanceSummary({
+      expectedPin,
+      provider: { id: 'entire', version: '0.12.2', sha256: 'a'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' },
+      sessions: 2
+    })
+    expect(versionMismatch).toMatchObject({ outcome: 'VERSION_MISMATCH', pin: 'MISMATCH', reason: 'EXPECTED_VERSION_MISMATCH' })
+
+    const pinMismatch = buildEntireLiveAcceptanceSummary({
+      expectedPin,
+      provider: { id: 'entire', version: '0.13.4', sha256: 'b'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' },
+      sessions: 2
+    })
+    expect(pinMismatch).toMatchObject({ outcome: 'PIN_MISMATCH', pin: 'MISMATCH', reason: 'EXPECTED_SHA256_MISMATCH' })
+
+    const missingVersion = buildEntireLiveAcceptanceSummary({
+      expectedPin,
+      provider: { id: 'entire', sha256: 'a'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' },
+      sessions: 1
+    })
+    expect(missingVersion).toMatchObject({ outcome: 'INCOMPLETE', version: null, reason: 'PROVIDER_VERSION_MISSING' })
+
+    const zeroSessions = buildEntireLiveAcceptanceSummary({
+      expectedPin,
+      provider: { id: 'entire', version: '0.13.4', sha256: 'a'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION' },
+      sessions: 0
+    })
+    expect(zeroSessions).toMatchObject({ outcome: 'INCOMPLETE', sessions: 0, reason: 'NO_LIVE_SESSIONS_OBSERVED' })
+
+    expect(classifyEntireLiveAcceptanceError(new Error(JSON.stringify({ code: 'PROVIDER_VERSION_MISMATCH', reason: 'VERSION_MISMATCH' })), expectedPin))
+      .toMatchObject({ outcome: 'VERSION_MISMATCH', pin: 'MISMATCH', version: null, sha256: null, source: 'UNAVAILABLE' })
+    expect(classifyEntireLiveAcceptanceError(new Error(JSON.stringify({ code: 'PROVIDER_VERSION_MISMATCH', reason: 'EXECUTABLE_HASH_MISMATCH' })), expectedPin))
+      .toMatchObject({ outcome: 'PIN_MISMATCH', pin: 'MISMATCH', version: null, sha256: null })
+    expect(classifyEntireLiveAcceptanceError(new Error(JSON.stringify({ code: 'PROVIDER_CONFIG_UNSAFE', reason: 'LOCAL_DIR_MISSING' })), expectedPin))
+      .toMatchObject({ outcome: 'SOURCE_UNAVAILABLE', code: 'PROVIDER_CONFIG_UNSAFE', reason: 'LOCAL_DIR_MISSING' })
+    expect(classifyEntireLiveAcceptanceError(Object.assign(new Error('skipped'), { code: 'ACCEPTANCE_SKIPPED' }), expectedPin))
+      .toMatchObject({ outcome: 'SKIPPED', code: 'ACCEPTANCE_SKIPPED' })
+    const errorCase = classifyEntireLiveAcceptanceError(new Error('unexpected failure C:\\Users\\secret\\env=TOKEN'), expectedPin)
+    expect(errorCase).toMatchObject({ outcome: 'ERROR', version: null, sha256: null })
+    expect(JSON.stringify(errorCase)).not.toContain('Users')
+    expect(JSON.stringify(errorCase)).not.toContain('TOKEN')
+  })
+
   it.skipIf(!process.env.ENTIRE_LIVE_PROVIDER_CONFIG)('accepts all three tools through updated Channel HTTP, real worker and existing Entire sessions', async () => {
-    const config = JSON.parse(readFileSync(process.env.ENTIRE_LIVE_PROVIDER_CONFIG!, 'utf8'))
-    const base = mkdtempSync(join(tmpdir(), 'entire-live-acceptance-'))
-    const root = process.cwd(), storePath = sessionStorePath(base, config.repositoryId)
-    mkdirSync(dirname(storePath), { recursive: true })
-    copyFileSync(process.env.ENTIRE_LIVE_PROVIDER_CONFIG!, join(dirname(storePath), 'session-context.provider.json'))
-    const registry = new GitWorktreeRegistry(root, new GitService(), { repositoryId: config.repositoryId, isActive: () => true })
-    const resolver = sessionTargetResolver(registry, () => {})
-    const workerPath = process.env.SESSION_CONTEXT_BUILT_SMOKE === '1' ? join(root, 'out/main/session-context-worker.js') : join(base, 'worker.cjs')
-    if (process.env.SESSION_CONTEXT_BUILT_SMOKE !== '1') {
-      const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
-      writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(root, 'package.json'))});\n` + code)
-    }
-    const client = new SessionContextClient(base, config.repositoryId, root, () => true, workerPath, resolver)
-    const adapter = new ChannelMcpAdapter({ projectId: config.repositoryId, repoRoot: root, navigation: {} as McpProjectContext['navigation'], sessionContext: client })
-    const server = createMcpHttpServer(adapter, () => {})
-    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
-    const call = async (name: LiveSessionToolName, args: unknown) => {
-      const response = await fetch(`http://127.0.0.1:${(server.address() as { port: number }).port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })
-      const text = await response.text(), result = JSON.parse(text).result
-      expect(result.isError, result.content?.[0]?.text).not.toBe(true)
-      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(SESSION_RESPONSE_BUDGETS[name])
-      expect(text).not.toContain('last_prompt')
-      return { value: data(result), bytes: Buffer.byteLength(text) }
-    }
+    let config: { repositoryId: string; executable: string; sha256: string; version: string } | undefined
+    let base: string | undefined
+    let server: ReturnType<typeof createMcpHttpServer> | undefined
+    let client: SessionContextClient | undefined
+    let observedProvider: unknown
     try {
+      config = JSON.parse(readFileSync(process.env.ENTIRE_LIVE_PROVIDER_CONFIG!, 'utf8'))
+      base = mkdtempSync(join(tmpdir(), 'entire-live-acceptance-'))
+      const cwd = process.cwd(), storePath = sessionStorePath(base, config!.repositoryId)
+      mkdirSync(dirname(storePath), { recursive: true })
+      copyFileSync(process.env.ENTIRE_LIVE_PROVIDER_CONFIG!, join(dirname(storePath), 'session-context.provider.json'))
+      const registry = new GitWorktreeRegistry(cwd, new GitService(), { repositoryId: config!.repositoryId, isActive: () => true })
+      const resolver = sessionTargetResolver(registry, () => {})
+      const discovered = (await resolver.discover?.()) ?? []
+      const root = existsSync(join(cwd, '.entire', 'settings.local.json'))
+        ? cwd
+        : discovered.find(target => existsSync(join(target.root, '.entire', 'settings.local.json')))?.root ?? cwd
+      const workerPath = process.env.SESSION_CONTEXT_BUILT_SMOKE === '1' ? join(cwd, 'out/main/session-context-worker.js') : join(base, 'worker.cjs')
+      if (process.env.SESSION_CONTEXT_BUILT_SMOKE !== '1') {
+        const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
+        writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(cwd, 'package.json'))});\n` + code)
+      }
+      client = new SessionContextClient(base, config!.repositoryId, root, () => true, workerPath, resolver)
+      const adapter = new ChannelMcpAdapter({ projectId: config!.repositoryId, repoRoot: root, navigation: {} as McpProjectContext['navigation'], sessionContext: client })
+      server = createMcpHttpServer(adapter, () => {})
+      await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', resolve))
+      const call = async (name: LiveSessionToolName, args: unknown) => {
+        const response = await fetch(`http://127.0.0.1:${(server!.address() as { port: number }).port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })
+        const text = await response.text(), result = JSON.parse(text).result
+        expect(result.isError, result.content?.[0]?.text).not.toBe(true)
+        expect(Buffer.byteLength(text)).toBeLessThanOrEqual(SESSION_RESPONSE_BUDGETS[name])
+        expect(text).not.toContain('last_prompt')
+        const value = data(result)
+        if (value?.provider && !observedProvider) observedProvider = value.provider
+        return { value, bytes: Buffer.byteLength(text) }
+      }
       const inventory = await call('discover_entire_sessions', {})
+      expect(inventory.value.provider).toEqual({
+        id: 'entire',
+        version: config!.version,
+        sha256: config!.sha256,
+        pin: 'VERIFIED',
+        source: 'PROVIDER_PIN_AND_CLI_VERSION'
+      })
       expect(inventory.value.sessions.length).toBeGreaterThan(0)
       const selected = inventory.value.sessions[0]
       const selection = { worktreeId: selected.worktreeId, generation: selected.generation }
       const target = await resolver(selection)
-      const infoOutput = await runReadOnly(config.executable, ['session', 'info', selected.providerSessionId, '--json'], target.root, 1024 * 1024)
+      const infoOutput = await runReadOnly(config!.executable, ['session', 'info', selected.providerSessionId, '--json'], target.root, 1024 * 1024)
       expect(infoOutput.code).toBe(0)
       const cliInfo = JSON.parse(infoOutput.text)
       const query = { ...selection, providerSessionId: selected.providerSessionId }
@@ -173,19 +272,31 @@ describe('Entire live consultative contracts', () => {
       const detail = await call('inspect_entire_session', query)
       expect(detail.value).toMatchObject({ providerSessionId: cliInfo.session_id, turns: cliInfo.turns, pendingTurns: cliInfo.pending_turns })
       expect(detail.bytes).toBeLessThan(Buffer.byteLength(infoOutput.text))
-      const usageOutput = await runReadOnly(config.executable, ['session', 'tokens', selected.providerSessionId, '--json'], target.root, 1024 * 1024)
+      const usageOutput = await runReadOnly(config!.executable, ['session', 'tokens', selected.providerSessionId, '--json'], target.root, 1024 * 1024)
       expect(usageOutput.code).toBe(0)
       const cliUsage = JSON.parse(usageOutput.text)
       const usage = await call('get_entire_session_usage', query)
       if (cliUsage.tokens) expect(usage.value.metrics).toMatchObject({ total: cliUsage.tokens.total, apiCalls: cliUsage.tokens.api_calls })
       else expect(usage.value).toMatchObject({ coverage: 'UNAVAILABLE', code: 'TOKEN_USAGE_UNAVAILABLE' })
       expect(existsSync(storePath)).toBe(false)
-      console.log(JSON.stringify({ acceptance: 'ENTIRE_LIVE_CHANNEL', sessions: inventory.value.sessions.length, selectedProviderSessionId: selected.providerSessionId,
-        discoveryBytes: inventory.bytes, inspectBytes: detail.bytes, cliInfoBytes: Buffer.byteLength(infoOutput.text), usageCoverage: usage.value.coverage, transcriptImported: false }))
+      const summary = buildEntireLiveAcceptanceSummary({
+        expectedPin: { version: config!.version, sha256: config!.sha256 },
+        provider: inventory.value.provider,
+        coverage: inventory.value.coverage,
+        sessions: inventory.value.sessions.length,
+        usageCoverage: usage.value.coverage,
+        transcriptImported: inventory.value.transcriptImported
+      })
+      recordTestAcceptance(summary)
+      console.log(JSON.stringify({ acceptance: 'ENTIRE_LIVE_CHANNEL', ...summary, selectedProviderSessionId: selected.providerSessionId,
+        discoveryBytes: inventory.bytes, inspectBytes: detail.bytes, cliInfoBytes: Buffer.byteLength(infoOutput.text) }))
+    } catch (error) {
+      recordTestAcceptance(classifyEntireLiveAcceptanceError(error, config ? { version: config.version, sha256: config.sha256 } : undefined, observedProvider as any))
+      throw error
     } finally {
-      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
-      await client.dispose()
-      rmSync(base, { recursive: true, force: true })
+      if (server) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()))
+      await client?.dispose()
+      if (base) rmSync(base, { recursive: true, force: true })
     }
   }, 90_000)
 })

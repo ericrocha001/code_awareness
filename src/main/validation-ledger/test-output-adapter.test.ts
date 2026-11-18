@@ -16,7 +16,7 @@ import { GitService } from '../core/git-service'
 
 const requireCjs = createRequire(resolve('package.json'))
 const runner = requireCjs('./scripts/test-output.cjs')
-const { registerReceipt, validationConnection } = requireCjs('./scripts/local-agent/validation.cjs')
+const { registerReceipt, reconcileReceipts, validationConnection } = requireCjs('./scripts/local-agent/validation.cjs')
 const { connect } = requireCjs('./scripts/local-agent/client.cjs')
 const { readDescriptor } = requireCjs('./scripts/local-agent/discovery.cjs')
 const cleanup: (() => void | Promise<void>)[] = []
@@ -265,4 +265,86 @@ it('rejects a symlink, a foreign repository and a stale or cancelled selection',
   await expect(Promise.resolve(adapter.operations.snapshot.execute({ ...identity, cwd: f.root, generation: 'a'.repeat(64) }, { connected: () => true }))).rejects.toThrow('WORKTREE_STALE')
   const pending = adapter.operations.resolve.execute({ cwd: f.root }, { connected: () => false })
   await expect(pending).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
+}, 60000)
+
+it('preserves before/after snapshots on unassociated online runs and keeps digest/origin across later edits and delayed registration', async () => {
+  const f = fixture()
+  await f.start()
+  const first = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile })
+  const second = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile })
+  expect(first.ledger.identity?.worktreeId).toBeTruthy()
+  expect(first.ledger.before).toBeTruthy()
+  expect(first.ledger.after).toEqual(first.ledger.before)
+  expect(first.ledger.association.evidenceFor).toEqual([])
+  expect(first.registration).toMatchObject({ state: 'REGISTRATION_PENDING', reason: 'REGISTRATION_NOT_REQUESTED' })
+  expect(await f.ledger().listProofs()).toEqual([])
+  expect(await reconcileReceipts({ cwd: f.root, profile: f.profile })).toEqual({ reconciled: [], remaining: 0 })
+
+  const beforeFingerprint = validationSourceFingerprint(first.ledger.before)
+  writeFileSync(join(f.root, 'later.txt'), 'edited after tests finished\n')
+
+  const registered = await registerReceipt(first.id, { cwd: f.root, profile: f.profile, association })
+  expect(registered).toMatchObject({ state: 'PERSISTED', status: 'PASSED', trust: 'EXECUTOR_REPORTED', freshness: 'UNVERIFIABLE', evidenceFor: ['plan'] })
+  const storedFirst = JSON.parse(readFileSync(join(first.directory, 'receipt.json'), 'utf8'))
+  expect(storedFirst.digest).toBe(first.digest)
+  expect(storedFirst.startedAt).toBe(first.startedAt)
+  expect(storedFirst.finishedAt).toBe(first.finishedAt)
+  expect(storedFirst.ledger.before).toEqual(first.ledger.before)
+  expect(storedFirst.ledger.after).toEqual(first.ledger.after)
+
+  const proofFirst = f.ledger().getProof(registered.proofId)!
+  expect(proofFirst.sourceFingerprint).toBe(beforeFingerprint)
+  expect(proofFirst.summary).toContain('SOURCE_REPORTED')
+  expect(proofFirst.commandProfile?.receipt?.association).toBe('POST_RUN_DECLARED')
+  expect((await f.ledger().getProofWithFreshness(registered.proofId))?.freshness).toBe('UNVERIFIABLE')
+
+  const reconciled = await reconcileReceipts({ cwd: f.root, profile: f.profile, id: second.id, association })
+  expect(reconciled.reconciled).toHaveLength(1)
+  expect(reconciled.reconciled[0]).toMatchObject({ id: second.id, state: 'PERSISTED', freshness: 'UNVERIFIABLE', trust: 'EXECUTOR_REPORTED', ledgerStatus: 'PASSED' })
+  expect(reconciled.remaining).toBe(0)
+  expect(f.ledger().getProof(reconciled.reconciled[0].proofId)?.sourceFingerprint).toBe(beforeFingerprint)
+}, 60000)
+
+it('persists verified provider acceptance metadata on delayed registration and rejects inconsistent or incomplete acceptance as ERROR', async () => {
+  const f = fixture()
+  await f.start()
+  const acceptance = {
+    id: 'ENTIRE_LIVE_CHANNEL',
+    provider: 'entire',
+    version: '0.13.4',
+    sha256: 'e'.repeat(64),
+    pin: 'VERIFIED' as const,
+    source: 'PROVIDER_PIN_AND_CLI_VERSION' as const,
+    outcome: 'VERIFIED' as const,
+    coverage: 'COMPLETE' as const,
+    sessions: 2,
+    usageCoverage: 'COMPLETE' as const,
+    transcriptImported: false as const
+  }
+  const receipt = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile, acceptance })
+  expect(receipt.state).toBe('PASS')
+  expect(receipt.acceptance).toEqual({ ...acceptance, sourceIdentity: 'BEFORE_AFTER_CAPTURED' })
+
+  const proof = await registerReceipt(receipt.id, { cwd: f.root, profile: f.profile, association })
+  expect(proof).toMatchObject({ state: 'PERSISTED', status: 'PASSED', trust: 'EXECUTOR_REPORTED', freshness: 'UNVERIFIABLE' })
+  const storedProof = f.ledger().getProof(proof.proofId)!
+  expect(storedProof.summary).toContain('provider=entire@0.13.4; pin=VERIFIED; outcome=VERIFIED')
+  expect(storedProof.commandProfile?.receipt?.acceptance).toEqual({ ...acceptance, sourceIdentity: 'BEFORE_AFTER_CAPTURED' })
+  expect((await f.ledger().getProofWithFreshness(proof.proofId))?.freshness).toBe('UNVERIFIABLE')
+
+  const incomplete = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], {
+    cwd: f.root,
+    profile: f.profile,
+    acceptance: { ...acceptance, version: null }
+  })
+  expect(incomplete.state).toBe('INSUFFICIENT')
+  const incompleteProof = await registerReceipt(incomplete.id, { cwd: f.root, profile: f.profile, association })
+  expect(incompleteProof.status).toBe('ERROR')
+
+  const tamperedPath = join(receipt.directory, 'receipt.json')
+  const tampered = JSON.parse(readFileSync(tamperedPath, 'utf8'))
+  tampered.acceptance.sourceIdentity = 'SOURCE_UNAVAILABLE'
+  tampered.digest = receiptDigest(tampered)
+  writeFileSync(tamperedPath, JSON.stringify(tampered))
+  await expect(registerReceipt(tampered.id, { cwd: f.root, profile: f.profile })).rejects.toMatchObject({ code: 'RECEIPT_IDENTITY_MISMATCH' })
 }, 60000)

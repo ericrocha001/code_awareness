@@ -4,7 +4,7 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
-const { receiptDigest } = require('../src/shared/validation/test-output-receipt.cjs')
+const { receiptDigest, evaluateAcceptanceSummary, readRecordedAcceptance } = require('../src/shared/validation/test-output-receipt.cjs')
 const { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds } = require('./local-agent/validation.cjs')
 const { publicError } = require('./local-agent/discovery.cjs')
 
@@ -97,6 +97,7 @@ function project(receipt) {
   if (receipt.counts) summary.counts = receipt.counts
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
   if (receipt.cleanupWarning) summary.cleanupWarning = receipt.cleanupWarning
+  if (receipt.acceptance) summary.acceptance = receipt.acceptance
   if (receipt.registration) summary.registration = receipt.registration
   if (receipt.state === 'PASS' && receipt.registration && !['PERSISTED'].includes(receipt.registration.state) && receipt.registration.reason !== 'REGISTRATION_NOT_REQUESTED') summary.evidenceStatus = 'TESTE LOCAL APROVADO / REGISTRO PENDENTE'
   if (receipt.reconciliation?.reconciled.length) summary.reconciled = receipt.reconciliation.reconciled.map(({ id, state, proofId }) => ({ id, state, ...(proofId ? { proofId } : {}) }))
@@ -109,6 +110,9 @@ function project(receipt) {
     output = JSON.stringify(summary)
   }
   if (Buffer.byteLength(output) > budget) { delete summary.counts; summary.command = bounded(summary.command, 40); output = JSON.stringify(summary) }
+  if (Buffer.byteLength(output) > budget) { delete summary.logs; output = JSON.stringify(summary) }
+  if (Buffer.byteLength(output) > budget && summary.processState === summary.state) { delete summary.processState; output = JSON.stringify(summary) }
+  if (Buffer.byteLength(output) > budget && summary.acceptance) { delete summary.ledgerDiagnostics; delete summary.evidenceStatus; output = JSON.stringify(summary) }
   return output
 }
 
@@ -132,7 +136,7 @@ async function run(command, args = [], options = {}) {
   protectDirectory(directory)
   const files = ['stdout.log', 'stderr.log'].map(name => fs.openSync(path.join(directory, name), 'wx', 0o600))
   const nativeNodeTest = isNativeNodeTest(command, args)
-  const expectTests = nativeNodeTest || options.expectTests || [command, ...args].some(value => /(?:^|[/\\])vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?$/.test(value))
+  const expectTests = nativeNodeTest || options.expectTests || [command, ...args].some(value => /(?:^|[/\\])(?:vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?|run-vitest-electron\.cjs)$/.test(value))
   const testSummaries = []
   const tapCounts = {}
   let tapPrefix
@@ -145,12 +149,14 @@ async function run(command, args = [], options = {}) {
   let before = null
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
+  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)
+  const shouldCaptureSource = !options.evidenceRoot && options.register !== false && (expectTests || requestedRegistration)
   receipt.ledger = { association, identity: null, before: null, after: null }
   receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
-  if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
+  if (shouldCaptureSource) {
     try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
     receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
     save()
@@ -169,9 +175,10 @@ async function run(command, args = [], options = {}) {
   const onInt = () => abort('SIGINT')
   const onTerm = () => abort('SIGTERM')
   const onAbort = () => abort('ABORT')
+  const acceptancePath = path.join(directory, 'acceptance.json')
   try {
     child = spawn(command, args, {
-      cwd: receipt.cwd, env: { ...process.env, ...options.env, CODE_AWARENESS_TEST_CAPTURE: '1' },
+      cwd: receipt.cwd, env: { ...process.env, ...options.env, CODE_AWARENESS_TEST_CAPTURE: '1', CODE_AWARENESS_TEST_ACCEPTANCE_FILE: acceptancePath },
       windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe']
     })
     receipt.pid = child.pid || null
@@ -272,23 +279,42 @@ async function run(command, args = [], options = {}) {
     receipt.state = receipt.validation.state === 'FAILED' ? 'FAIL' : receipt.validation.state
     receipt.diagnostic = receipt.validation.reason || 'Test summary reports failures.'
   }
-  if (connection) { try { receipt.ledger.after = await connection.snapshot() } catch (error) { diagnostics.push(publicError(error)) } }
-  receipt.digest = receiptDigest(receipt)
-  receipt.registration = { state: 'REGISTRATION_PENDING', reason: options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? registrationDiagnostic?.code || 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED', ...(registrationDiagnostic ? { diagnostic: registrationDiagnostic } : {}) }
-  save()
   if (connection) {
+    try { receipt.ledger.after = await connection.snapshot() }
+    catch (error) { const diagnostic = publicError(error); registrationDiagnostic ??= diagnostic; diagnostics.push(diagnostic) }
+  }
+  const recordedAcceptance = options.acceptance !== undefined
+    ? { present: true, raw: options.acceptance }
+    : readRecordedAcceptance(acceptancePath)
+  if (recordedAcceptance.present) {
+    const evaluation = evaluateAcceptanceSummary(recordedAcceptance.raw, receipt.ledger)
+    receipt.acceptance = evaluation.acceptance
+    if (!evaluation.sufficient && receipt.processState === 'PASS' && ['SUFFICIENT', 'NOT_APPLICABLE'].includes(receipt.validation.state)) {
+      receipt.validation = { ...receipt.validation, state: 'INSUFFICIENT', reason: evaluation.reason }
+      receipt.state = 'INSUFFICIENT'
+      receipt.diagnostic = evaluation.reason
+    }
+  }
+  receipt.digest = receiptDigest(receipt)
+  receipt.registration = {
+    state: 'REGISTRATION_PENDING',
+    reason: requestedRegistration ? registrationDiagnostic?.code || 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED',
+    ...(registrationDiagnostic ? { diagnostic: registrationDiagnostic } : {})
+  }
+  save()
+  if (connection && requestedRegistration) {
     try { receipt.registration = await connection.register(id, receipt.digest) }
     catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
     if (receipt.registration.state === 'PERSISTED') {
       try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200 }) } catch (error) { diagnostics.push(publicError(error)) }
-    } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+    } else {
       try {
         const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
         if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
       } catch { }
     }
-  } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+  } else if (requestedRegistration) {
     try {
       const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
       if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
@@ -457,6 +483,7 @@ async function cli() {
     const id = args.shift(); let association; let profile
     while (args.length) {
       const flag = args.shift(), value = args.shift()
+      if (value === undefined) throw new Error('Invalid registration option')
       if (flag === '--association') association = JSON.parse(value)
       else if (flag === '--profile') profile = value
       else throw new Error('Invalid registration option')
@@ -464,16 +491,18 @@ async function cli() {
     console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association }))); return
   }
   if (action === 'reconcile') {
-    let id, limit, cursor, profile
+    let id, limit, cursor, profile, association
     while (args.length) {
       const flag = args.shift(), value = args.shift()
+      if (value === undefined) throw new Error('Invalid reconcile option')
       if (flag === '--receipt') id = value
       else if (flag === '--limit') limit = Number(value)
       else if (flag === '--cursor') cursor = value
       else if (flag === '--profile') profile = value
+      else if (flag === '--association') association = JSON.parse(value)
       else throw new Error('Invalid reconcile option')
     }
-    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
+    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(association ? { association } : {}), ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
   }
   if (action === 'observe') {
     const id = args.shift(); let afterState
