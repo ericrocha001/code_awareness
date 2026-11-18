@@ -114,7 +114,7 @@ test('test evidence distinguishes skipped, executed, unknown and failed summarie
   ]
   for (const [output, expected] of cases) {
     const source = `const s=${JSON.stringify(output)};process.stdout.write(s.slice(0,3));setTimeout(()=>process.stdout.write(s.slice(3)),20)`
-    const receipt = await run(process.execPath, ['-e', source], { expectTests: true })
+    const receipt = await run(process.execPath, ['-e', source], { expectTests: true, register: false })
     assert.equal(receipt.exitCode, 0)
     assert.equal(receipt.processState, 'PASS')
     assert.equal(receipt.validation.state, expected, output)
@@ -155,7 +155,7 @@ test('native Node TAP and spec reporters prove pass, failure, zero tests and une
     const reporter = fixture.reporter || 'tap'
     const receipt = await run(process.execPath, [
       '--test', `--test-reporter=${reporter}`, ...(fixture.flags || []), file
-    ], { env: { NODE_TEST_CONTEXT: undefined } })
+    ], { env: { NODE_TEST_CONTEXT: undefined }, register: false })
     assert.equal(receipt.state, fixture.state, fixture.name)
     assert.equal(receipt.validation.state, fixture.validation, fixture.name)
     assert.equal(receipt.processState, fixture.processState)
@@ -208,7 +208,8 @@ test('native Node intent requires one complete, consistent summary on one stream
       yield ${JSON.stringify(stdout.slice(7))}
     }`)
     const receipt = await run(process.execPath, ['--test=true', `--test-reporter=${pathToFileURL(reporter).href}`, testFile], {
-      env: { NODE_TEST_CONTEXT: undefined }
+      env: { NODE_TEST_CONTEXT: undefined },
+      register: false
     })
     const validation = state === 'PASS' ? 'SUFFICIENT' : 'UNKNOWN'
     assert.equal(receipt.state, state, name)
@@ -251,10 +252,10 @@ test('direct Vitest invocation without summaries remains unknown', async () => {
   assert.equal(receipt.validation.state, 'UNKNOWN')
 })
 
-function diagnosticRunner(connection) {
+function diagnosticRunner(connection, extraValidation = {}) {
   const { createRequire } = require('node:module'), { runInNewContext } = require('node:vm')
   const filename = path.join(__dirname, 'test-output.cjs'), localRequire = createRequire(filename), module = { exports: {} }
-  const mockedRequire = name => name === './local-agent/validation.cjs' ? { validationConnection: connection } : localRequire(name)
+  const mockedRequire = name => name === './local-agent/validation.cjs' ? { validationConnection: connection, ...extraValidation } : localRequire(name)
   runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, require: mockedRequire, __dirname, process, Buffer, setTimeout, clearTimeout, console }, { filename })
   return module.exports
 }
@@ -364,4 +365,169 @@ test('runSequence propagates overall timeout and abort signal cleanly across pha
   const cliSummary = JSON.parse(cliResult.stdout)
   assert.equal(cliSummary.state, 'PASS')
   assert.equal(cliSummary.completedPhases, 2)
+})
+
+test('U1 captures before/after source identity for recognized test runs without association, skips IPC for guards/opt-out, and preserves honest failure diagnostics', async t => {
+  const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'test-output-u1-'))
+  t.after(() => fs.rmSync(fixtures, { recursive: true, force: true }))
+  const vitestStub = path.join(fixtures, 'vitest.mjs')
+  const electronStub = path.join(fixtures, 'run-vitest-electron.cjs')
+  const nodeTestStub = path.join(fixtures, 'fixture.test.cjs')
+  const guardStub = path.join(fixtures, 'test-runtime-policy.cjs')
+  fs.writeFileSync(vitestStub, "console.log('Tests  1 passed (1)')\n")
+  fs.writeFileSync(electronStub, "console.log('Tests  1 passed (1)')\n")
+  fs.writeFileSync(nodeTestStub, "require('node:test')('ok', () => {})\n")
+  fs.writeFileSync(guardStub, "console.log('Policy PASS')\n")
+  const makeHarness = ({ beforeSnap = { version: 1, head: 'a'.repeat(40) }, afterSnap = { version: 1, head: 'a'.repeat(40) }, failResolve, failBefore, failAfter } = {}) => {
+    const calls = []
+    let reconciles = 0
+    const api = diagnosticRunner(async cwd => {
+      calls.push(['resolve', cwd])
+      if (failResolve) throw failResolve
+      let snap = 0
+      return {
+        identity: { repositoryId: 'repo-1', worktreeId: 'w'.repeat(64), generation: 'g'.repeat(64) },
+        snapshot: async () => {
+          snap++
+          calls.push([snap === 1 ? 'before' : 'after'])
+          if (snap === 1 && failBefore) throw failBefore
+          if (snap === 2 && failAfter) throw failAfter
+          return snap === 1 ? beforeSnap : afterSnap
+        },
+        register: async (id, digest) => { calls.push(['register', id, digest]); return { state: 'PERSISTED', proofId: 'proof-1' } }
+      }
+    }, {
+      reconcileReceipts: async () => { reconciles++; return { reconciled: [], remaining: 0 } },
+      pendingReceiptIds: () => ({ ids: [], pending: 0 })
+    })
+    return { calls, getReconciles: () => reconciles, api }
+  }
+
+  for (const [label, command, args, opts] of [
+    ['expectTests', process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], { expectTests: true }],
+    ['vitest', process.execPath, [vitestStub, 'run'], {}],
+    ['run-vitest-electron', process.execPath, [electronStub, 'run'], {}],
+    ['native-node-test', process.execPath, ['--test', '--test-reporter=tap', nodeTestStub], { env: { NODE_TEST_CONTEXT: undefined } }]
+  ]) {
+    const h = makeHarness()
+    const receipt = await h.api.run(command, args, { ...opts, cwd: fixtures })
+    assert.equal(receipt.state, 'PASS', label)
+    assert.deepEqual(h.calls.map(c => c[0]), ['resolve', 'before', 'after'], label)
+    assert.equal(h.getReconciles(), 0, label)
+    assert.equal(receipt.ledger.identity.repositoryId, 'repo-1', label)
+    assert.deepEqual(receipt.ledger.before, { version: 1, head: 'a'.repeat(40) }, label)
+    assert.deepEqual(receipt.ledger.after, { version: 1, head: 'a'.repeat(40) }, label)
+    assert.deepEqual(JSON.parse(JSON.stringify(receipt.ledger.association.evidenceFor)), [], label)
+    assert.equal(receipt.registration.state, 'REGISTRATION_PENDING', label)
+    assert.equal(receipt.registration.reason, 'REGISTRATION_NOT_REQUESTED', label)
+    assert.equal(JSON.parse(h.api.project(receipt)).evidenceStatus, undefined, label)
+  }
+
+  const associated = makeHarness()
+  const assocReceipt = await associated.api.run(process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], {
+    cwd: fixtures,
+    association: { kind: 'TARGETED_TEST', scope: ['fixture'], evidenceFor: ['plan-1'] }
+  })
+  assert.deepEqual(JSON.parse(JSON.stringify(associated.calls.map(c => c[0]))), ['resolve', 'before', 'after', 'register'])
+  assert.equal(associated.getReconciles(), 1)
+  assert.equal(assocReceipt.registration.state, 'PERSISTED')
+
+  for (const [label, command, args, opts] of [
+    ['guard', process.execPath, [guardStub], {}],
+    ['typecheck-unassociated', process.execPath, [guardStub], {}],
+    ['register-false', process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], { expectTests: true, register: false }],
+    ['evidence-root', process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], { expectTests: true, evidenceRoot: fixtures }]
+  ]) {
+    const h = makeHarness()
+    const receipt = await h.api.run(command, args, { cwd: fixtures, ...opts })
+    assert.equal(h.calls.length, 0, label)
+    assert.equal(receipt.ledger.identity, null, label)
+    assert.equal(receipt.ledger.before, null, label)
+    assert.equal(receipt.ledger.after, null, label)
+  }
+
+  const resolveFail = makeHarness({ failResolve: Object.assign(new Error('unavailable'), { code: 'APP_UNAVAILABLE', stage: 'descriptor', reason: 'DESCRIPTOR_NOT_FOUND' }) })
+  const resolveReceipt = await resolveFail.api.run(process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], { cwd: fixtures, expectTests: true })
+  assert.equal(resolveReceipt.state, 'PASS')
+  assert.equal(resolveReceipt.ledger.identity, null)
+  assert.equal(resolveReceipt.ledger.before, null)
+  assert.equal(resolveReceipt.ledger.after, null)
+  assert.equal(resolveReceipt.registration.reason, 'REGISTRATION_NOT_REQUESTED')
+  assert.equal(resolveReceipt.registration.diagnostic.code, 'APP_UNAVAILABLE')
+  assert.deepEqual(resolveFail.calls.map(c => c[0]), ['resolve'])
+
+  const beforeFail = makeHarness({ failBefore: Object.assign(new Error('timeout'), { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'snapshot' }) })
+  const beforeReceipt = await beforeFail.api.run(process.execPath, ['-e', "console.log('Tests  1 passed (1)')"], { cwd: fixtures, expectTests: true })
+  assert.equal(beforeReceipt.state, 'PASS')
+  assert.equal(beforeReceipt.ledger.before, null)
+  assert.deepEqual(beforeReceipt.ledger.after, { version: 1, head: 'a'.repeat(40) })
+  assert.equal(beforeReceipt.ledgerDiagnostics[0].operation, 'snapshot')
+})
+
+test('U2 persists bounded redacted acceptance summaries without console output and rejects incomplete or leaky summaries', async t => {
+  const fixtures = fs.mkdtempSync(path.join(os.tmpdir(), 'test-output-u2-'))
+  t.after(() => fs.rmSync(fixtures, { recursive: true, force: true }))
+  const receiptHelper = path.join(__dirname, '../src/shared/validation/test-output-receipt.cjs')
+  const { evaluateAcceptanceSummary, receiptDigest } = require(receiptHelper)
+
+  const h = diagnosticRunner(async () => ({
+    identity: { repositoryId: 'repo-1', worktreeId: 'w'.repeat(64), generation: 'g'.repeat(64) },
+    snapshot: async () => ({ version: 1, head: 'a'.repeat(40) }),
+    register: async () => { throw new Error('should not register') }
+  }), {
+    reconcileReceipts: async () => ({ reconciled: [], remaining: 0 }),
+    pendingReceiptIds: () => ({ ids: [], pending: 0 })
+  })
+
+  const validSummary = {
+    id: 'ENTIRE_LIVE_CHANNEL',
+    provider: 'entire',
+    version: '0.13.4',
+    sha256: 'c'.repeat(64),
+    pin: 'VERIFIED',
+    source: 'PROVIDER_PIN_AND_CLI_VERSION',
+    outcome: 'VERIFIED',
+    coverage: 'COMPLETE',
+    sessions: 2,
+    usageCoverage: 'COMPLETE',
+    transcriptImported: false
+  }
+  const quietScript = `require(${JSON.stringify(receiptHelper)}).recordTestAcceptance(${JSON.stringify(validSummary)});process.stdout.write('Tests  1 passed (1)\\n')`
+  const quietReceipt = await h.run(process.execPath, ['-e', quietScript], { cwd: fixtures, expectTests: true })
+  assert.equal(quietReceipt.state, 'PASS')
+  assert.equal(quietReceipt.acceptance.outcome, 'VERIFIED')
+  assert.equal(quietReceipt.acceptance.version, '0.13.4')
+  assert.equal(quietReceipt.acceptance.sourceIdentity, 'BEFORE_AFTER_CAPTURED')
+  assert.equal(fs.existsSync(path.join(quietReceipt.directory, 'acceptance.json')), false)
+  const stored = JSON.parse(fs.readFileSync(path.join(quietReceipt.directory, 'receipt.json'), 'utf8'))
+  assert.equal(receiptDigest(stored), stored.digest)
+  const projectedText = h.project(quietReceipt)
+  assert.ok(Buffer.byteLength(projectedText) <= limits.success)
+  const projected = JSON.parse(projectedText)
+  assert.equal(projected.acceptance.version, '0.13.4')
+  assert.equal(projected.acceptance.sourceIdentity, 'BEFORE_AFTER_CAPTURED')
+
+  const missingVersion = await h.run(process.execPath, ['-e', `require(${JSON.stringify(receiptHelper)}).recordTestAcceptance(${JSON.stringify({ ...validSummary, version: null })});console.log('Tests  1 passed (1)')`], { cwd: fixtures, expectTests: true })
+  assert.equal(missingVersion.state, 'INSUFFICIENT')
+  assert.equal(missingVersion.validation.state, 'INSUFFICIENT')
+  assert.equal(missingVersion.acceptance.outcome, 'INCOMPLETE')
+
+  const skippedCase = await h.run(process.execPath, ['-e', `require(${JSON.stringify(receiptHelper)}).recordTestAcceptance(${JSON.stringify({ ...validSummary, version: null, sha256: null, pin: 'UNVERIFIED', source: 'UNAVAILABLE', outcome: 'SKIPPED', code: 'ACCEPTANCE_SKIPPED' })});console.log('Tests  1 passed (1)')`], { cwd: fixtures, expectTests: true })
+  assert.equal(skippedCase.state, 'INSUFFICIENT')
+  assert.equal(skippedCase.acceptance.outcome, 'SKIPPED')
+
+  const leakyFile = path.join(fixtures, 'leaky.cjs')
+  fs.writeFileSync(leakyFile, `require(${JSON.stringify(receiptHelper)}).recordTestAcceptance(${JSON.stringify({ ...validSummary, transcriptImported: true, secretEnv: 'SECRET_ENV_LEAK', transcript: 'PRIVATE_TRANSCRIPT' })});console.log('Tests  1 passed (1)')\n`)
+  const leakyReceipt = await h.run(process.execPath, [leakyFile], { cwd: fixtures, expectTests: true })
+  assert.equal(leakyReceipt.state, 'INSUFFICIENT')
+  assert.equal(leakyReceipt.acceptance.outcome, 'INCOMPLETE')
+  assert.equal(leakyReceipt.acceptance.reason, 'ACCEPTANCE_SCHEMA_INVALID')
+  assert.equal(JSON.stringify(leakyReceipt).includes('SECRET_ENV_LEAK'), false)
+  assert.equal(JSON.stringify(leakyReceipt).includes('PRIVATE_TRANSCRIPT'), false)
+  assert.equal(h.project(leakyReceipt).includes('SECRET_ENV_LEAK'), false)
+
+  const badEval = evaluateAcceptanceSummary({ id: 'ENTIRE_LIVE_CHANNEL', provider: 'entire', version: '../bad/path', sha256: 'd'.repeat(64), pin: 'VERIFIED', source: 'PROVIDER_PIN_AND_CLI_VERSION', outcome: 'VERIFIED', transcriptImported: false }, { before: { a: 1 }, after: { a: 1 } })
+  assert.equal(badEval.sufficient, false)
+  assert.equal(badEval.acceptance.reason, 'ACCEPTANCE_SCHEMA_INVALID')
+  assert.equal(badEval.acceptance.sourceIdentity, 'BEFORE_AFTER_CAPTURED')
 })

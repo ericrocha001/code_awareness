@@ -245,7 +245,17 @@ export class EntireProvider {
     await this.validate()
     const finalConfig = await this.preflight(true)
     if (finalConfig.executable !== config.executable || finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version) throw entireError('PROVIDER_VERSION_MISMATCH', 'executable', 'EXECUTABLE_CHANGED_DURING_CALL', 'REVERIFY_EXECUTABLE_PIN')
-    return result
+    if (name !== 'discover_entire_sessions') return result
+    return {
+      ...result,
+      provider: {
+        id: 'entire' as const,
+        version: finalConfig.version,
+        sha256: finalConfig.sha256,
+        pin: 'VERIFIED' as const,
+        source: 'PROVIDER_PIN_AND_CLI_VERSION' as const
+      }
+    }
   }
   async inspectCapture(): Promise<EntireCapture> {
     this.deadline = Date.now() + 12_000
