@@ -1,8 +1,8 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
-import { inspectUserCodexInstallation } from './native-hook-profile'
-import { openNativeHookCatalog, readNativeEnrollment, readUserCodexProfile } from './native-hook-catalog'
+import { inspectUserHookInstallation } from './native-hook-profile'
+import { openNativeHookCatalog, readNativeEnrollment, readUserHookProfile } from './native-hook-catalog'
 import type { CheckpointRegistry } from './checkpoint-registry'
 import { unknownNativeTrust, type NativeTrustObservation } from './native-hook-preflight'
 import { nativeCaptureConfiguration } from './native-capture-window'
@@ -20,14 +20,14 @@ export function nativeHookReadiness(
   let { handlers: _handlers, ...installation } = inspectNativeInstallation(root, { repositoryId: registry.repositoryId, ...target }, process.platform, provider)
   let bootstrap: { state: 'AVAILABLE' | 'UNAVAILABLE'; reasonCode: string } | undefined
   let userProfileConfigured = false
-  if (provider === 'codex' && options?.profile) {
+  if ((provider === 'codex' || provider === 'antigravity') && options?.profile) {
     try {
-      const userInstall = inspectUserCodexInstallation(options.profile, options.codexHome, process.platform)
+      const userInstall = inspectUserHookInstallation(options.profile, provider, options.codexHome, process.platform)
       userProfileConfigured = userInstall.state === 'CONFIGURED'
       const db = openNativeHookCatalog(options.profile, true)
       try {
-        const profileRow = readUserCodexProfile(db, 'codex')
-        const enrollment = readNativeEnrollment(db, registry.repositoryId, 'codex')
+        const profileRow = readUserHookProfile(db, provider)
+        const enrollment = readNativeEnrollment(db, registry.repositoryId, provider)
         if (profileRow?.enabled && userProfileConfigured && enrollment?.externalPreparation) {
           bootstrap = { state: 'AVAILABLE', reasonCode: 'USER_BOOTSTRAP_AVAILABLE' }
           if (installation.state === 'MISSING') {

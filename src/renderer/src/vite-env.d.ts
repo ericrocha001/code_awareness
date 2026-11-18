@@ -137,6 +137,7 @@ declare global {
       stopCliExecution: () => Promise<{ stopped: boolean }>
       localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
       codexUserHooks?: import('../../shared/types/codex-hooks-types').CodexUserHooksApi
+      antigravityUserHooks?: import('../../shared/types/codex-hooks-types').AntigravityUserHooksApi
       onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
       getSystemHealthDiagnosticReport: () => Promise<string>

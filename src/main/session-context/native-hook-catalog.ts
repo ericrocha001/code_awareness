@@ -17,20 +17,23 @@ export interface NativeHookEnrollment {
   clientPath: string
 }
 
-export interface UserCodexHookProfile {
+export interface UserHookProfile {
   schema: 1
   enabled: boolean
-  codexHome: string
+  codexHome?: string
+  configHome?: string
   configPath: string
   helperDigest: string
   nodePath: string
   runAsNode?: boolean
+  cmdWrapperPath?: string
   clientPath?: string
   clientVersion?: string
   autoEnrollNewProjects: boolean
   gitCommitTool?: string
   updatedAt: string
 }
+export type UserCodexHookProfile = UserHookProfile
 
 export function enrollmentKey(repositoryId: string, provider: NativeHookProvider): string {
   return 'native-hooks:' + repositoryId + ':' + provider
@@ -73,20 +76,27 @@ export function readNativeEnrollment(db: DatabaseSync, repositoryId: string, pro
   return value as NativeHookEnrollment
 }
 
-export function readUserCodexProfile(db: DatabaseSync, provider: NativeHookProvider = 'codex'): UserCodexHookProfile | undefined {
+export function readUserHookProfile(db: DatabaseSync, provider: NativeHookProvider = 'codex'): UserHookProfile | undefined {
   const row = db.prepare('SELECT value FROM repository_catalog_meta WHERE key=?').get(profileIntegrationKey(provider))
   if (!row) return
   if (typeof row.value !== 'string') throw new Error('HOOK_PROFILE_INVALID')
-  const value = JSON.parse(row.value) as Partial<UserCodexHookProfile>
-  if (value.schema !== 1 || typeof value.enabled !== 'boolean' || typeof value.codexHome !== 'string' || typeof value.configPath !== 'string' ||
+  const value = JSON.parse(row.value) as Partial<UserHookProfile>
+  const effectiveHome = value.configHome ?? value.codexHome
+  if (value.schema !== 1 || typeof value.enabled !== 'boolean' || typeof effectiveHome !== 'string' || !effectiveHome ||
+    typeof value.configPath !== 'string' ||
     typeof value.helperDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.helperDigest) || typeof value.nodePath !== 'string' ||
     (value.runAsNode !== undefined && typeof value.runAsNode !== 'boolean') ||
+    (value.cmdWrapperPath !== undefined && typeof value.cmdWrapperPath !== 'string') ||
     (value.clientPath !== undefined && typeof value.clientPath !== 'string') ||
     (value.clientVersion !== undefined && typeof value.clientVersion !== 'string') ||
     typeof value.autoEnrollNewProjects !== 'boolean' ||
-    (value.gitCommitTool !== undefined && (typeof value.gitCommitTool !== 'string' || !nativeGitCommitToolPattern.test(value.gitCommitTool))) ||
+    (value.gitCommitTool !== undefined && (provider !== 'codex' || typeof value.gitCommitTool !== 'string' || !nativeGitCommitToolPattern.test(value.gitCommitTool))) ||
     typeof value.updatedAt !== 'string') throw new Error('HOOK_PROFILE_INVALID')
-  return value as UserCodexHookProfile
+  return value as UserHookProfile
+}
+
+export function readUserCodexProfile(db: DatabaseSync, provider: NativeHookProvider = 'codex'): UserHookProfile | undefined {
+  return readUserHookProfile(db, provider)
 }
 
 export function distributedHelperIdentity(helper: string) {
@@ -105,8 +115,7 @@ export function authorizeDistributedBinding(helper: string, binding: NativeHookB
     const root = availableCatalogRoot(db, binding.repositoryId)
     const enrollment = readNativeEnrollment(db, binding.repositoryId, provider)
     if (binding.scope === 'USER') {
-      if (provider !== 'codex') throw new Error('HOOK_ENROLLMENT_REQUIRED')
-      const profileIntegration = readUserCodexProfile(db, 'codex')
+      const profileIntegration = readUserHookProfile(db, provider)
       if (!profileIntegration?.enabled || profileIntegration.helperDigest !== digest || !binding.configPath ||
         !sameNativePath(profileIntegration.configPath, binding.configPath)) throw new Error('HOOK_ENROLLMENT_REQUIRED')
     }

@@ -4,10 +4,12 @@ import { join, resolve } from 'node:path'
 import { canonicalDesktopProfile } from '../desktop-profile'
 import { availableCatalogRoot, openNativeHookCatalog } from './native-hook-catalog'
 import {
-  disableUserProfileCodex, enrolledNativeStatus, enrollNativeHooks, enrollRepositoryForUserCodex,
-  enrollUserProfileCodex, nativeHookRegistry, prepareExternalNativeHooks, revokeNativeHooks, userCodexProfileStatus
+  disableUserProfileHooks, enrolledNativeStatus, enrollNativeHooks, enrollRepositoryForUserHooks,
+  enrollUserProfileHooks, nativeHookRegistry, prepareExternalNativeHooks, revokeNativeHooks, userProfileHookStatus
 } from './native-hook-enrollment'
-import { cutoverLegacyProjectCodexHooks, resolveCodexHome, resolveDistributableNodeRuntime } from './native-hook-profile'
+import {
+  cutoverLegacyProjectHooks, resolveAntigravityConfigHome, resolveCodexHome, resolveDistributableNodeRuntime
+} from './native-hook-profile'
 import { nativeHookProviders, type NativeHookProvider } from './native-hooks'
 
 declare const __CODE_AWARENESS_NATIVE_HOOK_BUNDLE__: string
@@ -29,32 +31,44 @@ export async function runNativeHookCli(args: string[]) {
   const authorized = args.includes('--authorized')
   if (action !== 'status' && !authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
   const codexHome = opt('codex-home')
+  const configHome = opt('config-home') ?? codexHome
 
   if (userScope || action === 'cutover' || (action === 'status' && !repositoryId)) {
-    if (provider !== 'codex') throw new Error('PROVIDER_UNSUPPORTED')
     if (action === 'status') {
-      return userCodexProfileStatus({ profile, codexHome, repositoryId, explicitClientPath: opt('codex') })
+      return userProfileHookStatus({
+        provider,
+        profile,
+        configHome,
+        repositoryId,
+        explicitClientPath: opt(provider) ?? opt('codex') ?? opt('antigravity')
+      })
     }
     if (action === 'disable') {
-      return disableUserProfileCodex(profile, authorized, codexHome)
+      return disableUserProfileHooks(profile, authorized, provider, configHome)
     }
     if (action === 'cutover') {
-      return cutoverLegacyProjectCodexHooks({
+      const userConfigPath = join(
+        provider === 'antigravity' ? resolveAntigravityConfigHome(configHome) : resolveCodexHome(configHome),
+        'hooks.json'
+      )
+      return cutoverLegacyProjectHooks({
+        provider,
         profile,
-        userConfigPath: join(resolveCodexHome(codexHome), 'hooks.json'),
+        userConfigPath,
         repositoryId,
         authorized
       })
     }
     if (action === 'install') {
       const runtime = resolveDistributableNodeRuntime({ packaged: false, execPath: process.execPath, allowWorktreeRuntime: args.includes('--allow-worktree-runtime') })
-      return enrollUserProfileCodex({
+      return enrollUserProfileHooks({
+        provider,
         profile,
-        codexHome,
+        configHome,
         helperContent: __CODE_AWARENESS_NATIVE_HOOK_BUNDLE__,
         nodePath: runtime.nodePath,
         runAsNode: runtime.runAsNode,
-        clientPath: opt('codex'),
+        clientPath: opt(provider) ?? opt('codex') ?? opt('antigravity'),
         gitCommitTool: opt('git-commit-tool'),
         autoEnrollNewProjects: args.includes('--auto-enroll'),
         enrollActiveRepositories: args.includes('--enroll-active'),
@@ -68,16 +82,15 @@ export async function runNativeHookCli(args: string[]) {
 
   if (!repositoryId) throw new Error('HOOK_REPOSITORY_REQUIRED')
   if (action === 'enroll') {
-    if (provider !== 'codex') throw new Error('PROVIDER_UNSUPPORTED')
-    return enrollRepositoryForUserCodex(profile, repositoryId, {
+    return enrollRepositoryForUserHooks(profile, repositoryId, {
+      provider,
       authorized,
       gitCommitTool: opt('git-commit-tool'),
       cutoverLegacy: args.includes('--cutover')
     })
   }
   if (action === 'prepare') {
-    if (provider !== 'codex') throw new Error('PROVIDER_UNSUPPORTED')
-    const prepared = await prepareExternalNativeHooks(profile, repositoryId, process.cwd())
+    const prepared = await prepareExternalNativeHooks(profile, repositoryId, process.cwd(), Infinity, provider)
     if (prepared.state === 'NOT_ENROLLED') throw new Error('HOOK_ENROLLMENT_REQUIRED')
     return prepared
   }

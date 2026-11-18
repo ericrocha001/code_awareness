@@ -11,7 +11,7 @@ import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 const MAX_HOOK_CONFIG_BYTES = 65536
 const MAX_INSTALLATION_BYTES = 512 * 1024
 export const ANTIGRAVITY_HOOK_NAME = 'code-awareness-session-context'
-const antigravityFlatEvents = new Set<NativeHookEvent>(['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
+export const antigravityFlatEvents = new Set<NativeHookEvent>(['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
 
 const providerEvents = (provider: NativeHookProvider = 'codex'): readonly NativeHookEvent[] =>
   provider === 'antigravity' ? antigravityHookEvents : codexHookEvents
@@ -24,6 +24,51 @@ export interface NativeInstallationInspection {
   repairability?: 'REPAIRABLE' | 'CONFLICT' | 'UNSAFE'
   expected: 7 | 6
   handlers: { key: string; event: NativeHookEvent; sourcePath: string }[]
+}
+
+export interface ParsedAntigravityUserCommand {
+  nodePath: string
+  helperPath: string
+  event: string
+  runAsNode: boolean
+  cmdWrapperPath?: string
+  cmdWrapperDigestMismatch?: boolean
+  cmdWrapperUnavailable?: boolean
+}
+
+export function parseAntigravityUserCommand(command: string): ParsedAntigravityUserCommand | null {
+  const unix = /^(ELECTRON_RUN_AS_NODE=1 )?"([^"\r\n]+)" "([^"\r\n]+)" --user-profile --provider=antigravity --event=([A-Za-z]+)$/.exec(command)
+  if (unix) {
+    return { runAsNode: Boolean(unix[1]), nodePath: unix[2], helperPath: unix[3], event: unix[4] }
+  }
+  const winDirect = /^(set ELECTRON_RUN_AS_NODE=1&& )?set PATH=([^"\r\n&|<>^%;]+);%PATH%&& set CA_SCRIPT=([^"\r\n&|<>^%;]+)&& set CA_PROVIDER=antigravity&& set CA_EVENT=([A-Za-z]+)&& set CA_USER_PROFILE=1&& ([^\s"\r\n&|<>^%;\\/:]+) -e require\(process\.env\.CA_SCRIPT\)$/.exec(command)
+  if (winDirect) {
+    return { runAsNode: Boolean(winDirect[1]), nodePath: join(winDirect[2], winDirect[5]), helperPath: winDirect[3], event: winDirect[4] }
+  }
+  const winCmd = /^set PATH=([^"\r\n&|<>^%;]+);%PATH%&& set CA_PROVIDER=antigravity&& set CA_EVENT=([A-Za-z]+)&& set CA_USER_PROFILE=1&& (ag-[a-f0-9]{64}\.cmd)$/.exec(command)
+  if (winCmd) {
+    const cmdWrapperPath = join(winCmd[1], winCmd[3])
+    const digest = /^ag-([a-f0-9]{64})\.cmd$/.exec(winCmd[3])?.[1]
+    try {
+      const content = boundedFile(cmdWrapperPath, 8192)
+      const inner = /^@echo off\r?\n(set ELECTRON_RUN_AS_NODE=1\r?\n)?"([^"\r\n]+)" "([^"\r\n]+)"\r?\n?$/.exec(content)
+      if (!inner) {
+        return { nodePath: '', helperPath: '', event: winCmd[2], runAsNode: false, cmdWrapperPath, cmdWrapperDigestMismatch: true }
+      }
+      const mismatch = !digest || nativeDigest(content) !== digest
+      return {
+        runAsNode: Boolean(inner[1]),
+        nodePath: inner[2],
+        helperPath: inner[3],
+        event: winCmd[2],
+        cmdWrapperPath,
+        ...(mismatch ? { cmdWrapperDigestMismatch: true } : {})
+      }
+    } catch {
+      return { nodePath: '', helperPath: '', event: winCmd[2], runAsNode: false, cmdWrapperPath, cmdWrapperUnavailable: true }
+    }
+  }
+  return null
 }
 
 function formatAntigravityWindowsCommand(nodePath: string, commandPath: string, bindingPath: string): string {
@@ -100,11 +145,11 @@ export function inspectNativeInstallation(
   const { directory, bindingPath, snapshotPath, configPath } = hookPaths(root, provider)
   try {
     checkPaths(root, provider)
-    if (provider === 'codex' && existsSync(bindingPath) && !existsSync(configPath)) {
+    if (existsSync(bindingPath) && !existsSync(configPath)) {
       const userBinding = readNativeBinding(bindingPath)
       if (userBinding.scope === 'USER' && userBinding.configPath) {
         const identity = nativeGitIdentity(root)
-        if ((userBinding.provider ?? 'codex') !== 'codex' || userBinding.repositoryId !== target.repositoryId ||
+        if ((userBinding.provider ?? 'codex') !== provider || userBinding.repositoryId !== target.repositoryId ||
           userBinding.worktreeId !== target.worktreeId || userBinding.generation !== target.generation ||
           userBinding.root !== identity.root || userBinding.directoryIdentity !== identity.directoryIdentity ||
           userBinding.commonDirectory !== identity.commonDirectory || userBinding.spool !== join(directory, 'spool')) {
@@ -114,9 +159,60 @@ export function inspectNativeInstallation(
         if (!userBinding.enabled) return result('INCOMPATIBLE', 'NATIVE_CAPTURE_DISABLED')
         if (!existsSync(userBinding.configPath)) return result('MISSING', 'NATIVE_CONFIG_MISSING')
         const userText = boundedFile(userBinding.configPath, MAX_HOOK_CONFIG_BYTES)
-        const userConfig = parseCodexConfig(userText)
         const userHandlers: NativeInstallationInspection['handlers'] = []
         const seenHelpers = new Set<string>()
+        if (provider === 'antigravity') {
+          const agConfig = parseAntigravityConfig(userText)
+          const rawGroup = agConfig[ANTIGRAVITY_HOOK_NAME]
+          if (!plainObject(rawGroup)) return result('MISSING', 'NATIVE_CONFIG_MISSING')
+          if ('enabled' in rawGroup && rawGroup.enabled !== true) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', 0)
+          for (const event of antigravityHookEvents) {
+            const matches: NativeInstallationInspection['handlers'] = []
+            const snake = event.replace(/[A-Z]/g, (letter, offset) => (offset ? '_' : '') + letter.toLowerCase())
+            const entries = rawGroup[event]
+            if (!Array.isArray(entries)) continue
+            const checkHook = (hook: Record<string, unknown>, key: string) => {
+              if ((hook.type !== undefined && hook.type !== 'command') || typeof hook.command !== 'string') return
+              const parsedCmd = parseAntigravityUserCommand(hook.command)
+              if (!parsedCmd) return
+              if (parsedCmd.cmdWrapperUnavailable) return 'HOOK_PATH_UNAVAILABLE'
+              if (parsedCmd.cmdWrapperDigestMismatch) return 'HOOK_COMMAND_DIGEST_MISMATCH'
+              if (!/native-hook-[a-f0-9]{64}\.cjs$/.test(parsedCmd.helperPath)) return
+              if (parsedCmd.event !== event) return 'NATIVE_HANDLER_INCOMPATIBLE'
+              if (!existsSync(parsedCmd.nodePath) || !existsSync(parsedCmd.helperPath)) return 'HOOK_PATH_UNAVAILABLE'
+              if (!seenHelpers.has(parsedCmd.helperPath)) {
+                const d = /native-hook-([a-f0-9]{64})\.cjs$/.exec(parsedCmd.helperPath)![1]
+                if (nativeDigest(boundedFile(parsedCmd.helperPath, MAX_INSTALLATION_BYTES)) !== d) return 'HOOK_COMMAND_DIGEST_MISMATCH'
+                seenHelpers.add(parsedCmd.helperPath)
+              }
+              if (hook.async === true || hook.timeout !== 3) return 'NATIVE_HANDLER_INCOMPATIBLE'
+              matches.push({ key, event, sourcePath: userBinding.configPath! })
+              return undefined
+            }
+            if (antigravityFlatEvents.has(event)) {
+              for (const [handlerIndex, hook] of entries.entries()) {
+                if (!plainObject(hook)) continue
+                const fail = checkHook(hook, `${userBinding.configPath}:${ANTIGRAVITY_HOOK_NAME}:${snake}:${handlerIndex}`)
+                if (fail) return result('INCOMPATIBLE', fail, userHandlers.length)
+              }
+            } else {
+              for (const [groupIndex, entry] of entries.entries()) {
+                if (!plainObject(entry) || !Array.isArray(entry.hooks)) continue
+                for (const [handlerIndex, hook] of entry.hooks.entries()) {
+                  if (!plainObject(hook)) continue
+                  const fail = checkHook(hook, `${userBinding.configPath}:${ANTIGRAVITY_HOOK_NAME}:${snake}:${groupIndex}:${handlerIndex}`)
+                  if (fail) return result('INCOMPATIBLE', fail, userHandlers.length)
+                  if (entry.matcher !== '*' && matches.length) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', userHandlers.length)
+                }
+              }
+            }
+            if (matches.length > 1) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS'), repairability: 'CONFLICT' }
+            userHandlers.push(...matches)
+          }
+          if (userHandlers.length !== 6) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLERS_MISSING', userHandlers.length), repairability: 'REPAIRABLE' }
+          return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 6, expected: 6, handlers: userHandlers }
+        }
+        const userConfig = parseCodexConfig(userText)
         for (const event of codexHookEvents) {
           const matches: NativeInstallationInspection['handlers'] = []
           const snake = event.replace(/[A-Z]/g, (letter, offset) => (offset ? '_' : '') + letter.toLowerCase())
@@ -302,7 +398,7 @@ export function parseCodexConfig(text: string | null): { hooks: Record<string, {
   return value as { hooks: Record<string, { matcher?: unknown; hooks: Record<string, unknown>[]; [key: string]: unknown }[]>; [key: string]: unknown }
 }
 
-function parseAntigravityConfig(text: string | null): Record<string, unknown> {
+export function parseAntigravityConfig(text: string | null): Record<string, unknown> {
   const value = text === null ? {} : JSON.parse(text)
   if (!plainObject(value)) throw new Error('HOOK_CONFIG_UNSUPPORTED')
   const group = value[ANTIGRAVITY_HOOK_NAME]
@@ -322,7 +418,7 @@ function parseAntigravityConfig(text: string | null): Record<string, unknown> {
   return value
 }
 
-function antigravityReferencesBinding(value: unknown, predicate: (command: string) => boolean): boolean {
+export function antigravityReferencesBinding(value: unknown, predicate: (command: string) => boolean): boolean {
   if (!plainObject(value)) return false
   for (const item of Object.values(value)) {
     if (Array.isArray(item)) {

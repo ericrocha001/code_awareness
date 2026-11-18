@@ -39,16 +39,18 @@ Autorize o alvo antes de usar `--authorized`. No Codex, instalar em linked Workt
 
 O helper fica no perfil do Code Awareness, com nome derivado do digest. O repositório pode produzir eventos com o Desktop fechado. A seleção posterior do projeto aciona o fluxo de ingestão existente no SQLite daquele repositório. `status` informa instalação e autorização no Catalog. Origem carregada, trust do cliente e eventos são verificações independentes. `disable` nesta modalidade revoga imediatamente o provedor para o repositório, preservando arquivos de terceiros e a evidência já capturada. A revogação não apaga manifests nem concede trust.
 
-### Codex no perfil do usuário (`$CODEX_HOME/hooks.json`)
+### Codex e Antigravity no perfil do usuário (`$CODEX_HOME/hooks.json` e `~/.gemini/config/hooks.json`)
 
-Para instalar uma única vez os 7 handlers do Codex em `$CODEX_HOME/hooks.json` (`~/.codex/hooks.json` por padrão), habilitar a captura explícita por repositório sem `binding.json` prévio nem scripts por checkout, e opcionalmente limpar handlers legados por projeto (`--cutover`):
+Para instalar uma única vez os handlers no perfil do usuário (7 eventos no Codex em `$CODEX_HOME/hooks.json`; grupo `code-awareness-session-context` com 6 eventos no Antigravity em `~/.gemini/config/hooks.json`), habilitar a captura explícita por repositório sem `binding.json` prévio nem scripts por checkout, e opcionalmente limpar handlers legados por projeto (`--cutover`):
 
 ```powershell
-node <caminho-do-cli> status --user
-node <caminho-do-cli> install --user --authorized --codex=<codex.exe> [--enroll-active] [--auto-enroll] [--cutover]
-node <caminho-do-cli> enroll --repository=<id-do-catalog> --authorized [--cutover]
-node <caminho-do-cli> cutover --authorized
-node <caminho-do-cli> disable --user --authorized
+node <caminho-do-cli> status --user --provider=codex
+node <caminho-do-cli> install --user --provider=codex --authorized --codex=<codex.exe> [--enroll-active] [--auto-enroll] [--cutover]
+node <caminho-do-cli> status --user --provider=antigravity
+node <caminho-do-cli> install --user --provider=antigravity --authorized --antigravity=<Antigravity.exe|agy.exe> [--enroll-active] [--auto-enroll] [--cutover]
+node <caminho-do-cli> enroll --repository=<id-do-catalog> --provider=<codex|antigravity> --authorized [--cutover]
+node <caminho-do-cli> cutover --provider=<codex|antigravity> --authorized
+node <caminho-do-cli> disable --user --provider=<codex|antigravity> --authorized
 ```
 
-A revisão de confiança continua nativa do Codex na primeira ativação ou alteração da definição global. Worktrees ligadas ou em detached HEAD pertencentes a repositórios inscritos fazem bootstrap atômico na primeira captura elegível (`SessionStart` / `PreToolUse`), mantendo saídas neutras para repositórios fora do escopo.
+No Codex, a revisão de confiança continua nativa na primeira ativação ou alteração da definição global. No Antigravity, o grupo nomeado preserva os demais hooks existentes no arquivo e a confiança do cliente é reportada honestamente como `CLIENT_TRUST_UNSUPPORTED`. Worktrees ligadas ou em detached HEAD pertencentes a repositórios inscritos fazem bootstrap atômico na primeira captura elegível (`SessionStart` / `PreToolUse`, ou `PreInvocation` no Antigravity), mantendo saídas neutras para repositórios fora do escopo.

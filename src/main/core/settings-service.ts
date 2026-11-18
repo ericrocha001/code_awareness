@@ -108,6 +108,13 @@ export class SettingsService {
         }
       }
 
+      if (rest.antigravityCapture && typeof rest.antigravityCapture === 'object' && !Array.isArray(rest.antigravityCapture)) {
+        const rawAg = rest.antigravityCapture as { autoEnrollNewProjects?: unknown }
+        merged.antigravityCapture = {
+          autoEnrollNewProjects: rawAg.autoEnrollNewProjects === true
+        }
+      }
+
       // CompressionSettings: ausente/corrompido → default; presente → normaliza o perfil defensivamente
       if (rest.compressionSettings && typeof rest.compressionSettings === 'object') {
         const raw = rest.compressionSettings as { profile?: unknown; outputFormat?: unknown; enrichment?: unknown }

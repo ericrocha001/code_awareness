@@ -496,10 +496,14 @@ export async function executeSessionTool(
         const observation = data as CaptureHealthObservation
         await reconcileRegistry(sessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
         if (!request.source) {
-          const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) || existsSync(join(root, '.agents/hooks.json'))
+          const agReadiness = nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity', nativeProfile ? { profile: nativeProfile } : undefined)
+          const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) ||
+            existsSync(join(root, '.agents/hooks.json')) ||
+            agReadiness.bootstrap?.state === 'AVAILABLE' ||
+            agReadiness.installation.state !== 'MISSING'
           data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: sessionStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true,
             ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex', nativeProfile ? { profile: nativeProfile } : undefined),
-            ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity') } } } : {}) } }
+            ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: agReadiness } } } : {}) } }
         }
       }
     } else if (name === 'inspect_code_provenance') {

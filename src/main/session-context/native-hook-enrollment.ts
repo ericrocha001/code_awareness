@@ -5,14 +5,14 @@ import { isQualifiedCodexHookVersion } from '../../shared/native-hook-preflight.
 import { GitWorktreeRegistry, type WorktreeRecord } from '../git-operations/git-worktree-registry'
 import { assertProfilePath, assertUserOwned, revision, writeConfig } from '../local-mcp-clients/safe-config-file'
 import {
-  availableCatalogRoot, enrollmentKey, openNativeHookCatalog, profileIntegrationKey, readNativeEnrollment, readUserCodexProfile,
-  type NativeHookEnrollment, type UserCodexHookProfile
+  availableCatalogRoot, enrollmentKey, openNativeHookCatalog, profileIntegrationKey, readNativeEnrollment, readUserHookProfile,
+  type NativeHookEnrollment, type UserHookProfile
 } from './native-hook-catalog'
 import { inspectNativeInstallation, installNativeHooks } from './native-hook-installation'
 import {
-  bootstrapUserCodexWorktreeBinding, cutoverLegacyProjectCodexHooks, disableUserCodexHooks, discoverCodexClients,
-  inspectUserCodexInstallation, installUserCodexHooks, qualifyCodexBinary, resolveCodexHome, type DiscoveredCodexClient,
-  type LegacyCutoverItem
+  bootstrapUserWorktreeBinding, cutoverLegacyProjectHooks, disableUserHookProfile, discoverAntigravityClients,
+  discoverCodexClients, inspectUserHookInstallation, installUserHookProfile, qualifyAntigravityBinary, qualifyCodexBinary,
+  resolveAntigravityConfigHome, resolveCodexHome, type DiscoveredCodexClient, type LegacyCutoverItem
 } from './native-hook-profile'
 import { boundedFile, nativeDigest, nativeGitCommitToolPattern, nativeGitDirectories, nativeGitIdentity, nativeHookProviders, type NativeHookProvider } from './native-hooks'
 
@@ -54,11 +54,11 @@ export async function enrollNativeHooks(
   if (permission?.gitCommitTool !== undefined && !nativeGitCommitToolPattern.test(permission.gitCommitTool)) throw new Error('INVALID_BINDING')
   const reader = openNativeHookCatalog(profile, true)
   let catalogRoot: string
-  let existingProfile: UserCodexHookProfile | undefined
+  let existingProfile: UserHookProfile | undefined
   let existingGrant: NativeHookEnrollment | undefined
   try {
     catalogRoot = availableCatalogRoot(reader, repositoryId)
-    existingProfile = provider === 'codex' ? readUserCodexProfile(reader, 'codex') : undefined
+    existingProfile = (provider === 'codex' || provider === 'antigravity') ? readUserHookProfile(reader, provider) : undefined
     existingGrant = readNativeEnrollment(reader, repositoryId, provider)
   } finally { reader.close() }
 
@@ -66,18 +66,23 @@ export async function enrollNativeHooks(
   if ((typeof record !== 'string' && (selected.path !== record.path || selected.worktreeId !== record.worktreeId || selected.generation !== record.generation)) ||
       selected.locked || selected.missing || selected.prunable || !selected.head) throw new Error('WORKTREE_STALE')
 
-  if (provider === 'codex' && existingProfile?.enabled && !permission) {
+  if ((provider === 'codex' || provider === 'antigravity') && existingProfile?.enabled && !permission) {
     const allowed = scope === 'MANAGED_CREATION' ? existingGrant?.managed : existingGrant?.worktrees[selected.worktreeId] === selected.generation || existingGrant?.externalPreparation
     if (!allowed) return { state: 'NOT_ENROLLED' as const }
-    const prepared = bootstrapUserCodexWorktreeBinding({
+    const prepared = bootstrapUserWorktreeBinding({
+      provider,
       profile,
       repositoryId,
       root: selected.path,
       configPath: existingProfile.configPath,
-      gitCommitTool: existingGrant?.gitCommitTool ?? existingProfile.gitCommitTool,
+      ...(provider === 'codex' ? { gitCommitTool: existingGrant?.gitCommitTool ?? existingProfile.gitCommitTool } : {}),
       helperDigest: existingProfile.helperDigest
     })
-    return { state: prepared.state, statuses: [{ worktreeId: selected.worktreeId, installation: 'CONFIGURED' as const, handlers: 7 }], trust: 'NOT_INSPECTED' as const }
+    return {
+      state: prepared.state,
+      statuses: [{ worktreeId: selected.worktreeId, installation: 'CONFIGURED' as const, handlers: provider === 'antigravity' ? 6 : 7 }],
+      trust: 'NOT_INSPECTED' as const
+    }
   }
 
   const db = openNativeHookCatalog(profile, false)
@@ -147,9 +152,11 @@ export async function enrollNativeHooks(
   } finally { db.close() }
 }
 
-export function enrollUserProfileCodex(options: {
+export function enrollUserProfileHooks(options: {
+  provider?: NativeHookProvider
   profile: string
   codexHome?: string
+  configHome?: string
   helperContent: string
   nodePath: string
   runAsNode?: boolean
@@ -165,17 +172,21 @@ export function enrollUserProfileCodex(options: {
 }): {
   state: 'CONFIGURED' | 'NO_CHANGE' | 'DEFERRED'
   codexHome: string
+  configHome: string
   configPath: string
   helperPath: string
   helperDigest: string
+  cmdWrapperPath?: string
   hooksDigest: string
   trust: 'UNCHANGED' | 'REVIEW_REQUIRED'
   enrolledRepositories: string[]
   cutover?: { state: 'COMPLETED' | 'DEFERRED'; items: LegacyCutoverItem[] }
 } {
   if (!options.authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
-  if (options.gitCommitTool !== undefined && !nativeGitCommitToolPattern.test(options.gitCommitTool)) {
-    throw new Error('INVALID_BINDING')
+  const provider: NativeHookProvider = options.provider ?? 'codex'
+  if (options.gitCommitTool !== undefined) {
+    if (provider !== 'codex') throw new Error('PROVIDER_UNSUPPORTED')
+    if (!nativeGitCommitToolPattern.test(options.gitCommitTool)) throw new Error('INVALID_BINDING')
   }
   const profile = realpathSync(resolve(options.profile))
   assertUserOwned(join(profile, 'repositories/catalog.db'))
@@ -183,15 +194,18 @@ export function enrollUserProfileCodex(options: {
   let clientVersion: string | undefined
   let clientPath: string | undefined
   if (options.clientPath) {
-    const inspectedClient = qualifyCodexBinary(options.clientPath, 'EXPLICIT')
+    const inspectedClient = provider === 'antigravity'
+      ? qualifyAntigravityBinary(options.clientPath, 'EXPLICIT')
+      : qualifyCodexBinary(options.clientPath, 'EXPLICIT')
     if (!inspectedClient.qualified || !inspectedClient.version) throw new Error(inspectedClient.reasonCode)
     clientPath = inspectedClient.path
     clientVersion = inspectedClient.version
   }
 
-  const installed = installUserCodexHooks({
+  const installed = installUserHookProfile({
+    provider,
     profile,
-    codexHome: options.codexHome,
+    configHome: options.configHome ?? options.codexHome,
     helperContent: options.helperContent,
     nodePath: options.nodePath,
     runAsNode: options.runAsNode,
@@ -202,7 +216,8 @@ export function enrollUserProfileCodex(options: {
   })
 
   const cutover = options.cutoverLegacy
-    ? cutoverLegacyProjectCodexHooks({
+    ? cutoverLegacyProjectHooks({
+        provider,
         profile,
         userConfigPath: installed.configPath,
         worktreePaths: options.worktreePaths,
@@ -217,35 +232,39 @@ export function enrollUserProfileCodex(options: {
   const enrolledRepositories: string[] = []
   try {
     db.exec('BEGIN IMMEDIATE')
-    const priorProfile = readUserCodexProfile(db, 'codex')
-    const nextProfile: UserCodexHookProfile = {
+    const priorProfile = readUserHookProfile(db, provider)
+    const nextProfile: UserHookProfile = {
       schema: 1,
       enabled: true,
-      codexHome: installed.codexHome,
+      ...(provider === 'codex' ? { codexHome: installed.codexHome } : {}),
+      configHome: installed.configHome,
       configPath: installed.configPath,
       helperDigest: installed.helperDigest,
       nodePath: checkedExecutable(options.nodePath),
       ...(options.runAsNode ? { runAsNode: true } : {}),
+      ...(installed.cmdWrapperPath ? { cmdWrapperPath: installed.cmdWrapperPath } : {}),
       ...(clientPath ? { clientPath } : priorProfile?.clientPath ? { clientPath: priorProfile.clientPath } : {}),
       ...(clientVersion ? { clientVersion } : priorProfile?.clientVersion ? { clientVersion: priorProfile.clientVersion } : {}),
       autoEnrollNewProjects: options.autoEnrollNewProjects ?? priorProfile?.autoEnrollNewProjects ?? false,
-      ...(options.gitCommitTool ? { gitCommitTool: options.gitCommitTool } : priorProfile?.gitCommitTool ? { gitCommitTool: priorProfile.gitCommitTool } : {}),
+      ...(provider === 'codex' && (options.gitCommitTool ?? priorProfile?.gitCommitTool)
+        ? { gitCommitTool: options.gitCommitTool ?? priorProfile?.gitCommitTool }
+        : {}),
       updatedAt: new Date().toISOString()
     }
     db.prepare('INSERT INTO repository_catalog_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-      .run(profileIntegrationKey('codex'), JSON.stringify(nextProfile))
+      .run(profileIntegrationKey(provider), JSON.stringify(nextProfile))
 
     const activeRows = db.prepare(`SELECT id, checkout_path FROM repository_catalog_records
       WHERE status='ACTIVE' AND availability='AVAILABLE' AND git_state='GIT'`).all() as Array<{ id: string; checkout_path: string }>
     const requestedIds = options.repositoryIds ? new Set(options.repositoryIds) : undefined
     for (const row of activeRows) {
       if (conflictedRepos.has(row.id)) continue
-      const existing = readNativeEnrollment(db, row.id, 'codex')
+      const existing = readNativeEnrollment(db, row.id, provider)
       const shouldEnroll = Boolean(existing) || options.enrollActiveRepositories === true || Boolean(requestedIds?.has(row.id))
       if (!shouldEnroll) continue
       const root = realpathSync(row.checkout_path)
       const commonDirectory = nativeGitIdentity(root).commonDirectory
-      const effectiveTool = options.gitCommitTool ?? existing?.gitCommitTool ?? nextProfile.gitCommitTool
+      const effectiveTool = provider === 'codex' ? (options.gitCommitTool ?? existing?.gitCommitTool ?? nextProfile.gitCommitTool) : undefined
       const nextEnrollment: NativeHookEnrollment = {
         scope: 'USER',
         catalogRoot: root,
@@ -259,7 +278,7 @@ export function enrollUserProfileCodex(options: {
         ...(effectiveTool ? { gitCommitTool: effectiveTool } : {})
       }
       db.prepare('INSERT INTO repository_catalog_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-        .run(enrollmentKey(row.id, 'codex'), JSON.stringify(nextEnrollment))
+        .run(enrollmentKey(row.id, provider), JSON.stringify(nextEnrollment))
       enrolledRepositories.push(row.id)
     }
     db.exec('COMMIT')
@@ -271,9 +290,11 @@ export function enrollUserProfileCodex(options: {
   return {
     state: cutover?.state === 'DEFERRED' ? 'DEFERRED' : installed.state,
     codexHome: installed.codexHome,
+    configHome: installed.configHome,
     configPath: installed.configPath,
     helperPath: installed.helperPath,
     helperDigest: installed.helperDigest,
+    ...(installed.cmdWrapperPath ? { cmdWrapperPath: installed.cmdWrapperPath } : {}),
     hooksDigest: installed.hooksDigest,
     trust: installed.trust,
     enrolledRepositories,
@@ -281,29 +302,69 @@ export function enrollUserProfileCodex(options: {
   }
 }
 
-export function enrollRepositoryForUserCodex(
+export function enrollUserProfileCodex(options: {
+  profile: string
+  codexHome?: string
+  helperContent: string
+  nodePath: string
+  runAsNode?: boolean
+  clientPath?: string
+  gitCommitTool?: string
+  autoEnrollNewProjects?: boolean
+  enrollActiveRepositories?: boolean
+  repositoryIds?: string[]
+  cutoverLegacy?: boolean
+  worktreePaths?: string[]
+  authorized: boolean
+  allowWorktreeRuntime?: boolean
+}) {
+  return enrollUserProfileHooks({ ...options, provider: 'codex' })
+}
+
+export function enrollUserProfileAntigravity(options: {
+  profile: string
+  configHome?: string
+  helperContent: string
+  nodePath: string
+  runAsNode?: boolean
+  clientPath?: string
+  autoEnrollNewProjects?: boolean
+  enrollActiveRepositories?: boolean
+  repositoryIds?: string[]
+  cutoverLegacy?: boolean
+  worktreePaths?: string[]
+  authorized: boolean
+  allowWorktreeRuntime?: boolean
+}) {
+  return enrollUserProfileHooks({ ...options, provider: 'antigravity' })
+}
+
+export function enrollRepositoryForUserHooks(
   profileInput: string,
   repositoryId: string,
-  options: { authorized: boolean; gitCommitTool?: string; cutoverLegacy?: boolean; worktreePaths?: string[] }
+  options: { provider?: NativeHookProvider; authorized: boolean; gitCommitTool?: string; cutoverLegacy?: boolean; worktreePaths?: string[] }
 ): { state: 'ENROLLED' | 'NO_CHANGE' | 'DEFERRED'; repositoryId: string; commonDirectory: string; cutover?: { state: 'COMPLETED' | 'DEFERRED'; items: LegacyCutoverItem[] } } {
   if (!options.authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
-  if (options.gitCommitTool !== undefined && !nativeGitCommitToolPattern.test(options.gitCommitTool)) {
-    throw new Error('INVALID_BINDING')
+  const provider: NativeHookProvider = options.provider ?? 'codex'
+  if (options.gitCommitTool !== undefined) {
+    if (provider !== 'codex') throw new Error('PROVIDER_UNSUPPORTED')
+    if (!nativeGitCommitToolPattern.test(options.gitCommitTool)) throw new Error('INVALID_BINDING')
   }
   const profile = realpathSync(resolve(profileInput))
   assertUserOwned(join(profile, 'repositories/catalog.db'))
 
   const reader = openNativeHookCatalog(profile, true)
-  let profileRow: UserCodexHookProfile | undefined
+  let profileRow: UserHookProfile | undefined
   try {
-    profileRow = readUserCodexProfile(reader, 'codex')
+    profileRow = readUserHookProfile(reader, provider)
   } finally { reader.close() }
   if (!profileRow?.enabled) throw new Error('HOOK_PROFILE_NOT_ENABLED')
-  const inspected = inspectUserCodexInstallation(profile, profileRow.codexHome, process.platform)
+  const inspected = inspectUserHookInstallation(profile, provider, profileRow.configHome ?? profileRow.codexHome, process.platform)
   if (inspected.state !== 'CONFIGURED') throw new Error(inspected.reasonCode)
 
   const cutover = options.cutoverLegacy
-    ? cutoverLegacyProjectCodexHooks({
+    ? cutoverLegacyProjectHooks({
+        provider,
         profile,
         userConfigPath: profileRow.configPath,
         repositoryId,
@@ -318,12 +379,12 @@ export function enrollRepositoryForUserCodex(
   const db = openNativeHookCatalog(profile, false)
   try {
     db.exec('BEGIN IMMEDIATE')
-    const activeProfile = readUserCodexProfile(db, 'codex')
+    const activeProfile = readUserHookProfile(db, provider)
     if (!activeProfile?.enabled) throw new Error('HOOK_PROFILE_NOT_ENABLED')
     const root = availableCatalogRoot(db, repositoryId)
     const commonDirectory = nativeGitIdentity(root).commonDirectory
-    const existing = readNativeEnrollment(db, repositoryId, 'codex')
-    const effectiveTool = options.gitCommitTool ?? existing?.gitCommitTool ?? activeProfile.gitCommitTool
+    const existing = readNativeEnrollment(db, repositoryId, provider)
+    const effectiveTool = provider === 'codex' ? (options.gitCommitTool ?? existing?.gitCommitTool ?? activeProfile.gitCommitTool) : undefined
     const next: NativeHookEnrollment = {
       scope: 'USER',
       catalogRoot: root,
@@ -337,7 +398,7 @@ export function enrollRepositoryForUserCodex(
       ...(effectiveTool ? { gitCommitTool: effectiveTool } : {})
     }
     const serialized = JSON.stringify(next)
-    const key = enrollmentKey(repositoryId, 'codex')
+    const key = enrollmentKey(repositoryId, provider)
     const prevValue = db.prepare('SELECT value FROM repository_catalog_meta WHERE key=?').get(key)?.value
     if (prevValue === serialized) {
       db.exec('COMMIT')
@@ -352,18 +413,39 @@ export function enrollRepositoryForUserCodex(
   } finally { db.close() }
 }
 
-export function disableUserProfileCodex(profileInput: string, authorized: boolean, codexHomeInput?: string) {
+export function enrollRepositoryForUserCodex(
+  profileInput: string,
+  repositoryId: string,
+  options: { authorized: boolean; gitCommitTool?: string; cutoverLegacy?: boolean; worktreePaths?: string[] }
+) {
+  return enrollRepositoryForUserHooks(profileInput, repositoryId, { ...options, provider: 'codex' })
+}
+
+export function enrollRepositoryForUserAntigravity(
+  profileInput: string,
+  repositoryId: string,
+  options: { authorized: boolean; cutoverLegacy?: boolean; worktreePaths?: string[] }
+) {
+  return enrollRepositoryForUserHooks(profileInput, repositoryId, { ...options, provider: 'antigravity' })
+}
+
+export function disableUserProfileHooks(
+  profileInput: string,
+  authorized: boolean,
+  provider: NativeHookProvider = 'codex',
+  configHomeInput?: string
+) {
   if (!authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
   const profile = realpathSync(resolve(profileInput))
   assertUserOwned(join(profile, 'repositories/catalog.db'))
-  const disabled = disableUserCodexHooks(profile, true, codexHomeInput)
+  const disabled = disableUserHookProfile(profile, true, provider, configHomeInput)
   const db = openNativeHookCatalog(profile, false)
   try {
     db.exec('BEGIN IMMEDIATE')
-    const existing = readUserCodexProfile(db, 'codex')
+    const existing = readUserHookProfile(db, provider)
     if (existing) {
       db.prepare('INSERT INTO repository_catalog_meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
-        .run(profileIntegrationKey('codex'), JSON.stringify({ ...existing, enabled: false, updatedAt: new Date().toISOString() }))
+        .run(profileIntegrationKey(provider), JSON.stringify({ ...existing, enabled: false, updatedAt: new Date().toISOString() }))
     }
     db.exec('COMMIT')
   } catch (error) {
@@ -373,44 +455,76 @@ export function disableUserProfileCodex(profileInput: string, authorized: boolea
   return disabled
 }
 
+export function disableUserProfileCodex(profileInput: string, authorized: boolean, codexHomeInput?: string) {
+  return disableUserProfileHooks(profileInput, authorized, 'codex', codexHomeInput)
+}
+
+export function disableUserProfileAntigravity(profileInput: string, authorized: boolean, configHomeInput?: string) {
+  return disableUserProfileHooks(profileInput, authorized, 'antigravity', configHomeInput)
+}
+
+export function reconcileRepositoryUserHooks(
+  profileInput: string,
+  repositoryId: string,
+  autoEnrollPreference: boolean,
+  provider: NativeHookProvider = 'codex'
+): { state: 'ENROLLED' | 'NO_CHANGE' | 'SKIPPED' | 'PROFILE_DISABLED' } {
+  const profile = realpathSync(resolve(profileInput))
+  const db = openNativeHookCatalog(profile, true)
+  let profileRow: UserHookProfile | undefined
+  let existing: NativeHookEnrollment | undefined
+  try {
+    profileRow = readUserHookProfile(db, provider)
+    existing = readNativeEnrollment(db, repositoryId, provider)
+  } finally { db.close() }
+  if (!profileRow?.enabled) return { state: 'PROFILE_DISABLED' }
+  if (!existing && (!autoEnrollPreference || !profileRow.autoEnrollNewProjects)) return { state: 'SKIPPED' }
+  const res = enrollRepositoryForUserHooks(profile, repositoryId, { provider, authorized: true })
+  return { state: res.state === 'DEFERRED' ? 'SKIPPED' : res.state }
+}
+
 export function reconcileRepositoryCodexHooks(
   profileInput: string,
   repositoryId: string,
   autoEnrollPreference: boolean
-): { state: 'ENROLLED' | 'NO_CHANGE' | 'SKIPPED' | 'PROFILE_DISABLED' } {
-  const profile = realpathSync(resolve(profileInput))
-  const db = openNativeHookCatalog(profile, true)
-  let profileRow: UserCodexHookProfile | undefined
-  let existing: NativeHookEnrollment | undefined
-  try {
-    profileRow = readUserCodexProfile(db, 'codex')
-    existing = readNativeEnrollment(db, repositoryId, 'codex')
-  } finally { db.close() }
-  if (!profileRow?.enabled) return { state: 'PROFILE_DISABLED' }
-  if (!existing && (!autoEnrollPreference || !profileRow.autoEnrollNewProjects)) return { state: 'SKIPPED' }
-  const res = enrollRepositoryForUserCodex(profile, repositoryId, { authorized: true })
-  return { state: res.state === 'DEFERRED' ? 'SKIPPED' : res.state }
+) {
+  return reconcileRepositoryUserHooks(profileInput, repositoryId, autoEnrollPreference, 'codex')
 }
 
-export function userCodexProfileStatus(options: {
+export function reconcileRepositoryAntigravityHooks(
+  profileInput: string,
+  repositoryId: string,
+  autoEnrollPreference: boolean
+) {
+  return reconcileRepositoryUserHooks(profileInput, repositoryId, autoEnrollPreference, 'antigravity')
+}
+
+export function userProfileHookStatus(options: {
+  provider?: NativeHookProvider
   profile: string
   codexHome?: string
+  configHome?: string
   repositoryId?: string
   explicitClientPath?: string
 }) {
+  const provider: NativeHookProvider = options.provider ?? 'codex'
   const profile = realpathSync(resolve(options.profile))
-  const installation = inspectUserCodexInstallation(profile, options.codexHome, process.platform)
-  const codexHome = installation.codexHome || resolveCodexHome(options.codexHome)
-  const clients: DiscoveredCodexClient[] = discoverCodexClients({ explicit: options.explicitClientPath })
+  const homeInput = options.configHome ?? options.codexHome
+  const installation = inspectUserHookInstallation(profile, provider, homeInput, process.platform)
+  const configHome = installation.configHome ||
+    (provider === 'antigravity' ? resolveAntigravityConfigHome(homeInput) : resolveCodexHome(homeInput))
+  const clients: DiscoveredCodexClient[] = provider === 'antigravity'
+    ? discoverAntigravityClients({ explicit: options.explicitClientPath })
+    : discoverCodexClients({ explicit: options.explicitClientPath })
   const db = openNativeHookCatalog(profile, true)
-  let profileRecord: UserCodexHookProfile | undefined
+  let profileRecord: UserHookProfile | undefined
   let repositoryEnrollment: NativeHookEnrollment | undefined
   const enrolledRepositoryIds: string[] = []
   try {
-    profileRecord = readUserCodexProfile(db, 'codex')
+    profileRecord = readUserHookProfile(db, provider)
     const activeRows = db.prepare(`SELECT id FROM repository_catalog_records WHERE status='ACTIVE' AND availability='AVAILABLE' AND git_state='GIT'`).all() as Array<{ id: string }>
     for (const row of activeRows) {
-      const grant = readNativeEnrollment(db, row.id, 'codex')
+      const grant = readNativeEnrollment(db, row.id, provider)
       if (grant) enrolledRepositoryIds.push(row.id)
       if (options.repositoryId && row.id === options.repositoryId) repositoryEnrollment = grant
     }
@@ -418,11 +532,12 @@ export function userCodexProfileStatus(options: {
 
   return {
     scope: 'USER' as const,
-    codexHome,
+    codexHome: configHome,
+    configHome,
     configPath: installation.configPath,
     profileEnabled: profileRecord?.enabled === true,
     autoEnrollNewProjects: profileRecord?.autoEnrollNewProjects === true,
-    gitCommitTool: profileRecord?.gitCommitTool,
+    ...(provider === 'codex' ? { gitCommitTool: profileRecord?.gitCommitTool } : {}),
     installation: (() => {
       const { handlers: _handlers, ...rest } = installation
       return rest
@@ -433,8 +548,26 @@ export function userCodexProfileStatus(options: {
       repositoryEnrolled: Boolean(repositoryEnrollment),
       externalPreparation: repositoryEnrollment?.externalPreparation === true
     } : {}),
-    trust: 'NOT_INSPECTED' as const
+    trust: provider === 'antigravity' ? ('CLIENT_TRUST_UNSUPPORTED' as const) : ('NOT_INSPECTED' as const)
   }
+}
+
+export function userCodexProfileStatus(options: {
+  profile: string
+  codexHome?: string
+  repositoryId?: string
+  explicitClientPath?: string
+}) {
+  return userProfileHookStatus({ ...options, provider: 'codex' })
+}
+
+export function userAntigravityProfileStatus(options: {
+  profile: string
+  configHome?: string
+  repositoryId?: string
+  explicitClientPath?: string
+}) {
+  return userProfileHookStatus({ ...options, provider: 'antigravity' })
 }
 
 export function nativeHookRegistry(profile: string, root: string, repositoryId: string, deadline = Infinity) {
@@ -465,37 +598,44 @@ export function nativeHookRegistry(profile: string, root: string, repositoryId: 
   }, { repositoryId, isActive: () => performance.now() < deadline })
 }
 
-export async function prepareExternalNativeHooks(profile: string, repositoryId: string, cwd: string, deadline = Infinity) {
+export async function prepareExternalNativeHooks(
+  profile: string,
+  repositoryId: string,
+  cwd: string,
+  deadline = Infinity,
+  provider: NativeHookProvider = 'codex'
+) {
   const db = openNativeHookCatalog(profile, true)
   let root: string
-  let profileRow: UserCodexHookProfile | undefined
+  let profileRow: UserHookProfile | undefined
   let grant: NativeHookEnrollment | undefined
   try {
     root = availableCatalogRoot(db, repositoryId)
-    profileRow = readUserCodexProfile(db, 'codex')
-    grant = readNativeEnrollment(db, repositoryId, 'codex')
+    profileRow = (provider === 'codex' || provider === 'antigravity') ? readUserHookProfile(db, provider) : undefined
+    grant = readNativeEnrollment(db, repositoryId, provider)
   } finally { db.close() }
   if (performance.now() >= deadline) throw new Error('HOOK_PREPARATION_TIMEOUT')
   if (profileRow?.enabled) {
     if (!grant?.externalPreparation) return { state: 'NOT_ENROLLED' as const }
     const identity = nativeGitIdentity(cwd)
     if (identity.commonDirectory !== grant.commonDirectory) throw new Error('WORKTREE_MISMATCH')
-    const prepared = bootstrapUserCodexWorktreeBinding({
+    const prepared = bootstrapUserWorktreeBinding({
+      provider,
       profile,
       repositoryId,
       root: cwd,
       configPath: profileRow.configPath,
-      gitCommitTool: grant.gitCommitTool ?? profileRow.gitCommitTool,
+      ...(provider === 'codex' ? { gitCommitTool: grant.gitCommitTool ?? profileRow.gitCommitTool } : {}),
       helperDigest: profileRow.helperDigest
     })
     return {
       state: prepared.state,
-      statuses: [{ worktreeId: prepared.binding.worktreeId, installation: 'CONFIGURED' as const, handlers: 7 }],
+      statuses: [{ worktreeId: prepared.binding.worktreeId, installation: 'CONFIGURED' as const, handlers: provider === 'antigravity' ? 6 : 7 }],
       trust: 'NOT_INSPECTED' as const
     }
   }
   const registry = nativeHookRegistry(profile, root, repositoryId, deadline)
-  return enrollNativeHooks({ profile, repositoryId, provider: 'codex', registry, record: cwd }, undefined, 'EXTERNAL_PREPARATION')
+  return enrollNativeHooks({ profile, repositoryId, provider, registry, record: cwd }, undefined, 'EXTERNAL_PREPARATION')
 }
 
 export async function prepareEnrolledNativeHooks(selection: Omit<Selection, 'provider'>, scope: ReconciliationScope) {
@@ -525,15 +665,15 @@ export function enrolledNativeStatus(profile: string, repositoryId: string, prov
   try {
     const root = availableCatalogRoot(db, repositoryId)
     const grant = readNativeEnrollment(db, repositoryId, provider)
-    const profileRow = provider === 'codex' ? readUserCodexProfile(db, 'codex') : undefined
+    const profileRow = (provider === 'codex' || provider === 'antigravity') ? readUserHookProfile(db, provider) : undefined
     const { handlers: _private, ...installation } = inspectNativeInstallation(record.path, { repositoryId, ...record }, process.platform, provider)
     return {
       installation,
       enrolled: grant?.catalogRoot === root && (grant.worktrees[record.worktreeId] === record.generation || Boolean(profileRow?.enabled && grant.externalPreparation)),
-      ...(provider === 'codex' ? {
+      ...((provider === 'codex' || provider === 'antigravity') ? {
         scope: profileRow?.enabled ? 'USER' : 'CHECKOUT',
         externalPreparation: grant?.externalPreparation === true,
-        gitCommitTool: grant?.gitCommitTool
+        ...(provider === 'codex' && grant?.gitCommitTool ? { gitCommitTool: grant.gitCommitTool } : {})
       } : {}),
       discovery: 'NOT_INSPECTED',
       trust: 'NOT_INSPECTED'

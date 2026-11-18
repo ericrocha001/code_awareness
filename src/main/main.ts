@@ -91,10 +91,10 @@ import { EnvironmentRestartSupervisorClient, RuntimeRestartController } from './
 import { AcademyService } from './academy/academy-service'
 import { registerAcademyHandlers } from './ipc/academy-handler'
 import { RepositoryCatalogStore } from './repository-catalog/repository-catalog-store'
-import { prepareEnrolledNativeHooks, reconcileRepositoryCodexHooks } from './session-context/native-hook-enrollment'
+import { prepareEnrolledNativeHooks, reconcileRepositoryAntigravityHooks, reconcileRepositoryCodexHooks } from './session-context/native-hook-enrollment'
 import { GitWorktreeRegistry } from './git-operations/git-worktree-registry'
 import { RepositoryCatalogService } from './repository-catalog/repository-catalog-service'
-import { registerCodexHooksHandlers } from './ipc/codex-hooks-handler'
+import { registerAntigravityHooksHandlers, registerCodexHooksHandlers } from './ipc/codex-hooks-handler'
 import { RepositoryRuntimeService } from './repository-catalog/repository-runtime-service'
 import { GitHubCredentialStore } from './github/github-credential-store'
 import { GitHubAuthService } from './github/github-auth-service'
@@ -368,7 +368,9 @@ app.whenReady().then(async () => {
   repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService, async record => {
     if (isRuntimePreview() || record.status !== 'ACTIVE' || record.localCheckout?.availability !== 'AVAILABLE' || record.localCheckout.gitState !== 'GIT') return
     try {
-      reconcileRepositoryCodexHooks(app.getPath('userData'), record.id, settingsService.loadSettings().codexCapture?.autoEnrollNewProjects === true)
+      const currentSettings = settingsService.loadSettings()
+      reconcileRepositoryCodexHooks(app.getPath('userData'), record.id, currentSettings.codexCapture?.autoEnrollNewProjects === true)
+      reconcileRepositoryAntigravityHooks(app.getPath('userData'), record.id, currentSettings.antigravityCapture?.autoEnrollNewProjects === true)
       const root = realpathSync(record.localCheckout.path)
       const registry = new GitWorktreeRegistry(root, gitService, { repositoryId: record.id, isActive: () => {
         const current = repositoryCatalogStore.get(record.id)
@@ -842,6 +844,13 @@ app.whenReady().then(async () => {
   const trustedRendererUrl = process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href
   registerLocalMcpClientHandlers(createDesktopClientSetup(app, process.resourcesPath), trustedRendererUrl)
   registerCodexHooksHandlers({
+    profile: app.getPath('userData'),
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    packaged: app.isPackaged,
+    settingsService
+  }, trustedRendererUrl)
+  registerAntigravityHooksHandlers({
     profile: app.getPath('userData'),
     appPath: app.getAppPath(),
     resourcesPath: process.resourcesPath,

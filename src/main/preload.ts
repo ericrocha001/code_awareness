@@ -32,7 +32,7 @@ import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '..
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { LocalMcpClientApi } from '../shared/types/local-mcp-client-types'
-import type { CodexUserHooksApi } from '../shared/types/codex-hooks-types'
+import type { AntigravityUserHooksApi, CodexUserHooksApi } from '../shared/types/codex-hooks-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
 import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem, AcademyGeminiExportMode, AcademyGeminiExportReceipt, AcademyGeminiExportState, AcademyImportConfirmationMode, AcademyImportConfirmationPreference } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
@@ -58,6 +58,13 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     enrollRepository: (repositoryId, options) => ipcRenderer.invoke('codex-hooks:enroll-repository', repositoryId, options),
     revokeRepository: repositoryId => ipcRenderer.invoke('codex-hooks:revoke-repository', repositoryId)
   } satisfies CodexUserHooksApi,
+  antigravityUserHooks: {
+    status: (repositoryId?: string) => ipcRenderer.invoke('antigravity-hooks:status', repositoryId),
+    install: input => ipcRenderer.invoke('antigravity-hooks:install', input),
+    disable: (configHome?: string) => ipcRenderer.invoke('antigravity-hooks:disable', configHome),
+    enrollRepository: (repositoryId, options) => ipcRenderer.invoke('antigravity-hooks:enroll-repository', repositoryId, options),
+    revokeRepository: repositoryId => ipcRenderer.invoke('antigravity-hooks:revoke-repository', repositoryId)
+  } satisfies AntigravityUserHooksApi,
   getBranchOrchestration: (request: BranchManagerRequest): Promise<BranchManagerResult> => ipcRenderer.invoke('work-orchestration:branches', request),
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
   getWorkBoard: (request: WorkBoardRequest): Promise<WorkBoardResult> => ipcRenderer.invoke('work-orchestration:board', request),

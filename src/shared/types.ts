@@ -28,10 +28,15 @@ export interface CodexCaptureSettings {
   gitCommitTool?: string
 }
 
+export interface AntigravityCaptureSettings {
+  autoEnrollNewProjects?: boolean
+}
+
 export interface AppSettings {
   gitManagement?: { automaticFetch?: boolean }
   downloads?: DownloadsSettings
   codexCapture?: CodexCaptureSettings
+  antigravityCapture?: AntigravityCaptureSettings
   lastActiveRepositoryId?: string
   hiddenNavigationItems?: string[]
   ngrokDomain?: string

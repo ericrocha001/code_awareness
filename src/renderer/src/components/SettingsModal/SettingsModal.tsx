@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Settings, X } from 'lucide-react'
 import { NAV_ITEMS, type NavId } from '../../config/navigation'
-import type { CodexUserHooksStatus } from '../../../../shared/types/codex-hooks-types'
+import type { AntigravityUserHooksStatus, CodexUserHooksStatus } from '../../../../shared/types/codex-hooks-types'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
@@ -30,6 +30,12 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
   const [codexSaving, setCodexSaving] = useState(false)
   const [codexError, setCodexError] = useState('')
   const [codexNotice, setCodexNotice] = useState('')
+  const [autoEnrollAntigravity, setAutoEnrollAntigravity] = useState<boolean | null>(null)
+  const [cutoverAntigravityLegacy, setCutoverAntigravityLegacy] = useState(true)
+  const [antigravityStatus, setAntigravityStatus] = useState<AntigravityUserHooksStatus | null>(null)
+  const [antigravitySaving, setAntigravitySaving] = useState(false)
+  const [antigravityError, setAntigravityError] = useState('')
+  const [antigravityNotice, setAntigravityNotice] = useState('')
   useEffect(() => {
     let current = true
     window.codeAwareness.loadSettings().then(settings => {
@@ -37,6 +43,7 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       setAutomaticFetch(settings.gitManagement?.automaticFetch !== false)
       setImportConfirmationMode(settings.downloads?.importConfirmationMode === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL')
       setAutoEnrollCodex(settings.codexCapture?.autoEnrollNewProjects === true)
+      setAutoEnrollAntigravity(settings.antigravityCapture?.autoEnrollNewProjects === true)
     })
       .catch(() => { if (current) setGitError('Não foi possível ler a configuração Git.') })
     window.codeAwareness.codexUserHooks?.status().then(status => {
@@ -44,6 +51,12 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       setCodexStatus(status)
     }).catch(() => {
       if (current) setCodexError('Não foi possível ler o estado dos hooks do Codex no perfil.')
+    })
+    window.codeAwareness.antigravityUserHooks?.status().then(status => {
+      if (!current) return
+      setAntigravityStatus(status)
+    }).catch(() => {
+      if (current) setAntigravityError('Não foi possível ler o estado dos hooks do Antigravity no perfil.')
     })
     return () => { current = false }
   }, [])
@@ -103,6 +116,45 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       setCodexError(err instanceof Error ? `Falha ao atualizar hooks do Codex: ${err.message}` : 'Não foi possível atualizar hooks do Codex.')
     } finally {
       setCodexSaving(false)
+    }
+  }
+  const changeAutoEnrollAntigravity = async (enabled: boolean) => {
+    setAntigravitySaving(true); setAntigravityError(''); setAntigravityNotice('')
+    try {
+      await updateSettings(settings => ({ ...settings, antigravityCapture: { ...settings.antigravityCapture, autoEnrollNewProjects: enabled } }))
+      setAutoEnrollAntigravity(enabled)
+      if (antigravityStatus?.profileEnabled && window.codeAwareness.antigravityUserHooks) {
+        const res = await window.codeAwareness.antigravityUserHooks.install({ configHome: antigravityStatus.configHome, autoEnrollNewProjects: enabled })
+        setAntigravityStatus(res.status)
+      }
+    } catch { setAntigravityError('Não foi possível salvar a preferência de inscrição automática do Antigravity.') }
+    finally { setAntigravitySaving(false) }
+  }
+  const toggleProfileAntigravityHooks = async () => {
+    if (!window.codeAwareness.antigravityUserHooks) return
+    setAntigravitySaving(true); setAntigravityError(''); setAntigravityNotice('')
+    try {
+      const configured = antigravityStatus?.profileEnabled && antigravityStatus.installation.state === 'CONFIGURED'
+      if (configured) {
+        const res = await window.codeAwareness.antigravityUserHooks.disable(antigravityStatus?.configHome)
+        setAntigravityStatus(res.status)
+        setAntigravityNotice('Hooks do Antigravity desativados no perfil do usuário.')
+      } else {
+        const preferredClient = antigravityStatus?.clients.find(client => client.qualified)?.path
+        const res = await window.codeAwareness.antigravityUserHooks.install({
+          configHome: antigravityStatus?.configHome,
+          clientPath: preferredClient,
+          autoEnrollNewProjects: autoEnrollAntigravity === true,
+          enrollActiveRepositories: true,
+          cutoverLegacy: cutoverAntigravityLegacy
+        })
+        setAntigravityStatus(res.status)
+        setAntigravityNotice('Hooks do Antigravity instalados em ~/.gemini/config/hooks.json (confiança do cliente não suportada nativamente).')
+      }
+    } catch (err) {
+      setAntigravityError(err instanceof Error ? `Falha ao atualizar hooks do Antigravity: ${err.message}` : 'Não foi possível atualizar hooks do Antigravity.')
+    } finally {
+      setAntigravitySaving(false)
     }
   }
   useEffect(() => {
@@ -192,6 +244,41 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       )}
       {codexNotice && <p role="status">{codexNotice}</p>}
       {codexError && <p role="alert">{codexError}</p>}
+    </div>
+    <div className="settings-intro">
+      <h3>Captura Antigravity (Perfil do usuário)</h3>
+      <p>Instala o grupo code-awareness-session-context em ~/.gemini/config/hooks.json. A revisão de confiança do cliente permanece não suportada (CLIENT_TRUST_UNSUPPORTED).</p>
+    </div>
+    <div className="settings-list">
+      <div className="settings-row">
+        <span className="settings-row-label">Inscrever novos repositórios automaticamente no Antigravity</span>
+        <ToggleSwitch aria-label="Inscrever novos repositórios automaticamente no Antigravity" checked={autoEnrollAntigravity === true} disabled={autoEnrollAntigravity === null || antigravitySaving} onChange={value => void changeAutoEnrollAntigravity(value)} />
+      </div>
+      {antigravityStatus && (
+        <div className="settings-codex">
+          <p>
+            Estado: <strong>{antigravityStatus.installation.state}</strong> ({antigravityStatus.installation.installed}/{antigravityStatus.installation.expected ?? antigravityStatus.installation.total ?? 6}) · {antigravityStatus.configPath}
+          </p>
+          <p>
+            Repositórios inscritos: {antigravityStatus.enrolledRepositoryIds.length} · Clientes Antigravity qualificados: {antigravityStatus.clients.filter(client => client.qualified).length} · Confiança: {antigravityStatus.trust}
+          </p>
+          {!(antigravityStatus.profileEnabled && antigravityStatus.installation.state === 'CONFIGURED') && (
+            <label>
+              <input type="checkbox" checked={cutoverAntigravityLegacy} onChange={event => setCutoverAntigravityLegacy(event.target.checked)} disabled={antigravitySaving} />
+              {' '}Limpar hooks antigos do Antigravity por repositório (.agents/hooks.json)
+            </label>
+          )}
+          <button type="button" onClick={() => void toggleProfileAntigravityHooks()} disabled={antigravitySaving}>
+            {antigravityStatus.profileEnabled && antigravityStatus.installation.state === 'CONFIGURED'
+              ? 'Desativar hooks Antigravity no perfil'
+              : antigravityStatus.installation.state === 'NOT_INSTALLED' || antigravityStatus.installation.state === 'MISSING'
+                ? 'Ativar Antigravity no perfil do usuário'
+                : 'Reparar hooks Antigravity no perfil'}
+          </button>
+        </div>
+      )}
+      {antigravityNotice && <p role="status">{antigravityNotice}</p>}
+      {antigravityError && <p role="alert">{antigravityError}</p>}
     </div>
     </div>
     <footer className="settings-footer">
