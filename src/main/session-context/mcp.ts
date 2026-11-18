@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { z } from 'zod'
 import type { McpToolDefinition, McpToolResult } from '../mcp/mcp-types'
 import type { SessionStore } from './store'
@@ -477,28 +477,33 @@ export async function executeSessionTool(
       const request = q as ReturnType<typeof parseCaptureHealth>
       if (request.worktreeId && (request.worktreeId !== selectedTarget.worktreeId || request.generation !== selectedTarget.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
       const sessionStore = store as SessionStore
+      const nativeProfile = [resolve(sessionStore.path, '../../..'), resolve(sessionStore.path, '../../../..')].find(dir => existsSync(join(dir, 'repositories', 'catalog.db')))
       async function codexTrust() {
         const requested = request.inspectNativeTrust
         if (requested && nativeTrustSnapshot) return nativeTrustSnapshot.repositoryId === store.repositoryId &&
           nativeTrustSnapshot.worktreeId === selectedTarget!.worktreeId && nativeTrustSnapshot.generation === selectedTarget!.generation
           ? nativeTrustSnapshot.observation : unknownNativeTrust('SESSION_SCOPE_CHANGED')
-        return inspectNativeTrust(root!, { repositoryId: store.repositoryId, ...selectedTarget! }, requested, nativeClient, assertActive)
+        return inspectNativeTrust(root!, { repositoryId: store.repositoryId, ...selectedTarget! }, requested, nativeClient, assertActive, nativeProfile)
       }
       if (request.source === 'native') {
         const agent = nativeCaptureAgent(request)
         const trust = agent === 'codex' ? await codexTrust() :
           { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' as const }
-        data = inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust)
+        data = inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust, nativeProfile)
       } else {
         if (!provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
         data = await inspectCaptureHealth(sessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, request, assertActive)
         const observation = data as CaptureHealthObservation
         await reconcileRegistry(sessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
         if (!request.source) {
-          const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) || existsSync(join(root, '.agents/hooks.json'))
+          const agReadiness = nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity', nativeProfile ? { profile: nativeProfile } : undefined)
+          const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) ||
+            existsSync(join(root, '.agents/hooks.json')) ||
+            agReadiness.bootstrap?.state === 'AVAILABLE' ||
+            agReadiness.installation.state !== 'MISSING'
           data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: sessionStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true,
-            ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex'),
-            ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity') } } } : {}) } }
+            ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex', nativeProfile ? { profile: nativeProfile } : undefined),
+            ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: agReadiness } } } : {}) } }
         }
       }
     } else if (name === 'inspect_code_provenance') {

@@ -73,7 +73,10 @@ export class RepositoryCatalogService {
     const discovered = await this.discovery.discoverRootFolder(rootPath)
     for (const info of discovered) {
       const result = this.upsert(info, undefined, false)
-      if (result.created && result.record.status === 'ACTIVE') await this.registerDestination(result.record)
+      if (result.created && result.record.status === 'ACTIVE') {
+        await this.registerDestination(result.record)
+        await this.reconcileNativeHooks?.(result.record)
+      }
     }
     return this.list()
   }

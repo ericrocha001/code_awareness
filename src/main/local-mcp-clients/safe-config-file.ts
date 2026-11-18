@@ -4,15 +4,38 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { promises as fs, type Stats } from 'node:fs'
 
-export function assertUserOwned(path: string): void {
-  let existing = path
-  while (!existsSync(existing)) existing = dirname(existing)
+function existingAncestor(path: string): string {
+  while (!existsSync(path)) path = dirname(path)
+  return path
+}
+
+function assertOwnership(paths: string[], timeout: number): void {
   if (process.platform === 'win32') {
-    const literal = existing.split("'").join("''")
-    const command = `$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=if ([System.IO.Directory]::Exists('${literal}')) {[System.IO.Directory]::GetAccessControl('${literal}')} else {[System.IO.File]::GetAccessControl('${literal}')}; $owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; if ($me -ne $owner) {exit 1}`
-    try { execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: 'pipe', windowsHide: true, timeout: 5000 }) }
+    const literals = paths.map(path => "'" + path.replaceAll("'", "''") + "'").join(',')
+    const command = `$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; foreach ($p in @(${literals})) { $acl=if ([System.IO.Directory]::Exists($p)) {[System.IO.Directory]::GetAccessControl($p)} else {[System.IO.File]::GetAccessControl($p)}; if ($me -ne $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) {exit 1} }`
+    try { execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: 'pipe', windowsHide: true, timeout }) }
     catch { throw new Error('PROFILE_OWNERSHIP_UNVERIFIED') }
-  } else if (lstatSync(existing).uid !== process.getuid?.()) throw new Error('PROFILE_OWNERSHIP_UNVERIFIED')
+  } else if (paths.some(path => lstatSync(path).uid !== process.getuid?.())) throw new Error('PROFILE_OWNERSHIP_UNVERIFIED')
+}
+
+export function assertUserOwned(path: string): void {
+  assertOwnership([existingAncestor(path)], 5000)
+}
+
+export function verifyConfigWriteOwnership(paths: readonly string[], timeout: number): (path: string) => void {
+  const ancestors = new Map(paths.map(path => [path, existingAncestor(path)]))
+  const identity = (path: string) => {
+    const stat = lstatSync(path, { bigint: true })
+    return [stat.dev, stat.ino, stat.birthtimeNs].join(':')
+  }
+  const observed = new Map([...new Set(ancestors.values())].map(path => [path, identity(path)]))
+  assertOwnership([...observed.keys()], timeout)
+  const checked = new Set<string>()
+  return path => {
+    const ancestor = ancestors.get(path)
+    if (!ancestor || checked.has(path) || identity(ancestor) !== observed.get(ancestor)) throw new Error('PROFILE_OWNERSHIP_UNVERIFIED')
+    checked.add(path)
+  }
 }
 
 export interface FileRevision { content: string | null; hash: string; identity: string }
@@ -42,9 +65,9 @@ export function assertRevision(path: string, expected: FileRevision) {
   if (actual.hash !== expected.hash || actual.identity !== expected.identity) throw new Error('CONFIG_REVISION_CONFLICT')
 }
 
-export function removeConfig(path: string, profile: string, expected: FileRevision): void {
+export function removeConfig(path: string, profile: string, expected: FileRevision, verifyOwner = assertUserOwned): void {
   assertProfilePath(path, profile)
-  assertUserOwned(path)
+  verifyOwner(path)
   assertRevision(path, expected)
   if (expected.content === null) return
   const backup = `${path}.${randomUUID()}.rollback`
@@ -56,9 +79,9 @@ export function removeConfig(path: string, profile: string, expected: FileRevisi
   }
 }
 
-export function writeConfig(path: string, profile: string, expected: FileRevision, content: string, beforePublish?: () => void, afterMove?: () => void): void {
+export function writeConfig(path: string, profile: string, expected: FileRevision, content: string, beforePublish?: () => void, afterMove?: () => void, verifyOwner = assertUserOwned): void {
   assertProfilePath(path, profile)
-  assertUserOwned(path)
+  verifyOwner(path)
   assertRevision(path, expected)
   if (expected.content === content) return
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })

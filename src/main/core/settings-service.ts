@@ -98,6 +98,23 @@ export class SettingsService {
         importConfirmationMode: rawDownloads?.importConfirmationMode === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL'
       }
 
+      if (rest.codexCapture && typeof rest.codexCapture === 'object' && !Array.isArray(rest.codexCapture)) {
+        const rawCodex = rest.codexCapture as { autoEnrollNewProjects?: unknown; gitCommitTool?: unknown }
+        merged.codexCapture = {
+          autoEnrollNewProjects: rawCodex.autoEnrollNewProjects === true,
+          ...(typeof rawCodex.gitCommitTool === 'string' && /^mcp__[a-zA-Z0-9_-]+__commit_git_changes$/.test(rawCodex.gitCommitTool)
+            ? { gitCommitTool: rawCodex.gitCommitTool }
+            : {})
+        }
+      }
+
+      if (rest.antigravityCapture && typeof rest.antigravityCapture === 'object' && !Array.isArray(rest.antigravityCapture)) {
+        const rawAg = rest.antigravityCapture as { autoEnrollNewProjects?: unknown }
+        merged.antigravityCapture = {
+          autoEnrollNewProjects: rawAg.autoEnrollNewProjects === true
+        }
+      }
+
       // CompressionSettings: ausente/corrompido → default; presente → normaliza o perfil defensivamente
       if (rest.compressionSettings && typeof rest.compressionSettings === 'object') {
         const raw = rest.compressionSettings as { profile?: unknown; outputFormat?: unknown; enrichment?: unknown }

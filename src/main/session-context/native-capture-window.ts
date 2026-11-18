@@ -2,14 +2,19 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, lstatSync, openSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import type { CheckpointRegistry, RegistryEntity } from './checkpoint-registry'
-import { boundedFile, nativeDigest, nativeSessionEntityId, parseNativeEnvelope, readNativeBinding, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { boundedFile, nativeDigest, nativeSessionEntityId, parseNativeEnvelope, readNativeBinding, sameNativePath, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { readNativeGapHistory } from './native-hook-diagnostics'
 
 export function nativeCaptureConfiguration(binding: NativeHookBinding): string | undefined {
   try {
     const provider = binding.provider ?? 'codex'
     const bindingPath = join(binding.root, provider === 'antigravity' ? '.code-awareness/native-hooks/antigravity/binding.json' : '.code-awareness/native-hooks/binding.json')
-    const configPath = join(binding.root, provider === 'antigravity' ? '.agents/hooks.json' : '.codex/hooks.json')
+    const configPath = binding.scope === 'USER' && binding.configPath
+      ? binding.configPath
+      : join(binding.root, provider === 'antigravity' ? '.agents/hooks.json' : '.codex/hooks.json')
+    if (binding.scope === 'USER' && binding.configPath && (lstatSync(configPath).isSymbolicLink() || !sameNativePath(realpathSync(configPath), resolve(configPath)))) {
+      return undefined
+    }
     const revision = (path: string) => {
       const stat = lstatSync(path, { bigint: true })
       return [stat.dev, stat.ino, stat.birthtimeNs, stat.mtimeNs, stat.ctimeNs].map(String).join(':')

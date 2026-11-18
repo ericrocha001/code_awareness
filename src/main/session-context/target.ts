@@ -35,7 +35,7 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     const inspect = async () => {
       assertActive()
       const record = await registry.revalidateSelection(selection.worktreeId)
-      if (record.generation !== selection.generation || record.detached || !record.branch || !record.head || record.missing || record.prunable) throw new Error('WORKTREE_STALE')
+      if (record.generation !== selection.generation || !record.head || record.missing || record.prunable || (!record.detached && !record.branch)) throw new Error('WORKTREE_STALE')
       assertActive()
       return realpathSync(record.path)
     }
@@ -50,7 +50,7 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     const { worktrees } = await registry.discover({ reuseValidatedDirectories: true })
     const targets: LiveSessionTarget[] = []
     for (const record of worktrees) {
-      if (record.missing || record.prunable || record.detached || !record.branch || !record.head) continue
+      if (record.missing || record.prunable || !record.head || (!record.detached && !record.branch)) continue
       const selection = { worktreeId: record.worktreeId, generation: record.generation }
       const root = realpathSync(record.path)
       targets.push({ ...selection, root, fingerprint: sourceFingerprint(root) })
