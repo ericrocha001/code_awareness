@@ -79,6 +79,29 @@ function codexHooks(root: string, common: string): { path: string; state: Captur
   }
   return { path: join(root, '.codex/hooks.json'), state: 'HOOK_MISSING' }
 }
+type GitHookHandler = 'prepare-commit-msg' | 'post-commit'
+function isStaticEntireExecutablePath(candidate: string): boolean {
+  if (!candidate || candidate.length > 512 || /[\0-\x1f"$`;&|<>?*']/.test(candidate)) return false
+  const windowsDrive = /^[A-Za-z]:[\\/]/.test(candidate)
+  const posixRoot = candidate.startsWith('/') && !candidate.startsWith('//')
+  if (!windowsDrive && !posixRoot) return false
+  const rest = windowsDrive ? candidate.slice(3) : candidate.slice(1)
+  if (!rest || /[\\/]$/.test(rest)) return false
+  const segments = rest.split(/[\\/]/)
+  if (segments.some(segment => !segment || segment === '.' || segment === '..' || /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?$/i.test(segment))) return false
+  return /^entire(?:\.exe)?$/i.test(segments[segments.length - 1])
+}
+function isEntireGitHookLine(line: string, handler: GitHookHandler): boolean {
+  const simple = line.match(/^\s*(?:exec\s+)?entire(?:\.exe)?\s+hooks\s+git\s+(prepare-commit-msg|post-commit)((?:\s+"\$1"\s+"\$2"(?:\s+"\$3")?|\s+"\$@")?)(?:\s+2>\/dev\/null\s+\|\|\s+true)?\s*$/)
+  if (simple) return simple[1] === handler && (handler === 'prepare-commit-msg' || simple[2] === '' || simple[2] === ' "$@"')
+  const conditional = line.match(/^\s*if\s+\[\s+-f\s+'([^'\r\n]+)'\s+\];\s+then\s+'([^'\r\n]+)'\s+hooks\s+git\s+(prepare-commit-msg|post-commit)((?:\s+"\$1"\s+"\$2"(?:\s+"\$3")?|\s+"\$@")?)\s+2>\/dev\/null\s+\|\|\s+true;\s+else\s+:;\s+fi\s*$/)
+  if (!conditional || conditional[3] !== handler || conditional[1] !== conditional[2]) return false
+  if (handler === 'prepare-commit-msg' ? !conditional[4] : conditional[4] !== '' && conditional[4] !== ' "$@"') return false
+  return isStaticEntireExecutablePath(conditional[1])
+}
+export function hasEntireGitHook(text: string, handler: GitHookHandler): boolean {
+  return text.split(/\r?\n/).some(line => !/^\s*#/.test(line) && isEntireGitHookLine(line, handler))
+}
 export async function inspectCaptureHealth(store: SessionStore, provider: Pick<EntireProvider, 'inspectCapture'>, runner: CommandRunner, root: string, target: SessionTargetSelection, query: Query, assertActive: () => void): Promise<object> {
   assertActive()
   const dirs = gitDirectories(root), codex = codexHooks(root, dirs.common)
@@ -120,9 +143,8 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
   for (let index = 0; index < cached.hooks.length; index++) {
     try {
       const text = smallText(cached.hooks[index])
-      const invocation = text.split(/\r?\n/).filter(line => !/^\s*#/.test(line)).join('\n')
       const handler = index === 0 ? 'prepare-commit-msg' : 'post-commit'
-      if (!invocation.split('\n').some(line => /^\s*(?:exec\s+)?entire(?:\.exe)?\s+hooks\s+git\s+/.test(line) && line.includes(handler))) hooks.git = 'HOOK_INCOMPATIBLE'
+      if (!hasEntireGitHook(text, handler)) hooks.git = 'HOOK_INCOMPATIBLE'
     } catch (error) { hooks.git = (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'HOOK_MISSING' : 'HOOK_INCOMPATIBLE' }
   }
   const capture = await provider.inspectCapture()
