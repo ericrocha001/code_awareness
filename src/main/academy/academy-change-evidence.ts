@@ -1,13 +1,39 @@
+import { isAbsolute, posix } from 'node:path'
 import { diffLines } from 'diff'
 import { parseDocument } from 'yaml'
 import type { AcademyPackage } from '../../shared/types/academy-types'
 import { AcademyError, normalizeAcademyPackage } from './academy-package'
 
 export interface EvidenceWindow {
+  path?: string
   offset?: number
   limit?: number
   textOffset?: number
   textLimit?: number
+}
+
+const isHighSurrogate = (code: number) => code >= 0xD800 && code <= 0xDBFF
+const isLowSurrogate = (code: number) => code >= 0xDC00 && code <= 0xDFFF
+
+function assertCanonicalDiffPath(path: unknown): string {
+  if (
+    typeof path !== 'string' ||
+    !path ||
+    (path !== 'SKILL.md' && (
+      path.includes('\\') ||
+      path.includes('\0') ||
+      isAbsolute(path) ||
+      path.startsWith('/') ||
+      path === '.' ||
+      path === '..' ||
+      path.startsWith('../') ||
+      path.endsWith('/') ||
+      posix.normalize(path) !== path
+    ))
+  ) {
+    throw new AcademyError('INVALID_ARGUMENT')
+  }
+  return path
 }
 
 export function windowNumber(value: number | undefined, fallback: number, max: number): number {
@@ -20,7 +46,14 @@ export function excerpt(text: string, window: EvidenceWindow = {}) {
   const offset = windowNumber(window.textOffset, 0, Number.MAX_SAFE_INTEGER)
   const limit = windowNumber(window.textLimit, 400, 4000)
   if (!limit) throw new AcademyError('INVALID_ARGUMENT')
-  return { text: text.slice(offset, offset + limit), offset, totalCharacters: text.length, nextOffset: offset + limit < text.length ? offset + limit : null }
+  if (offset > 0 && offset < text.length && isHighSurrogate(text.charCodeAt(offset - 1)) && isLowSurrogate(text.charCodeAt(offset))) {
+    throw new AcademyError('INVALID_ARGUMENT')
+  }
+  let end = Math.min(offset + limit, text.length)
+  if (end < text.length && end > offset && isHighSurrogate(text.charCodeAt(end - 1)) && isLowSurrogate(text.charCodeAt(end))) {
+    end = end - 1 > offset ? end - 1 : end + 1
+  }
+  return { text: text.slice(offset, end), offset, totalCharacters: text.length, nextOffset: end < text.length ? end : null }
 }
 
 export function page<T>(values: T[], window: EvidenceWindow = {}) {
@@ -41,12 +74,24 @@ function frontmatter(text: string): Record<string, unknown> | null {
   } catch { return null }
 }
 
-export function compareAcademyPackages(beforeInput: AcademyPackage, afterInput: AcademyPackage, window: EvidenceWindow = {}) {
-  const before = normalizeAcademyPackage(beforeInput), after = normalizeAcademyPackage(afterInput)
-  const oldFiles = new Map(Object.entries({ ...before.artifacts, 'SKILL.md': before.skillMd }))
+export function compareAcademyPackages(beforeInput: AcademyPackage | null, afterInput: AcademyPackage, window: EvidenceWindow = {}) {
+  const changeLimit = windowNumber(window.limit, 10, 50)
+  const textLimit = windowNumber(window.textLimit, 400, 4000)
+  if (!changeLimit || !textLimit) throw new AcademyError('INVALID_ARGUMENT')
+  windowNumber(window.offset, 0, Number.MAX_SAFE_INTEGER)
+  windowNumber(window.textOffset, 0, Number.MAX_SAFE_INTEGER)
+
+  const selectedPath = window.path === undefined ? undefined : assertCanonicalDiffPath(window.path)
+  const before = beforeInput === null ? null : normalizeAcademyPackage(beforeInput)
+  const after = normalizeAcademyPackage(afterInput)
+  const oldFiles = before === null ? new Map<string, string>() : new Map(Object.entries({ ...before.artifacts, 'SKILL.md': before.skillMd }))
   const newFiles = new Map(Object.entries({ ...after.artifacts, 'SKILL.md': after.skillMd }))
-  const changes: Array<{ path: string; kind: 'ADDED' | 'REMOVED' | 'MODIFIED'; literalEffect: 'WHITESPACE_ONLY' | 'UNKNOWN'; side: 'BEFORE' | 'AFTER'; line: number; lineCount: number; content: ReturnType<typeof excerpt> }> = []
-  for (const path of [...new Set([...oldFiles.keys(), ...newFiles.keys()])].sort()) {
+  if (selectedPath !== undefined && !oldFiles.has(selectedPath) && !newFiles.has(selectedPath)) {
+    throw new AcademyError('PATH_NOT_FOUND', `Path not found in compared versions: ${selectedPath}`, { path: selectedPath })
+  }
+  const targetPaths = selectedPath !== undefined ? [selectedPath] : [...new Set([...oldFiles.keys(), ...newFiles.keys()])].sort()
+  const rawChanges: Array<{ path: string; kind: 'ADDED' | 'REMOVED' | 'MODIFIED'; literalEffect: 'WHITESPACE_ONLY' | 'UNKNOWN'; side: 'BEFORE' | 'AFTER'; line: number; lineCount: number; rawText: string }> = []
+  for (const path of targetPaths) {
     const oldText = oldFiles.get(path), newText = newFiles.get(path)
     if (oldText === newText) continue
     const kind = oldText === undefined ? 'ADDED' : newText === undefined ? 'REMOVED' : 'MODIFIED'
@@ -54,15 +99,32 @@ export function compareAcademyPackages(beforeInput: AcademyPackage, afterInput: 
     let oldLine = 1, newLine = 1
     for (const part of diffLines(oldText ?? '', newText ?? '')) {
       const count = part.count ?? 0
-      if (part.added || part.removed) changes.push({ path, kind, literalEffect, side: part.removed ? 'BEFORE' : 'AFTER', line: part.removed ? oldLine : newLine, lineCount: count, content: excerpt(part.value, window) })
+      if (part.added || part.removed) rawChanges.push({ path, kind, literalEffect, side: part.removed ? 'BEFORE' : 'AFTER', line: part.removed ? oldLine : newLine, lineCount: count, rawText: part.value })
       if (!part.added) oldLine += count
       if (!part.removed) newLine += count
     }
     if (oldText === '' || newText === '') {
-      if ((oldText === undefined && newText === '') || (newText === undefined && oldText === '')) changes.push({ path, kind, literalEffect, side: kind === 'REMOVED' ? 'BEFORE' : 'AFTER', line: 1, lineCount: 0, content: excerpt('', window) })
+      if ((oldText === undefined && newText === '') || (newText === undefined && oldText === '')) rawChanges.push({ path, kind, literalEffect, side: kind === 'REMOVED' ? 'BEFORE' : 'AFTER', line: 1, lineCount: 0, rawText: '' })
     }
   }
-  const oldMeta = frontmatter(before.skillMd), newMeta = frontmatter(after.skillMd)
-  const keys = oldMeta && newMeta ? [...new Set([...Object.keys(oldMeta), ...Object.keys(newMeta)])].sort().filter(key => JSON.stringify(oldMeta[key]) !== JSON.stringify(newMeta[key])) : []
-  return { changes: page(changes, window), frontmatter: { resolved: !!oldMeta && !!newMeta, changedProperties: page(keys, window) }, semanticEffect: 'NOT_ASSESSED' as const }
+  const pagedChanges = page(rawChanges, window)
+  const changes = {
+    ...pagedChanges,
+    items: pagedChanges.items.map(({ rawText, ...entry }) => ({ ...entry, content: excerpt(rawText, window) }))
+  }
+  const includeFrontmatter = selectedPath === undefined || selectedPath === 'SKILL.md'
+  let resolved = false
+  let keys: string[] = []
+  if (includeFrontmatter) {
+    const newMeta = frontmatter(after.skillMd)
+    if (before === null) {
+      resolved = !!newMeta
+      keys = newMeta ? Object.keys(newMeta).sort() : []
+    } else {
+      const oldMeta = frontmatter(before.skillMd)
+      resolved = !!oldMeta && !!newMeta
+      keys = oldMeta && newMeta ? [...new Set([...Object.keys(oldMeta), ...Object.keys(newMeta)])].sort().filter(key => JSON.stringify(oldMeta[key]) !== JSON.stringify(newMeta[key])) : []
+    }
+  }
+  return { changes, frontmatter: { resolved, changedProperties: page(keys, window) }, semanticEffect: 'NOT_ASSESSED' as const }
 }

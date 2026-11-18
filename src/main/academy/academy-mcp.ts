@@ -31,6 +31,34 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('list_academy_skills', 'List ACTIVE and DISABLED canonical skills by default, including stateRevision for activation CAS. Discovery does not mean installation. ARCHIVED is a legacy input alias for DISABLED.', { type: 'object', properties: { status: { type: 'string', enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'] } }, additionalProperties: false }),
   tool('set_academy_skill_enabled', 'Set activation with independent stateRevision CAS. Returns persisted status and stateRevision; local reconciliation is scheduled separately. Does not publish an installed plugin.', { type: 'object', properties: { skillId: id, enabled: { type: 'boolean' }, expectedStateRevision: version }, required: ['skillId', 'enabled', 'expectedStateRevision'], additionalProperties: false }),
   tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
+  tool('list_academy_changes', 'Discover immutable Academy skill version events globally in descending persistence order (createdAt DESC, skillId ASC, version DESC) without reading packages. Intersecting filters narrow results: skillId, query (case-insensitive literal substring on current skillName, not body), after/before (inclusive ISO 8601 UTC-normalized persistence timestamps), origin, limit (default 20, max 50), and cursor. skillName reflects the current canonical skill name; previousVersion is the actual persisted predecessor of that skill regardless of date filters. contentState/previousContentState distinguish tombstone deletion and reintroduction. Cursor binds filters, order and limit; visibility matches Academy catalog permissions and does not guarantee an immutable snapshot across pages. Inspect deltas with get_academy_change_diff or read a full package with get_academy_skill_history.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      query: { type: 'string', minLength: 1 },
+      after: { type: 'string', format: 'date-time', minLength: 1 },
+      before: { type: 'string', format: 'date-time', minLength: 1 },
+      origin: { type: 'string', enum: ['IMPORT', 'FILESYSTEM', 'UI', 'MCP', 'LOCAL_CLI', 'GIT'] },
+      limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 },
+      cursor: { type: 'string', minLength: 1 }
+    },
+    additionalProperties: false
+  }),
+  tool('get_academy_change_diff', 'Read a selective literal file/frontmatter diff between two immutable versions of one Academy skill without scanning the catalog or consumers. Distinct from get_academy_skill_history (full package or version list) and analyze_academy_change_impact (consumer reach analysis). baseVersion defaults to the persisted predecessor (or null when targetVersion is the first version, reporting creation additions). Reverse baseVersion > targetVersion is valid for rollback inspection; tombstone/reintroduction transitions expose baseContentState/targetContentState without inventing text diffs when hashes match. Optional path selects one file (SKILL.md or canonical artifact). Change pagination uses offset/limit (default 10, max 50; use offset:N, limit:1 to isolate one block); literal text pagination within each block uses textOffset/textLimit (default 400, max 4000) preserving exact UTF-16/CRLF boundaries via total, nextOffset, and content.totalCharacters/nextOffset.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      targetVersion: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      baseVersion: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      path: { type: 'string', minLength: 1 },
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 50 },
+      textOffset: { type: 'integer', minimum: 0 },
+      textLimit: { type: 'integer', minimum: 1, maximum: 4000 }
+    },
+    required: ['skillId', 'targetVersion'],
+    additionalProperties: false
+  }),
   tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order.', { type: 'object', properties: { skillId: id, metadataOnly: { type: 'boolean' }, version: { ...version, maximum: Number.MAX_SAFE_INTEGER } }, required: ['skillId'], not: { required: ['metadataOnly', 'version'] }, additionalProperties: false }),
   tool('create_academy_skill', 'After CRS cutover, save GLOBAL locally with version CAS and catalogRevision. Content and eligibility persist atomically: the new skill is APPROVED for the public plugin only when the operator previously enabled auto-include for new GLOBAL skills in Academy (not changeable through MCP); otherwise it stays PRIVATE and the result states the reason and approval action. keepPrivate:true opts this skill out. PROJECT is never published. Before cutover, preserves legacy Git drafts.', { type: 'object', properties: { expectedDraftCommitSha: id, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true }, keepPrivate: { type: 'boolean' } }, required: ['package', 'scope'], additionalProperties: false }),
   tool('update_academy_skill', 'Save canonical content with expectedVersion CAS. After CRS cutover, GLOBAL persists offline in SQLite; synchronization and distribution are separate. Legacy drafts remain until reviewed cutover.', { type: 'object', properties: { expectedDraftCommitSha: id, skillId: id, expectedVersion: version, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true } }, required: ['skillId', 'expectedVersion', 'package'], additionalProperties: false }),
@@ -66,6 +94,8 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
         break
       }
       case 'get_academy_skill': result = service.get(string(values.skillId, 'skillId')); break
+      case 'list_academy_changes': result = service.listChanges(values); break
+      case 'get_academy_change_diff': result = service.getChangeDiff(values); break
       case 'get_academy_skill_history': {
         const { skillId, ...options } = values
         result = service.history(string(skillId, 'skillId'), options as AcademyHistoryOptions)

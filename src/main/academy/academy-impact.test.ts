@@ -69,12 +69,12 @@ describe('Academy impact projection', () => {
     service.store.update({ skillId: consumer.id, expectedVersion: 1, package: consumer.current.package, scope: 'PROJECT', projectIds: [b.id], origin: 'IMPORT' })
     expect(service.verifyChangeImpact({ snapshot }).state).toBe('STALE')
     snapshot = service.analyzeChangeImpact(input).snapshot
-    service.store.update({ skillId: consumer.id, expectedVersion: 2, package: consumer.current.package, scope: 'GLOBAL', projectIds: [], origin: 'IMPORT' })
+    service.store.update({ skillId: consumer.id, expectedVersion: 1, package: consumer.current.package, scope: 'GLOBAL', projectIds: [], origin: 'IMPORT' })
     expect(service.verifyChangeImpact({ snapshot }).state).toBe('STALE')
     snapshot = service.analyzeChangeImpact(input).snapshot
-    service.store.archive(consumer.id, 3)
+    service.store.archive(consumer.id, 2)
     expect(service.verifyChangeImpact({ snapshot }).state).toBe('STALE')
-    service.store.restore(consumer.id, 3)
+    service.store.restore(consumer.id, 2)
     const other = new AcademyStore(service.store.databasePath)
     const original = service.store.list.bind(service.store)
     let changed = false
@@ -82,13 +82,13 @@ describe('Academy impact projection', () => {
       const result = original(status)
       if (!changed) {
         changed = true
-        other.update({ skillId: consumer.id, expectedVersion: 3, package: pkg(consumer.name, 'new external version'), origin: 'IMPORT' })
+        other.update({ skillId: consumer.id, expectedVersion: 2, package: pkg(consumer.name, 'new external version'), origin: 'IMPORT' })
       }
       return result
     })
     try {
       const during = service.analyzeChangeImpact(input)
-      expect(during.consumers.items[0].version).toBe(3)
+      expect(during.consumers.items[0].version).toBe(2)
       expect(service.verifyChangeImpact({ snapshot: during.snapshot }).state).toBe('STALE')
     } finally { other.close() }
   })

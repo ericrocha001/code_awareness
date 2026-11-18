@@ -4,7 +4,7 @@ import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import type { AcademyBuildProjection, AcademyGitSnapshotHeader } from '../../shared/types/academy-publication-types'
 import type { AcademyGitAuthority, AcademyGitSkillSource, AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
-import type { AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
+import type { AcademyChangeListResult, AcademyChangeRecord, AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 import type { AcademyConflict, AcademyCreateInput, AcademyPublicationPreference, AcademyPublicationSource, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
 import { validateAcademyIdentities, type AcademyIdentityCatalog } from '../../shared/academy-identity.cjs'
@@ -13,6 +13,22 @@ import { mergeAcademyPackages } from './git/academy-git-reconciliation'
 import { validatePngLogo } from './publication/openai-plugin-validator'
 
 type Row = Record<string, any>
+const ISO_TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/
+const VALID_VERSION_ORIGINS = new Set<AcademyVersionOrigin>(['IMPORT', 'FILESYSTEM', 'UI', 'MCP', 'LOCAL_CLI', 'GIT'])
+const ALLOWED_CHANGE_FILTER_KEYS = new Set(['skillId', 'query', 'after', 'before', 'origin', 'limit', 'cursor'])
+
+function normalizeIsoTimestamp(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw new AcademyError('INVALID_ARGUMENT')
+  const match = ISO_TIMESTAMP_PATTERN.exec(value)
+  if (!match || !Number.isFinite(Date.parse(value))) throw new AcademyError('INVALID_ARGUMENT')
+  const year = Number(match[1]), month = Number(match[2]), day = Number(match[3])
+  const check = new Date(Date.UTC(year, month - 1, day))
+  if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) {
+    throw new AcademyError('INVALID_ARGUMENT')
+  }
+  return new Date(value).toISOString()
+}
 
 function gitSnapshotHeader(source: AcademyGitSourceSnapshot): AcademyGitSnapshotHeader {
   let manifest: Record<string, any> | null = null
@@ -440,6 +456,7 @@ export class AcademyStore {
     for (const column of ['header_json', 'build_projection_json']) if (!snapshotColumns.some(item => item.name === column)) this.db.exec(`ALTER TABLE academy_git_snapshots ADD COLUMN ${column} TEXT`)
     if (!(this.db.prepare('PRAGMA table_info(academy_plugin_package_revisions)').all() as Row[]).some(column => column.name === 'sealed_input_json')) this.db.exec('ALTER TABLE academy_plugin_package_revisions ADD COLUMN sealed_input_json TEXT')
     if (!(this.db.prepare('PRAGMA table_info(academy_versions)').all() as Row[]).some(column => column.name === 'content_state')) this.db.exec("ALTER TABLE academy_versions ADD COLUMN content_state TEXT NOT NULL DEFAULT 'PRESENT' CHECK(content_state IN ('PRESENT','DELETED'))")
+    this.db.exec('CREATE INDEX IF NOT EXISTS academy_versions_timeline ON academy_versions(created_at DESC, skill_id ASC, version DESC)')
     this.db.exec("CREATE INDEX IF NOT EXISTS academy_git_build_source ON academy_openai_git_builds(json_extract(receipt_json,'$.sourceRepositoryId'),json_extract(receipt_json,'$.sourceCommitSha'),json_extract(receipt_json,'$.buildSchema'))")
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS academy_catalog (
@@ -617,6 +634,181 @@ export class AcademyStore {
         .map(row => this.withGitSource({ skillId: row.skill_id, version: row.version, packageHash: row.package_hash, origin: row.origin, createdAt: row.created_at, ...(row.content_state === 'DELETED' ? { contentState: 'DELETED' as const } : {}) }))
     }
     return (this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[]).map(row => this.withGitSource(versionFromRow(row)))
+  }
+
+  listChanges(input: unknown = {}): AcademyChangeListResult {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AcademyError('INVALID_ARGUMENT')
+    const raw = input as Record<string, unknown>
+    if (Object.keys(raw).some(key => !ALLOWED_CHANGE_FILTER_KEYS.has(key))) throw new AcademyError('INVALID_ARGUMENT')
+
+    const skillId = raw.skillId === undefined ? undefined : typeof raw.skillId === 'string' && raw.skillId.trim().length > 0 ? raw.skillId : (() => { throw new AcademyError('INVALID_ARGUMENT') })()
+    const query = raw.query === undefined ? undefined : typeof raw.query === 'string' && raw.query.trim().length > 0 ? raw.query : (() => { throw new AcademyError('INVALID_ARGUMENT') })()
+    const after = normalizeIsoTimestamp(raw.after)
+    const before = normalizeIsoTimestamp(raw.before)
+    if (after !== undefined && before !== undefined && after > before) throw new AcademyError('INVALID_ARGUMENT')
+
+    const origin = raw.origin === undefined
+      ? undefined
+      : typeof raw.origin === 'string' && VALID_VERSION_ORIGINS.has(raw.origin as AcademyVersionOrigin)
+        ? (raw.origin as AcademyVersionOrigin)
+        : (() => { throw new AcademyError('INVALID_ARGUMENT') })()
+
+    if (raw.limit !== undefined && (!Number.isSafeInteger(raw.limit) || Number(raw.limit) < 1 || Number(raw.limit) > 50)) {
+      throw new AcademyError('INVALID_ARGUMENT')
+    }
+
+    const signature = sha256(canonicalJson({
+      skillId: skillId ?? null,
+      query: query ? query.toLowerCase() : null,
+      after: after ?? null,
+      before: before ?? null,
+      origin: origin ?? null
+    }))
+
+    let cursorData: { createdAt: string; skillId: string; version: number; limit: number } | undefined
+    if (raw.cursor !== undefined) {
+      if (typeof raw.cursor !== 'string' || !raw.cursor || !/^[A-Za-z0-9_-]+$/.test(raw.cursor)) {
+        throw new AcademyError('INVALID_ARGUMENT')
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(Buffer.from(raw.cursor, 'base64url').toString('utf8'))
+      } catch {
+        throw new AcademyError('INVALID_ARGUMENT')
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new AcademyError('INVALID_ARGUMENT')
+      const cursorObj = parsed as Record<string, unknown>
+      if (Object.keys(cursorObj).sort().join(',') !== 'createdAt,limit,signature,skillId,version') {
+        throw new AcademyError('INVALID_ARGUMENT')
+      }
+      if (
+        cursorObj.signature !== signature ||
+        typeof cursorObj.createdAt !== 'string' ||
+        !Number.isFinite(Date.parse(cursorObj.createdAt)) ||
+        typeof cursorObj.skillId !== 'string' ||
+        !cursorObj.skillId.length ||
+        !Number.isSafeInteger(cursorObj.version) ||
+        Number(cursorObj.version) < 1 ||
+        !Number.isSafeInteger(cursorObj.limit) ||
+        Number(cursorObj.limit) < 1 ||
+        Number(cursorObj.limit) > 50
+      ) {
+        throw new AcademyError('INVALID_ARGUMENT')
+      }
+      if (raw.limit !== undefined && raw.limit !== cursorObj.limit) {
+        throw new AcademyError('INVALID_ARGUMENT')
+      }
+      cursorData = {
+        createdAt: cursorObj.createdAt,
+        skillId: cursorObj.skillId,
+        version: Number(cursorObj.version),
+        limit: Number(cursorObj.limit)
+      }
+    }
+
+    const limit = (raw.limit as number | undefined) ?? cursorData?.limit ?? 20
+    const clauses: string[] = []
+    const params: (string | number)[] = []
+
+    if (skillId !== undefined) {
+      clauses.push('v.skill_id = ?')
+      params.push(skillId)
+    }
+    if (query !== undefined) {
+      clauses.push('instr(lower(s.name), lower(?)) > 0')
+      params.push(query)
+    }
+    if (after !== undefined) {
+      clauses.push('v.created_at >= ?')
+      params.push(after)
+    }
+    if (before !== undefined) {
+      clauses.push('v.created_at <= ?')
+      params.push(before)
+    }
+    if (origin !== undefined) {
+      clauses.push('v.origin = ?')
+      params.push(origin)
+    }
+    if (cursorData) {
+      clauses.push('(v.created_at < ? OR (v.created_at = ? AND (v.skill_id > ? OR (v.skill_id = ? AND v.version < ?))))')
+      params.push(cursorData.createdAt, cursorData.createdAt, cursorData.skillId, cursorData.skillId, cursorData.version)
+    }
+
+    const sql = `
+      SELECT
+        v.skill_id,
+        s.name AS skill_name,
+        v.version,
+        (SELECT max(p.version) FROM academy_versions p WHERE p.skill_id = v.skill_id AND p.version < v.version) AS previous_version,
+        (SELECT p.content_state FROM academy_versions p WHERE p.skill_id = v.skill_id AND p.version < v.version ORDER BY p.version DESC LIMIT 1) AS previous_content_state,
+        v.created_at,
+        v.origin,
+        v.package_hash,
+        v.content_state
+      FROM academy_versions v
+      JOIN academy_skills s ON s.id = v.skill_id
+      ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
+      ORDER BY v.created_at DESC, v.skill_id ASC, v.version DESC
+      LIMIT ?
+    `
+    const rows = this.db.prepare(sql).all(...params, limit + 1) as Row[]
+    const hasMore = rows.length > limit
+    const selected = rows.slice(0, limit)
+
+    const changes: AcademyChangeRecord[] = selected.map(row => {
+      const contentState = row.content_state === 'DELETED' ? 'DELETED' : 'PRESENT'
+      const previousContentState = row.previous_content_state === 'DELETED' ? 'DELETED' : row.previous_content_state === 'PRESENT' ? 'PRESENT' : undefined
+      return {
+        skillId: row.skill_id,
+        skillName: row.skill_name,
+        version: row.version,
+        previousVersion: row.previous_version ?? null,
+        createdAt: row.created_at,
+        origin: row.origin,
+        packageHash: row.package_hash,
+        ...(contentState === 'DELETED'
+          ? { contentState: 'DELETED' as const, ...(previousContentState ? { previousContentState } : {}) }
+          : previousContentState === 'DELETED'
+            ? { contentState: 'PRESENT' as const, previousContentState: 'DELETED' as const }
+            : {})
+      }
+    })
+
+    const last = selected[selected.length - 1]
+    const nextCursor = hasMore && last
+      ? Buffer.from(JSON.stringify({
+        createdAt: last.created_at,
+        skillId: last.skill_id,
+        version: last.version,
+        limit,
+        signature
+      }), 'utf8').toString('base64url')
+      : undefined
+
+    return { changes, ...(nextCursor ? { nextCursor } : {}) }
+  }
+
+  readChangeDiffPair(skillId: string, targetVersion: number, baseVersion?: number): {
+    skillId: string
+    skillName: string
+    base: AcademySkillVersion | null
+    target: AcademySkillVersion
+  } {
+    return this.db.transaction(() => {
+      const skill = this.db.prepare('SELECT id, name FROM academy_skills WHERE id = ?').get(skillId) as { id: string; name: string } | undefined
+      if (!skill) throw new AcademyError('SKILL_NOT_FOUND')
+      const target = this.getVersion(skillId, targetVersion)
+      const resolvedBaseVersion = baseVersion !== undefined
+        ? baseVersion
+        : (this.db.prepare('SELECT max(version) AS version FROM academy_versions WHERE skill_id = ? AND version < ?').get(skillId, targetVersion) as { version: number | null } | undefined)?.version ?? null
+      const base = resolvedBaseVersion === null
+        ? null
+        : resolvedBaseVersion === targetVersion
+          ? target
+          : this.getVersion(skillId, resolvedBaseVersion)
+      return { skillId: skill.id, skillName: skill.name, base, target }
+    })()
   }
 
   readImpactCatalog(skillId: string, baseVersion: number, targetVersion?: number) {
