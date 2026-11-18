@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { CommandRunner } from './entire-provider'
 import { resolveCheckpointFromCommit, validateCheckpointId } from './checkpoint'
-import { entireAgent } from './entire-schema'
+import { entireAgent, supportsEntireMetadata } from './entire-schema'
 
 export interface CheckpointObservation {
   state: 'VERIFIED' | 'PARTIAL' | 'MISSING' | 'UNAVAILABLE' | 'UNSUPPORTED' | 'PENDING'
@@ -40,7 +40,7 @@ export async function observeCheckpoint(runner: CommandRunner, root: string, que
     const metadata = await read(['cat-file', '-p', revision + ':metadata.json'])
     if (metadata.code !== 0) throw new Error('CHECKPOINT_METADATA_UNAVAILABLE')
     const top = JSON.parse(metadata.text)
-    if (top.cli_version !== '0.12.2') return { state: 'UNSUPPORTED', reason: 'PROVIDER_SCHEMA_UNSUPPORTED', checkpointId, refRevision: revision, sessionIds }
+    if (!supportsEntireMetadata(top.cli_version)) return { state: 'UNSUPPORTED', reason: 'PROVIDER_SCHEMA_UNSUPPORTED', checkpointId, refRevision: revision, sessionIds }
     if (top.checkpoint_id !== undefined && top.checkpoint_id !== checkpointId) throw new Error('SOURCE_IDENTITY_CONFLICT')
     if (!Array.isArray(top.sessions)) throw new Error('CHECKPOINT_METADATA_INVALID')
     const hash = createHash('sha256').update(metadata.text)
@@ -51,7 +51,7 @@ export async function observeCheckpoint(runner: CommandRunner, root: string, que
       hash.update(item.text)
       let session
       try { session = JSON.parse(item.text) } catch { omitted++; continue }
-      if ((session.cli_version !== undefined && session.cli_version !== '0.12.2') || (session.checkpoint_id !== undefined && session.checkpoint_id !== checkpointId) ||
+      if ((session.cli_version !== undefined && !supportsEntireMetadata(session.cli_version)) || (session.checkpoint_id !== undefined && session.checkpoint_id !== checkpointId) ||
         typeof session.session_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(session.session_id)) { omitted++; continue }
       let agent: string
       try { agent = entireAgent(session.agent) } catch { omitted++; continue }

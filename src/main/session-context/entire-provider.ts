@@ -192,7 +192,7 @@ export class EntireProvider {
       if (!hashVerified) {
         const version = await this.command(executable, ['version'], this.root, 4096)
         if (version.code !== 0 || version.limited) throw entireError('PROVIDER_VERSION_MISMATCH', 'version', 'VERSION_COMMAND_FAILED', 'CHECK_ENTIRE_EXECUTABLE')
-        if (!version.text.includes(config.version)) throw entireError('PROVIDER_VERSION_MISMATCH', 'version', 'VERSION_MISMATCH', 'REVERIFY_EXECUTABLE_PIN')
+        if (version.text.split(/\r?\n/, 1)[0].trim() !== 'Entire CLI ' + config.version) throw entireError('PROVIDER_VERSION_MISMATCH', 'version', 'VERSION_MISMATCH', 'REVERIFY_EXECUTABLE_PIN')
       }
       const checks = live ? [[['session', 'list', '--help'], ['--json']], [['session', 'info', '--help'], ['--json']], [['session', 'tokens', '--help'], ['--json']]] : [[['session', 'list', '--help'], ['--json']], [['session', 'info', '--help'], ['--json', '--transcript']]]
       for (const [args, flags] of checks) {
@@ -253,7 +253,7 @@ export class EntireProvider {
     try {
       await this.validate()
       const config = await this.preflight(true)
-      if (config.version !== '0.12.2') throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'version', 'UNSUPPORTED_ENTIRE_VERSION', 'UPDATE_COMPATIBLE_ENTIRE')
+      if (!supportsEntireMetadata(config.version)) throw entireError('PROVIDER_SCHEMA_UNSUPPORTED', 'version', 'UNSUPPORTED_ENTIRE_VERSION', 'UPDATE_COMPATIBLE_ENTIRE')
       const agents = await this.command(config.executable, ['agent', 'list'], this.root, 32768)
       if (agents.code !== 0 || agents.limited) throw entireError('INTEGRATION_UNAVAILABLE', 'cli-execution', 'AGENT_LIST_FAILED', 'CHECK_ENTIRE_CLI_STATE')
       integrations = parseEntireAgentList(agents.text)
@@ -274,7 +274,7 @@ export class EntireProvider {
       if (!validSession(info) || info.session_id !== id || await realpath(info.worktree_path) !== await realpath(this.root)) throw new Error('SOURCE_IDENTITY_CONFLICT')
       const metadata = info as ProviderSession & { turns?: unknown; pending_turns?: unknown }
       const turns = Array.isArray(metadata.turns) ? metadata.turns.length : typeof metadata.turns === 'number' && Number.isSafeInteger(metadata.turns) ? metadata.turns : 0
-      const pending = Array.isArray(metadata.pending_turns) ? metadata.pending_turns.length : 0
+      const pending = Array.isArray(metadata.pending_turns) ? metadata.pending_turns.length : typeof metadata.pending_turns === 'number' && Number.isSafeInteger(metadata.pending_turns) ? metadata.pending_turns : 0
       await this.validate()
       if (turns <= 0 && pending <= 0) return { configured: true, reason: 'SESSION_UNOBSERVED', integrations }
       return { configured: true, reason: 'CAPTURE_OBSERVED', providerSessionId: id, agent: entireAgent(info.agent), integrations }
@@ -390,7 +390,7 @@ export class EntireProvider {
     } finally { stream.destroy() }
   }
   private async indexReferences(store: SessionStore, known: SessionRow, metadata: SessionInput, config: ProviderConfig, root: string): Promise<object> {
-    if (config.version !== '0.12.2') throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+    if (!supportsEntireMetadata(config.version)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     if (!Object.hasOwn(ENTIRE_TRANSCRIPT_NORMALIZERS, metadata.agent)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     const agent = metadata.agent as keyof typeof ENTIRE_TRANSCRIPT_NORMALIZERS
     const source: EntireSource = await localEntireSource(root, known.providerSessionId) ?? await checkpointTranscriptSource(store, known, (exe, args, cwd, limit, consume) => this.command(exe, args, cwd, limit, consume), root, () => this.assertWithinDeadline()) ?? { kind: 'ENTIRE_CLI', agent, providerSessionId: known.providerSessionId }

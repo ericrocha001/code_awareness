@@ -1,3 +1,4 @@
+import { supportsEntireMetadata } from './entire-schema'
 import type { CommandRunner } from './entire-provider'
 import type {
   CodeProvenanceCandidate,
@@ -127,7 +128,7 @@ export async function readCheckpointTopMetadata(
     throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
   }
 
-  if (json.cli_version !== '0.12.2') {
+  if (!supportsEntireMetadata(json.cli_version)) {
     throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
   }
 

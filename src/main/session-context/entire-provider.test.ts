@@ -25,7 +25,7 @@ function fixture(root: string) {
     { type: 'response_item', payload: { type: 'reasoning', summary: [{ text: 'PRIVATE_REASONING_DO_NOT_STORE' }] } },
   ].map(line).join('')
 }
-async function setup() {
+async function setup(version = '0.12.2') {
   const base = mkdtempSync(join(tmpdir(), 'entire-provider-')), root = join(base, 'repo')
   mkdirSync(root); cleanup.push(() => {
     if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })", base], { windowsHide: true })
@@ -35,7 +35,7 @@ async function setup() {
   const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire')
   writeFileSync(executable, 'pinned test executable')
   const configPath = join(dirname(store.path), 'session-context.provider.json')
-  writeFileSync(configPath, JSON.stringify({ enabled: true, repositoryId: 'A', executable, sha256: digest('pinned test executable'), version: '0.12.2' }))
+  writeFileSync(configPath, JSON.stringify({ enabled: true, repositoryId: 'A', executable, sha256: digest('pinned test executable'), version }))
   mkdirSync(join(root, '.entire'))
   const localPath = join(root, '.entire/settings.local.json')
   writeFileSync(localPath, JSON.stringify({ strategy_options: { push_sessions: false } }))
@@ -46,7 +46,7 @@ async function setup() {
   const run: CommandRunner = async (exe, args, cwd, limit, consume) => {
     calls.push(args)
     if (exe === 'git') return runReadOnly(exe, args, cwd, limit)
-    if (args[0] === 'version') return { code: 0, text: 'Entire CLI 0.12.2', limited: false }
+    if (args[0] === 'version') return { code: 0, text: 'Entire CLI ' + version, limited: false }
     if (args.includes('--help')) return { code: 0, text: '--json --transcript', limited: false }
     if (args.includes('--transcript')) {
       let limited = false
@@ -76,6 +76,28 @@ describe('Entire reference provider', () => {
     expect(await f.provider.refresh(session.id)).toMatchObject({ replay: true, eventCount: 4 })
     expect(f.calls.some(args => args.includes('app-server'))).toBe(false)
     expect(existsSync(join(f.root, '.git/hooks/post-commit'))).toBe(false)
+  }, 20000)
+  it('imports metadata from qualified 0.13.4 without reading transcript bodies', async () => {
+    const f = await setup('0.13.4')
+    expect(await f.provider.refresh()).toMatchObject({ imported: 1, transcriptImported: false })
+    expect(f.store.byProvider('session-1')?.providerVersion).toBe('0.13.4')
+    expect(f.calls.some(args => args.includes('--transcript'))).toBe(false)
+  })
+  it('preserves native reference identity and digest across a runtime upgrade', async () => {
+    const f = await setup()
+    await f.provider.refresh()
+    const session = f.store.byProvider('session-1')!
+    await f.provider.refresh(session.id)
+    const before = f.store.references.source(session.id)
+    const events = f.store.events(session.id, {}, 0, 10)
+    const config = JSON.parse(readFileSync(f.configPath, 'utf8'))
+    writeFileSync(f.configPath, JSON.stringify({ ...config, version: '0.13.4' }))
+    const provider = new EntireProvider(f.store, f.root, () => {}, async (exe, args, ...rest) => args[0] === 'version'
+      ? { code: 0, text: 'Entire CLI 0.13.4', limited: false } : f.run(exe, args, ...rest))
+    expect(await provider.refresh(session.id)).toMatchObject({ replay: true, eventCount: 4 })
+    expect(f.store.references.source(session.id)).toEqual(before)
+    expect(f.store.events(session.id, {}, 0, 10)).toEqual(events)
+    expect((await provider.readEvent(f.store.session(session.id), events[0], 0)).content).toBe('Correct the failing case')
   }, 20000)
   it('accepts another agent for metadata but fails closed on an unproven transcript format', async () => {
     const f = await setup()
