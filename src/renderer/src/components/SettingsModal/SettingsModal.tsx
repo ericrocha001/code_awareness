@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Settings, X } from 'lucide-react'
 import { NAV_ITEMS, type NavId } from '../../config/navigation'
+import type { CodexUserHooksStatus } from '../../../../shared/types/codex-hooks-types'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
@@ -23,14 +24,27 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
   const [importConfirmationMode, setImportConfirmationMode] = useState<'MANUAL' | 'AUTOMATIC' | null>(null)
   const [downloadsSaving, setDownloadsSaving] = useState(false)
   const [downloadsError, setDownloadsError] = useState('')
+  const [autoEnrollCodex, setAutoEnrollCodex] = useState<boolean | null>(null)
+  const [cutoverLegacy, setCutoverLegacy] = useState(true)
+  const [codexStatus, setCodexStatus] = useState<CodexUserHooksStatus | null>(null)
+  const [codexSaving, setCodexSaving] = useState(false)
+  const [codexError, setCodexError] = useState('')
+  const [codexNotice, setCodexNotice] = useState('')
   useEffect(() => {
     let current = true
     window.codeAwareness.loadSettings().then(settings => {
       if (!current) return
       setAutomaticFetch(settings.gitManagement?.automaticFetch !== false)
       setImportConfirmationMode(settings.downloads?.importConfirmationMode === 'AUTOMATIC' ? 'AUTOMATIC' : 'MANUAL')
+      setAutoEnrollCodex(settings.codexCapture?.autoEnrollNewProjects === true)
     })
       .catch(() => { if (current) setGitError('Não foi possível ler a configuração Git.') })
+    window.codeAwareness.codexUserHooks?.status().then(status => {
+      if (!current) return
+      setCodexStatus(status)
+    }).catch(() => {
+      if (current) setCodexError('Não foi possível ler o estado dos hooks do Codex no perfil.')
+    })
     return () => { current = false }
   }, [])
   const changeAutomaticFetch = async (enabled: boolean) => {
@@ -49,6 +63,47 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       setImportConfirmationMode(mode)
     } catch { setDownloadsError('Não foi possível salvar a configuração de Downloads.') }
     finally { setDownloadsSaving(false) }
+  }
+  const changeAutoEnrollCodex = async (enabled: boolean) => {
+    setCodexSaving(true); setCodexError(''); setCodexNotice('')
+    try {
+      await updateSettings(settings => ({ ...settings, codexCapture: { ...settings.codexCapture, autoEnrollNewProjects: enabled } }))
+      setAutoEnrollCodex(enabled)
+      if (codexStatus?.profileEnabled && window.codeAwareness.codexUserHooks) {
+        const res = await window.codeAwareness.codexUserHooks.install({ codexHome: codexStatus.codexHome, autoEnrollNewProjects: enabled })
+        setCodexStatus(res.status)
+      }
+    } catch { setCodexError('Não foi possível salvar a preferência de inscrição automática do Codex.') }
+    finally { setCodexSaving(false) }
+  }
+  const toggleProfileCodexHooks = async () => {
+    if (!window.codeAwareness.codexUserHooks) return
+    setCodexSaving(true); setCodexError(''); setCodexNotice('')
+    try {
+      const configured = codexStatus?.profileEnabled && codexStatus.installation.state === 'CONFIGURED'
+      if (configured) {
+        const res = await window.codeAwareness.codexUserHooks.disable(codexStatus?.codexHome)
+        setCodexStatus(res.status)
+        setCodexNotice('Hooks do Codex desativados no perfil do usuário.')
+      } else {
+        const preferredClient = codexStatus?.clients.find(client => client.qualified)?.path
+        const res = await window.codeAwareness.codexUserHooks.install({
+          codexHome: codexStatus?.codexHome,
+          clientPath: preferredClient,
+          autoEnrollNewProjects: autoEnrollCodex === true,
+          enrollActiveRepositories: true,
+          cutoverLegacy
+        })
+        setCodexStatus(res.status)
+        setCodexNotice(res.trust === 'REVIEW_REQUIRED'
+          ? 'Hooks instalados no perfil do usuário. Aprove a confiança nativamente no Codex na próxima execução.'
+          : 'Hooks do Codex atualizados no perfil do usuário.')
+      }
+    } catch (err) {
+      setCodexError(err instanceof Error ? `Falha ao atualizar hooks do Codex: ${err.message}` : 'Não foi possível atualizar hooks do Codex.')
+    } finally {
+      setCodexSaving(false)
+    }
   }
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
@@ -104,6 +159,39 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
         </select>
       </div>
       {downloadsError && <p role="alert">{downloadsError}</p>}
+    </div>
+    <div className="settings-intro">
+      <h3>Captura Codex (Perfil do usuário)</h3>
+      <p>Instala um conjunto único de hooks em $CODEX_HOME/hooks.json. A revisão de confiança ocorre nativamente no Codex, e a captura permanece autorizada por repositório.</p>
+    </div>
+    <div className="settings-list">
+      <div className="settings-row">
+        <span className="settings-row-label">Inscrever novos repositórios automaticamente</span>
+        <ToggleSwitch aria-label="Inscrever novos repositórios automaticamente" checked={autoEnrollCodex === true} disabled={autoEnrollCodex === null || codexSaving} onChange={value => void changeAutoEnrollCodex(value)} />
+      </div>
+      {codexStatus && (
+        <div className="settings-codex">
+          <p>
+            Estado: <strong>{codexStatus.installation.state}</strong> ({codexStatus.installation.installed}/{codexStatus.installation.total}) · {codexStatus.configPath}
+          </p>
+          <p>
+            Repositórios inscritos: {codexStatus.enrolledRepositoryIds.length} · Clientes Codex qualificados: {codexStatus.clients.filter(client => client.qualified).length}
+          </p>
+          {!(codexStatus.profileEnabled && codexStatus.installation.state === 'CONFIGURED') && (
+            <label>
+              <input type="checkbox" checked={cutoverLegacy} onChange={event => setCutoverLegacy(event.target.checked)} disabled={codexSaving} />
+              {' '}Limpar hooks antigos do Codex por repositório (cutover seguro)
+            </label>
+          )}
+          <button type="button" onClick={() => void toggleProfileCodexHooks()} disabled={codexSaving}>
+            {codexStatus.profileEnabled && codexStatus.installation.state === 'CONFIGURED'
+              ? 'Desativar hooks no perfil'
+              : codexStatus.installation.state === 'NOT_INSTALLED' ? 'Ativar no perfil do usuário' : 'Reparar hooks no perfil'}
+          </button>
+        </div>
+      )}
+      {codexNotice && <p role="status">{codexNotice}</p>}
+      {codexError && <p role="alert">{codexError}</p>}
     </div>
     </div>
     <footer className="settings-footer">

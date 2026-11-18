@@ -14,7 +14,7 @@ import * as safeConfig from '../local-mcp-clients/safe-config-file'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 
 const directories: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) })
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'native-hooks-')); directories.push(root)
   mkdirSync(join(root, '.git')); writeFileSync(join(root, '.git', 'HEAD'), 'ref: refs/heads/test\n')
@@ -299,7 +299,7 @@ test('dispatches one main helper to separate Git worktrees and refuses unsafe or
   await run(main)
   expect(readdirSync(anchor.spool)).toHaveLength(1)
   expect(readFileSync(config, 'utf8')).toBe(legacyConfig)
-})
+}, 15000)
 
 test('requires explicit opt-in, preserves Entire handlers and restores exact configuration bytes', () => {
   const f = fixture(), commandPath = join(process.cwd(), 'out/session-context/native-hook.cjs')

@@ -25,9 +25,9 @@ type Query = z.infer<typeof captureHealthQuery>
 export const nativeCaptureAgent = (query: Query): NativeHookProvider =>
   query.agent === 'antigravity' ? 'antigravity' : 'codex'
 
-export function inspectNativeCaptureHealth(store: SessionStore, root: string, target: SessionTargetSelection, agent: NativeHookProvider, trust?: NativeTrustObservation) {
+export function inspectNativeCaptureHealth(store: SessionStore, root: string, target: SessionTargetSelection, agent: NativeHookProvider, trust?: NativeTrustObservation, profile?: string) {
   const { registry, repositoryId } = store
-  const readiness = nativeHookReadiness(registry, root, target, trust, agent)
+  const readiness = nativeHookReadiness(registry, root, target, trust, agent, profile ? { profile } : undefined)
   const diagnostics = nativeCaptureDiagnostics(registry, root, agent, target)
   const partial = diagnostics.historicalCoverage?.state === 'PARTIAL' || readiness.captureReadiness.state === 'PARTIAL'
   const state = partial ? 'PARTIAL' : readiness.captureReadiness.state === 'OBSERVED' ? 'OBSERVED' :

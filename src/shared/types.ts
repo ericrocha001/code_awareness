@@ -23,9 +23,15 @@ export interface DownloadsSettings {
   importConfirmationMode: 'MANUAL' | 'AUTOMATIC'
 }
 
+export interface CodexCaptureSettings {
+  autoEnrollNewProjects?: boolean
+  gitCommitTool?: string
+}
+
 export interface AppSettings {
   gitManagement?: { automaticFetch?: boolean }
   downloads?: DownloadsSettings
+  codexCapture?: CodexCaptureSettings
   lastActiveRepositoryId?: string
   hiddenNavigationItems?: string[]
   ngrokDomain?: string

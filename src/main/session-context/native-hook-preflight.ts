@@ -1,6 +1,7 @@
 import { summarizeHookList, isQualifiedCodexHookVersion, matchesHookKey, sameHookPath } from '../../shared/native-hook-preflight.cjs'
 import { nativeDigest } from './native-hooks'
 import { inspectNativeInstallation, inspectSharedNativeInstallation, type NativeInstallationInspection } from './native-hook-installation'
+import { inspectUserCodexInstallation } from './native-hook-profile'
 
 export interface NativeClientScope {
   repositoryId: string; worktreeId: string; generation: string
@@ -20,7 +21,7 @@ export interface NativeTrustObservation {
   reasonCode: string; freshness: string
   clientId?: string; threadId?: string; sessionId?: string; protocolVersion?: string; clientVersion?: string
   observedAt?: string; expiresAt?: string; hashDigest?: string; installationDigest?: string
-  loadedSource?: 'WORKTREE' | 'MAIN'
+  loadedSource?: 'WORKTREE' | 'MAIN' | 'USER'
   sharedSourceDigest?: string
   connectedAt?: string
   expected?: number; matched?: number; trusted?: number; issues?: { eventType: string; reasonCode: string }[]
@@ -67,7 +68,7 @@ function hookCompletion(response: unknown, notifications: unknown[], scope: Nati
   return observations.sort((a, b) => b.observedAt.localeCompare(a.observedAt) || (a.state !== b.state ? a.state === 'FAILED' ? -1 : 1 : a.eventId.localeCompare(b.eventId)))[0]
 }
 export const unknownNativeTrust = (reasonCode: string): NativeTrustObservation => ({ state: 'UNKNOWN', reasonCode, freshness: 'UNAVAILABLE' })
-export async function inspectNativeTrust(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, requested: boolean, client?: NativeHookClient, assertCurrent: () => void = () => {}): Promise<NativeTrustObservation> {
+export async function inspectNativeTrust(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, requested: boolean, client?: NativeHookClient, assertCurrent: () => void = () => {}, profile?: string): Promise<NativeTrustObservation> {
   if (!requested) return unknownNativeTrust('TRUST_NOT_INSPECTED')
   if (!client) return unknownNativeTrust('SESSION_SCOPE_UNAVAILABLE')
   if (!client.authorized) return unknownNativeTrust('CLIENT_AUTHORIZATION_REQUIRED')
@@ -78,7 +79,11 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
   if (scope.projectTrusted !== true) return unknownNativeTrust('PROJECT_TRUST_UNAVAILABLE')
   if (scope.protocolVersion !== 'codex-app-server/v2') return { ...unknownNativeTrust('PROTOCOL_UNSUPPORTED'), state: 'UNSUPPORTED' }
   if (!isQualifiedCodexHookVersion(scope.clientVersion)) return { ...unknownNativeTrust('VERSION_UNSUPPORTED'), state: 'UNSUPPORTED' }
-  const installation = inspectNativeInstallation(root, target)
+  let installation = inspectNativeInstallation(root, target)
+  if (installation.state !== 'CONFIGURED' && profile) {
+    const userInstall = inspectUserCodexInstallation(profile, undefined, process.platform)
+    if (userInstall.state === 'CONFIGURED') installation = userInstall
+  }
   if (installation.state !== 'CONFIGURED') return unknownNativeTrust(installation.reasonCode)
   const shared = scope.clientVersion === '0.169.0-alpha.11.1' ? inspectSharedNativeInstallation(root, target) : undefined
   const scopeDigest = nativeDigest(JSON.stringify(scope))
@@ -89,7 +94,7 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
     assertCurrent()
     const currentScope = client.scope()
     if (!client.authorized || !currentScope || nativeDigest(JSON.stringify(currentScope)) !== scopeDigest) return unknownNativeTrust('SESSION_SCOPE_CHANGED')
-    if (inspectNativeInstallation(root, target).digest !== installation.digest) return unknownNativeTrust('HOOK_CONFIG_DRIFT')
+    if (inspectNativeInstallation(root, target).digest !== installation.digest && (!profile || inspectUserCodexInstallation(profile).digest !== installation.digest)) return unknownNativeTrust('HOOK_CONFIG_DRIFT')
     let handlers = installation.handlers
     let summary = summarizeHookList(response, handlers)
     let sharedSourceDigest: string | undefined
@@ -107,11 +112,12 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
     const execution = summary.matched === 7 && client.readCompletions ? hookCompletion(response, client.readCompletions(), scope, handlers) : undefined
     assertCurrent()
     if (!client.authorized || nativeDigest(JSON.stringify(client.scope() ?? null)) !== scopeDigest) return unknownNativeTrust('SESSION_SCOPE_CHANGED')
+    const isUserSource = installation.reasonCode === 'USER_INSTALLATION_VERIFIED'
     const observedAt = new Date(), expiresAt = new Date(observedAt.getTime() + 30000)
     return { ...safe, freshness: stale ? 'STALE' : 'OBSERVED_SNAPSHOT', observedAt: observedAt.toISOString(), expiresAt: expiresAt.toISOString(),
       clientId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-client', scope.clientId])), threadId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-thread', scope.threadId])),
       sessionId: nativeDigest(JSON.stringify([target.repositoryId, 'codex', scope.sessionId])), protocolVersion: scope.protocolVersion, clientVersion: scope.clientVersion, installationDigest: installation.digest,
-      connectedAt: scope.connectedAt, ...(summary.matched === 7 ? { loadedSource: sharedSourceDigest ? 'MAIN' as const : 'WORKTREE' as const } : {}),
+      connectedAt: scope.connectedAt, ...(summary.matched === 7 ? { loadedSource: sharedSourceDigest ? 'MAIN' as const : isUserSource ? 'USER' as const : 'WORKTREE' as const } : {}),
       ...(sharedSourceDigest ? { sharedSourceDigest } : {}),
       ...(execution ? { execution } : {}) }
   } catch (error) {

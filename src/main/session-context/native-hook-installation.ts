@@ -1,10 +1,10 @@
 import { existsSync, realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
-  antigravityHookEvents, boundedFile, codexHookEvents, nativeBindingPath, nativeDispatchMismatch, resolveNativeHookBinding, nativeDigest, nativeGitIdentity,
-  prepareNativeSpool, readNativeBinding, type NativeHookBinding, type NativeHookEvent, type NativeHookProvider
+  antigravityHookEvents, boundedFile, codexHookEvents, nativeBindingPath, nativeDispatchMismatch, resolveNativeHookBinding, nativeDigest, nativeGitCommitToolPattern, nativeGitIdentity,
+  prepareNativeSpool, readNativeBinding, sameNativePath, type NativeHookBinding, type NativeHookEvent, type NativeHookProvider
 } from './native-hooks'
-import { assertProfilePath, assertRevision, revision, writeConfig, removeConfig, type FileRevision } from '../local-mcp-clients/safe-config-file'
+import { assertProfilePath, assertRevision, revision, verifyConfigWriteOwnership, writeConfig, removeConfig, type FileRevision } from '../local-mcp-clients/safe-config-file'
 import { authorizeDistributedBinding } from './native-hook-catalog'
 import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 
@@ -100,6 +100,51 @@ export function inspectNativeInstallation(
   const { directory, bindingPath, snapshotPath, configPath } = hookPaths(root, provider)
   try {
     checkPaths(root, provider)
+    if (provider === 'codex' && existsSync(bindingPath) && !existsSync(configPath)) {
+      const userBinding = readNativeBinding(bindingPath)
+      if (userBinding.scope === 'USER' && userBinding.configPath) {
+        const identity = nativeGitIdentity(root)
+        if ((userBinding.provider ?? 'codex') !== 'codex' || userBinding.repositoryId !== target.repositoryId ||
+          userBinding.worktreeId !== target.worktreeId || userBinding.generation !== target.generation ||
+          userBinding.root !== identity.root || userBinding.directoryIdentity !== identity.directoryIdentity ||
+          userBinding.commonDirectory !== identity.commonDirectory || userBinding.spool !== join(directory, 'spool')) {
+          return result('INCOMPATIBLE', 'WORKTREE_STALE')
+        }
+        if ([directory, userBinding.spool].some(path => !sameNativePath(realpathSync(path), resolve(path)))) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE')
+        if (!userBinding.enabled) return result('INCOMPATIBLE', 'NATIVE_CAPTURE_DISABLED')
+        if (!existsSync(userBinding.configPath)) return result('MISSING', 'NATIVE_CONFIG_MISSING')
+        const userText = boundedFile(userBinding.configPath, MAX_HOOK_CONFIG_BYTES)
+        const userConfig = parseCodexConfig(userText)
+        const userHandlers: NativeInstallationInspection['handlers'] = []
+        const seenHelpers = new Set<string>()
+        for (const event of codexHookEvents) {
+          const matches: NativeInstallationInspection['handlers'] = []
+          const snake = event.replace(/[A-Z]/g, (letter, offset) => (offset ? '_' : '') + letter.toLowerCase())
+          for (const [groupIndex, group] of (userConfig.hooks[event] ?? []).entries()) {
+            for (const [handlerIndex, hook] of group.hooks.entries()) {
+              if (hook?.type !== 'command' || typeof hook.command !== 'string') continue
+              const cmdMatch = /^(ELECTRON_RUN_AS_NODE=1 )?"([^"\r\n]+)" "([^"\r\n]+)"$/.exec(hook.command)
+              if (!cmdMatch || !/native-hook-[a-f0-9]{64}\.cjs$/.test(cmdMatch[3])) continue
+              if (!existsSync(cmdMatch[2]) || !existsSync(cmdMatch[3])) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', userHandlers.length)
+              if (!seenHelpers.has(cmdMatch[3])) {
+                const d = /native-hook-([a-f0-9]{64})\.cjs$/.exec(cmdMatch[3])![1]
+                if (nativeDigest(boundedFile(cmdMatch[3], MAX_INSTALLATION_BYTES)) !== d) return result('INCOMPATIBLE', 'HOOK_COMMAND_DIGEST_MISMATCH', userHandlers.length)
+                seenHelpers.add(cmdMatch[3])
+              }
+              if (group.matcher !== undefined || hook.async === true || hook.timeout !== 3) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', userHandlers.length)
+              const ps = `& '${cmdMatch[2].replaceAll("'", "''")}' '${cmdMatch[3].replaceAll("'", "''")}'`
+              const expectedWin = cmdMatch[1] ? `$env:ELECTRON_RUN_AS_NODE='1'; ${ps}` : ps
+              if (platform === 'win32' && hook.commandWindows !== expectedWin) return result('INCOMPATIBLE', 'WINDOWS_COMMAND_INCOMPATIBLE', userHandlers.length)
+              matches.push({ key: `${userBinding.configPath}:${snake}:${groupIndex}:${handlerIndex}`, event, sourcePath: userBinding.configPath })
+            }
+          }
+          if (matches.length > 1) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS'), repairability: 'CONFLICT' }
+          userHandlers.push(...matches)
+        }
+        if (userHandlers.length !== 7) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLERS_MISSING', userHandlers.length), repairability: 'REPAIRABLE' }
+        return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 7, expected: 7, handlers: userHandlers }
+      }
+    }
     if (!existsSync(bindingPath) || !existsSync(configPath)) {
       const state = readInstallation(root, target, undefined, provider)
       if (state && !state.binding.enabled && state.removed === 0) return result('INCOMPATIBLE', 'NATIVE_CAPTURE_DISABLED')
@@ -218,19 +263,22 @@ export function inspectSharedNativeInstallation(root: string, target: { reposito
   } catch {}
 }
 
-interface OwnedHook { type: 'command'; command: string; commandWindows?: string; timeout: 3 }
-interface HookSnapshot { schema: 1 | 2; provider?: NativeHookProvider; path: string; before: string | null; installedDigest: string; owned?: OwnedHook; binding?: NativeHookBinding; rollbackBase?: string | null; previousOwned?: OwnedHook }
-interface InstallationState { snapshot: HookSnapshot; binding: NativeHookBinding; owned: OwnedHook; text: string | null; cleaned: string | null; revisions: Map<string, FileRevision>; removed: number }
-const canonical = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
-const same = (a: unknown, b: unknown) => canonical(a) === canonical(b)
-const plainObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
+export interface OwnedHook { type: 'command'; command: string; commandWindows?: string; timeout: 3 }
+export interface HookSnapshot { schema: 1 | 2; provider?: NativeHookProvider; path: string; before: string | null; installedDigest: string; owned?: OwnedHook; binding?: NativeHookBinding; rollbackBase?: string | null; previousOwned?: OwnedHook }
+export interface InstallationState { snapshot: HookSnapshot; binding: NativeHookBinding; owned: OwnedHook; text: string | null; cleaned: string | null; revisions: Map<string, FileRevision>; removed: number }
+export const canonicalHookJson = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.entries(item).sort(([a], [b]) => a.localeCompare(b))) : item)
+const canonical = canonicalHookJson
+export const sameHookValue = (a: unknown, b: unknown) => canonical(a) === canonical(b)
+const same = sameHookValue
+export const isPlainHookObject = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
+const plainObject = isPlainHookObject
 
 export function hookPaths(root: string, provider: NativeHookProvider = 'codex') {
   const directory = provider === 'antigravity' ? join(root, '.code-awareness/native-hooks/antigravity') : join(root, '.code-awareness/native-hooks')
   const configPath = provider === 'antigravity' ? join(root, '.agents/hooks.json') : join(root, '.codex/hooks.json')
   return { directory, bindingPath: join(directory, 'binding.json'), snapshotPath: join(directory, 'installation.json'), configPath }
 }
-function ownedCommandPaths(command: string, root: string, allowLegacy: boolean) {
+export function ownedCommandPaths(command: string, root: string, allowLegacy: boolean) {
   const { bindingPath } = hookPaths(root)
   const quoted = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(command)
   if (quoted?.[3] === bindingPath) return { paths: quoted.slice(1), legacy: false }
@@ -246,7 +294,7 @@ function checkPaths(root: string, provider: NativeHookProvider = 'codex'): void 
   for (const path of [paths.directory, paths.bindingPath, paths.snapshotPath, paths.configPath, join(paths.directory, 'spool')]) assertProfilePath(path, root)
 }
 
-function parseCodexConfig(text: string | null): { hooks: Record<string, { matcher?: unknown; hooks: Record<string, unknown>[]; [key: string]: unknown }[]>; [key: string]: unknown } {
+export function parseCodexConfig(text: string | null): { hooks: Record<string, { matcher?: unknown; hooks: Record<string, unknown>[]; [key: string]: unknown }[]>; [key: string]: unknown } {
   const value = text === null ? {} : JSON.parse(text)
   if (!plainObject(value) || value.hooks && !plainObject(value.hooks)) throw new Error('HOOK_CONFIG_UNSUPPORTED')
   value.hooks ??= {}
@@ -293,11 +341,11 @@ function antigravityReferencesBinding(value: unknown, predicate: (command: strin
 
 function ownsBinding(binding: NativeHookBinding, root: string, target: { repositoryId: string; worktreeId: string; generation: string }, provider: NativeHookProvider = 'codex'): void {
   const identity = nativeGitIdentity(root)
-  if (binding.schema !== 1 || (binding.provider ?? 'codex') !== provider || typeof binding.enabled !== 'boolean' || !/^[a-f0-9]{64}$/.test(binding.worktreeId) || !/^[a-f0-9]{64}$/.test(binding.generation) || binding.gitCommitTool !== undefined && !/^mcp__[a-zA-Z0-9_-]+__commit_git_changes$/.test(binding.gitCommitTool)) throw new Error('INVALID_BINDING')
+  if (binding.schema !== 1 || (binding.provider ?? 'codex') !== provider || typeof binding.enabled !== 'boolean' || !/^[a-f0-9]{64}$/.test(binding.worktreeId) || !/^[a-f0-9]{64}$/.test(binding.generation) || binding.gitCommitTool !== undefined && !nativeGitCommitToolPattern.test(binding.gitCommitTool)) throw new Error('INVALID_BINDING')
   if (binding.repositoryId !== target.repositoryId || binding.worktreeId !== target.worktreeId || binding.generation !== target.generation || binding.root !== identity.root || binding.directoryIdentity !== identity.directoryIdentity || binding.commonDirectory !== identity.commonDirectory || binding.spool !== join(hookPaths(root, provider).directory, 'spool')) throw new Error('WORKTREE_STALE')
 }
 
-function readInstallation(root: string, target?: { repositoryId: string; worktreeId: string; generation: string }, desired?: OwnedHook, provider: NativeHookProvider = 'codex'): InstallationState | undefined {
+export function readInstallation(root: string, target?: { repositoryId: string; worktreeId: string; generation: string }, desired?: OwnedHook, provider: NativeHookProvider = 'codex'): InstallationState | undefined {
   checkPaths(root, provider)
   const { configPath, bindingPath, snapshotPath } = hookPaths(root, provider)
   const revisions = new Map([configPath, bindingPath, snapshotPath].map(path => [path, revision(path)]))
@@ -423,22 +471,23 @@ function readInstallation(root: string, target?: { repositoryId: string; worktre
   return { snapshot, binding, owned, text, cleaned: removed ? JSON.stringify(value, null, 2) + '\n' : text, revisions, removed }
 }
 
-function rollbackBase(state: InstallationState): string | null {
+export function rollbackBase(state: InstallationState): string | null {
   const exactConfig = state.text !== null && nativeDigest(state.text) === state.snapshot.installedDigest
   if (!exactConfig) return state.cleaned
   if (state.snapshot.schema === 1) return state.snapshot.before
   return state.snapshot.rollbackBase === undefined ? state.cleaned : state.snapshot.rollbackBase
 }
-function publish(root: string, revisions: Map<string, FileRevision>, path: string, content: string | null, provider: NativeHookProvider = 'codex'): void {
+export function publishHookFile(root: string, revisions: Map<string, FileRevision>, path: string, content: string | null, provider: NativeHookProvider = 'codex', verifyOwner?: (path: string) => void): void {
   const check = () => {
     checkPaths(root, provider)
     for (const [path, expected] of revisions) { assertProfilePath(path, root); assertRevision(path, expected) }
   }
   check()
-  if (content === null) removeConfig(path, root, revisions.get(path)!)
-  else writeConfig(path, root, revisions.get(path)!, content, check)
+  if (content === null) removeConfig(path, root, revisions.get(path)!, verifyOwner)
+  else writeConfig(path, root, revisions.get(path)!, content, check, undefined, verifyOwner)
   revisions.set(path, revision(path))
 }
+const publish = publishHookFile
 
 export function composeNativeHooks(text: string | null, command: string, commandWindows?: string, provider: NativeHookProvider = 'codex'): string {
   if (provider === 'antigravity') {
@@ -477,8 +526,8 @@ export function composeNativeHooks(text: string | null, command: string, command
 export function installNativeHooks(options: { repositoryId: string; record: WorktreeRecord; commandPath: string; commandContent?: string; nodePath: string; gitCommitTool?: string; provider?: NativeHookProvider; authorized: boolean }): { state: 'CONFIGURED' | 'NO_CHANGE'; bindingPath: string; hooksDigest: string; capture: 'UNOBSERVED'; trust: 'UNCHANGED' | 'REVIEW_REQUIRED' } {
   if (!options.authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
   const provider: NativeHookProvider = options.provider ?? 'codex'
-  if (options.gitCommitTool !== undefined && !/^mcp__[a-zA-Z0-9_-]+__commit_git_changes$/.test(options.gitCommitTool)) throw new Error('INVALID_BINDING')
-  if (options.record.detached || options.record.missing || options.record.prunable || !options.record.branch || !options.record.head) throw new Error('WORKTREE_STALE')
+  if (options.gitCommitTool !== undefined && !nativeGitCommitToolPattern.test(options.gitCommitTool)) throw new Error('INVALID_BINDING')
+  if (options.record.missing || options.record.prunable || !options.record.head || (!options.record.detached && !options.record.branch)) throw new Error('WORKTREE_STALE')
   const root = options.record.path, paths = hookPaths(root, provider)
   checkPaths(root, provider)
   const { commandPath, commandContent } = options
@@ -533,11 +582,16 @@ export function installNativeHooks(options: { repositoryId: string; record: Work
   if (Buffer.byteLength(snapshotText) > MAX_INSTALLATION_BYTES) throw new Error('INSTALLATION_SNAPSHOT_LIMIT')
   checkPaths(root, provider)
   for (const [path, expected] of revisions) assertRevision(path, expected)
-  if (commandContent !== undefined && commandRevision?.content === null) publish(root, revisions, commandPath, commandContent, provider)
+  const writeTargets = [
+    ...(commandContent !== undefined && commandRevision?.content === null ? [commandPath] : []),
+    paths.snapshotPath, paths.bindingPath, paths.configPath
+  ]
+  const verifyOwner = verifyConfigWriteOwnership(writeTargets, 5000)
+  if (commandContent !== undefined && commandRevision?.content === null) publish(root, revisions, commandPath, commandContent, provider, verifyOwner)
   prepareNativeSpool(binding.spool)
-  publish(root, revisions, paths.snapshotPath, snapshotText, provider)
-  publish(root, revisions, paths.bindingPath, JSON.stringify(binding), provider)
-  publish(root, revisions, paths.configPath, after, provider)
+  publish(root, revisions, paths.snapshotPath, snapshotText, provider, verifyOwner)
+  publish(root, revisions, paths.bindingPath, JSON.stringify(binding), provider, verifyOwner)
+  publish(root, revisions, paths.configPath, after, provider, verifyOwner)
   if (snapshot.previousOwned) { delete snapshot.previousOwned; publish(root, revisions, paths.snapshotPath, JSON.stringify(snapshot), provider) }
   return { state: 'CONFIGURED', bindingPath: paths.bindingPath, hooksDigest: snapshot.installedDigest, capture: 'UNOBSERVED', trust: 'REVIEW_REQUIRED' }
 }

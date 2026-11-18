@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildSync } from 'esbuild'
+import { removeDirectoryForceSync } from '../core/force-remove'
 import { GitService } from '../core/git-service'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { sessionTargetResolver } from './target'
@@ -22,7 +23,10 @@ import { TestOutputLocalAdapter } from '../validation-ledger/test-output-adapter
 import { createRequire } from 'node:module'
 
 const cleanup: (() => void | Promise<void>)[] = []
-afterEach(async () => { for (const close of cleanup.reverse()) await close(); cleanup.length = 0 })
+afterEach(async () => {
+  const callbacks = cleanup.splice(0).reverse()
+  for (const close of callbacks) await close()
+})
 const data = (result: McpMultimodalToolResult) => {
   const first = result.content[0]
   if (first.type !== 'text') throw new Error('EXPECTED_TEXT')
@@ -30,7 +34,7 @@ const data = (result: McpMultimodalToolResult) => {
 }
 async function setup() {
   const base = mkdtempSync(join(tmpdir(), 'session-sibling-'))
-  cleanup.push(() => rmSync(base, { recursive: true, force: true }))
+  cleanup.push(() => removeDirectoryForceSync(base))
   const main = join(base, 'main'), sibling = join(base, 'sibling'), hooks = join(base, 'empty-hooks')
   mkdirSync(main); mkdirSync(hooks)
   const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${hooks}`, ...args], { cwd, windowsHide: true, encoding: 'utf8' })
@@ -217,7 +221,7 @@ describe('refresh in an explicitly selected sibling Worktree', () => {
     expect(f.git(f.main, 'show-ref')).toBe(refs); expect(f.git(f.main, 'status', '--porcelain')).toBe(state)
     expect(f.store.count()).toBe(1)
   }, 45_000)
-  it('rejects arbitrary paths, foreign, stale, missing and detached selections in the existing repository registry', async () => {
+  it('resolves valid detached HEAD read-only while rejecting arbitrary paths, foreign, stale and missing selections', async () => {
     const f = await setup()
     const foreign = join(f.base, 'foreign')
     mkdirSync(foreign); f.git(foreign, 'init', '-q', '-b', 'foreign')
@@ -229,7 +233,9 @@ describe('refresh in an explicitly selected sibling Worktree', () => {
     const detached = join(f.base, 'detached')
     f.git(f.main, 'worktree', 'add', '-q', '--detach', detached)
     const record = (await f.registry.discover()).worktrees.find(record => record.detached)!
-    await expect(f.resolve({ worktreeId: record.worktreeId, generation: record.generation })).rejects.toThrow('WORKTREE_STALE')
+    const resolvedDetached = await f.resolve({ worktreeId: record.worktreeId, generation: record.generation })
+    expect(resolvedDetached.root).toBe(realpathSync(detached))
+    expect((await f.resolve.discover!()).some(t => t.worktreeId === record.worktreeId)).toBe(true)
     renameSync(f.sibling, f.sibling + '-moved')
     await expect(f.resolve(f.selection)).rejects.toThrow('WORKTREE_STALE')
     const client = new SessionContextClient(f.base, 'A', f.main, () => true, undefined, f.resolve)

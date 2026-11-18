@@ -38,3 +38,17 @@ node <caminho-do-cli> disable --repository=<id-do-catalog> --provider=codex --au
 Autorize o alvo antes de usar `--authorized`. No Codex, instalar em linked Worktree também prepara o manifesto e o binding do checkout principal daquele repositório. No Antigravity, a instalação prepara apenas a Worktree selecionada. Para delegar a preparação das futuras Worktrees gerenciadas criadas pelo fluxo Git do Code Awareness, acrescente `--authorize-managed-worktrees` à instalação autorizada. Para Worktrees externas, execute a instalação a partir do checkout vinculado. O comando aceita `--profile=<diretório>` para perfis isolados de validação.
 
 O helper fica no perfil do Code Awareness, com nome derivado do digest. O repositório pode produzir eventos com o Desktop fechado. A seleção posterior do projeto aciona o fluxo de ingestão existente no SQLite daquele repositório. `status` informa instalação e autorização no Catalog. Origem carregada, trust do cliente e eventos são verificações independentes. `disable` nesta modalidade revoga imediatamente o provedor para o repositório, preservando arquivos de terceiros e a evidência já capturada. A revogação não apaga manifests nem concede trust.
+
+### Codex no perfil do usuário (`$CODEX_HOME/hooks.json`)
+
+Para instalar uma única vez os 7 handlers do Codex em `$CODEX_HOME/hooks.json` (`~/.codex/hooks.json` por padrão), habilitar a captura explícita por repositório sem `binding.json` prévio nem scripts por checkout, e opcionalmente limpar handlers legados por projeto (`--cutover`):
+
+```powershell
+node <caminho-do-cli> status --user
+node <caminho-do-cli> install --user --authorized --codex=<codex.exe> [--enroll-active] [--auto-enroll] [--cutover]
+node <caminho-do-cli> enroll --repository=<id-do-catalog> --authorized [--cutover]
+node <caminho-do-cli> cutover --authorized
+node <caminho-do-cli> disable --user --authorized
+```
+
+A revisão de confiança continua nativa do Codex na primeira ativação ou alteração da definição global. Worktrees ligadas ou em detached HEAD pertencentes a repositórios inscritos fazem bootstrap atômico na primeira captura elegível (`SessionStart` / `PreToolUse`), mantendo saídas neutras para repositórios fora do escopo.

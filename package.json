@@ -101,7 +101,7 @@
     "vitest": "5.1.0"
   },
   "build": {
-    "asarUnpack": ["out/session-context/native-hooks-catalog.cjs"],
+    "asarUnpack": ["out/session-context/native-hooks-catalog.cjs", "out/session-context/native-hook-portable.cjs"],
     "npmRebuild": false,
     "beforePack": "./scripts/runtime-preview/pack.cjs",
     "afterPack": "./scripts/runtime-preview/pack.cjs",

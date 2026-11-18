@@ -1,13 +1,57 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
+import { inspectUserCodexInstallation } from './native-hook-profile'
+import { openNativeHookCatalog, readNativeEnrollment, readUserCodexProfile } from './native-hook-catalog'
 import type { CheckpointRegistry } from './checkpoint-registry'
 import { unknownNativeTrust, type NativeTrustObservation } from './native-hook-preflight'
 import { nativeCaptureConfiguration } from './native-capture-window'
-import { nativeCaptureRuntimeId, nativeCaptureRuntimeStartedAt, nativeHookSource, nativeSessionEntityId, readNativeBinding, type NativeHookProvider } from './native-hooks'
+import { nativeBindingPath, nativeCaptureRuntimeId, nativeCaptureRuntimeStartedAt, nativeHookSource, nativeSessionEntityId, readNativeBinding, type NativeHookProvider } from './native-hooks'
 import { readNativeGapHistory } from './native-hook-diagnostics'
-import { join } from 'node:path'
 
-export function nativeHookReadiness(registry: CheckpointRegistry, root: string, target: { worktreeId: string; generation: string }, trust: NativeTrustObservation = unknownNativeTrust('TRUST_NOT_INSPECTED'), provider: NativeHookProvider = 'codex') {
-  const { handlers: _handlers, ...installation } = inspectNativeInstallation(root, { repositoryId: registry.repositoryId, ...target }, process.platform, provider)
+export function nativeHookReadiness(
+  registry: CheckpointRegistry,
+  root: string,
+  target: { worktreeId: string; generation: string },
+  trust: NativeTrustObservation = unknownNativeTrust('TRUST_NOT_INSPECTED'),
+  provider: NativeHookProvider = 'codex',
+  options?: { profile?: string; codexHome?: string }
+) {
+  let { handlers: _handlers, ...installation } = inspectNativeInstallation(root, { repositoryId: registry.repositoryId, ...target }, process.platform, provider)
+  let bootstrap: { state: 'AVAILABLE' | 'UNAVAILABLE'; reasonCode: string } | undefined
+  let userProfileConfigured = false
+  if (provider === 'codex' && options?.profile) {
+    try {
+      const userInstall = inspectUserCodexInstallation(options.profile, options.codexHome, process.platform)
+      userProfileConfigured = userInstall.state === 'CONFIGURED'
+      const db = openNativeHookCatalog(options.profile, true)
+      try {
+        const profileRow = readUserCodexProfile(db, 'codex')
+        const enrollment = readNativeEnrollment(db, registry.repositoryId, 'codex')
+        if (profileRow?.enabled && userProfileConfigured && enrollment?.externalPreparation) {
+          bootstrap = { state: 'AVAILABLE', reasonCode: 'USER_BOOTSTRAP_AVAILABLE' }
+          if (installation.state === 'MISSING') {
+            installation = {
+              state: 'CONFIGURED',
+              reasonCode: 'USER_PROFILE_READY_BINDING_PENDING',
+              digest: userInstall.digest,
+              installed: userInstall.installed,
+              expected: userInstall.expected
+            }
+          }
+        } else if (profileRow?.enabled && !userProfileConfigured) {
+          bootstrap = { state: 'UNAVAILABLE', reasonCode: userInstall.reasonCode }
+          if (installation.state === 'MISSING') {
+            const { handlers: _u, ...userRest } = userInstall
+            installation = userRest
+          }
+        } else {
+          bootstrap = { state: 'UNAVAILABLE', reasonCode: profileRow?.enabled ? 'HOOK_ENROLLMENT_REQUIRED' : 'NATIVE_CONFIG_MISSING' }
+        }
+      } finally { db.close() }
+    } catch {}
+  }
+
   if (trust.expiresAt && Date.parse(trust.expiresAt) <= Date.now()) trust = unknownNativeTrust('TRUST_EXPIRED')
   if (trust.installationDigest && trust.installationDigest !== installation.digest) trust = unknownNativeTrust('HOOK_CONFIG_DRIFT')
   if (trust.loadedSource === 'MAIN' && (!trust.sharedSourceDigest ||
@@ -30,7 +74,7 @@ export function nativeHookReadiness(registry: CheckpointRegistry, root: string, 
       event.event !== 'SessionEnd' && event.sessionId === trust.sessionId && Date.parse(event.observedAt) >= Math.max(Date.parse(trust.connectedAt), nativeCaptureRuntimeStartedAt)
   if (trustSatisfied && event?.capture) {
     try {
-      const bindingPath = join(root, provider === 'antigravity' ? '.code-awareness/native-hooks/antigravity/binding.json' : '.code-awareness/native-hooks/binding.json')
+      const bindingPath = nativeBindingPath(root, provider)
       const binding = readNativeBinding(bindingPath)
       const history = readNativeGapHistory(binding.spool)
       const currentSource = provider === 'antigravity' ? `NATIVE_CURRENT:antigravity:${target.worktreeId}:${target.generation}` : `NATIVE_CURRENT:${target.worktreeId}:${target.generation}`
@@ -45,8 +89,17 @@ export function nativeHookReadiness(registry: CheckpointRegistry, root: string, 
       }
     } catch {}
   }
-  return { schemaVersion: 1, ...target, installation,
+  const bindingPresent = existsSync(nativeBindingPath(root, provider))
+  return {
+    schemaVersion: 1, ...target, installation,
+    ...(bootstrap ? { bootstrap, bindingState: bindingPresent ? 'PRESENT' : 'PENDING_FIRST_SESSION' } : {}),
     trust: authorization, execution, captureReadiness,
-    nextEvidence: installation.repairability === 'REPAIRABLE' ? 'REQUEST_REPAIR_APPROVAL' : installation.state === 'MISSING' ? 'REQUEST_INSTALLATION_APPROVAL' : installation.state !== 'CONFIGURED' ? 'INSPECT_INSTALLATION_READ_ONLY' : execution.state === 'FAILED' ? 'INSPECT_FAILED_EVENT_READ_ONLY' :
-      trust.state === 'UNTRUSTED' || trust.state === 'PARTIAL' ? 'REQUEST_CLIENT_AUTHORIZATION_REVIEW' : (provider === 'antigravity' || trust.state === 'TRUSTED') && execution.state === 'UNOBSERVED' ? 'OBSERVE_REAL_WORKFLOW_WITH_CONSENT' : 'REQUEST_CLIENT_INSPECTION' }
+    nextEvidence: installation.repairability === 'REPAIRABLE' ? 'REQUEST_REPAIR_APPROVAL'
+      : installation.state === 'MISSING' ? 'REQUEST_INSTALLATION_APPROVAL'
+      : installation.state !== 'CONFIGURED' ? 'INSPECT_INSTALLATION_READ_ONLY'
+      : execution.state === 'FAILED' ? 'INSPECT_FAILED_EVENT_READ_ONLY'
+      : trust.state === 'UNTRUSTED' || trust.state === 'PARTIAL' ? 'REQUEST_CLIENT_AUTHORIZATION_REVIEW'
+      : (provider === 'antigravity' || trust.state === 'TRUSTED') && execution.state === 'UNOBSERVED' ? 'OBSERVE_REAL_WORKFLOW_WITH_CONSENT'
+      : 'REQUEST_CLIENT_INSPECTION'
+  }
 }

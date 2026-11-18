@@ -9,7 +9,12 @@ export function nativeCaptureConfiguration(binding: NativeHookBinding): string |
   try {
     const provider = binding.provider ?? 'codex'
     const bindingPath = join(binding.root, provider === 'antigravity' ? '.code-awareness/native-hooks/antigravity/binding.json' : '.code-awareness/native-hooks/binding.json')
-    const configPath = join(binding.root, provider === 'antigravity' ? '.agents/hooks.json' : '.codex/hooks.json')
+    const configPath = provider === 'codex' && binding.configPath
+      ? binding.configPath
+      : join(binding.root, provider === 'antigravity' ? '.agents/hooks.json' : '.codex/hooks.json')
+    if (provider === 'codex' && binding.configPath && (lstatSync(configPath).isSymbolicLink() || realpathSync(configPath) !== resolve(configPath))) {
+      return undefined
+    }
     const revision = (path: string) => {
       const stat = lstatSync(path, { bigint: true })
       return [stat.dev, stat.ino, stat.birthtimeNs, stat.mtimeNs, stat.ctimeNs].map(String).join(':')

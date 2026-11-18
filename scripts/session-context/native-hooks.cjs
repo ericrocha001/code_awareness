@@ -4,7 +4,7 @@ const { existsSync, readFileSync, lstatSync, realpathSync } = require('node:fs')
 const { createHash } = require('node:crypto')
 const { isQualifiedCodexHookVersion } = require('../../src/shared/native-hook-preflight.cjs')
 const { buildSync } = require('esbuild')
-if (process.argv.some(value => value.startsWith('--repository='))) {
+if (process.argv.some(value => value.startsWith('--repository=') || value === '--user' || value === '--scope=user')) {
   require('../../out/session-context/native-hooks-catalog.cjs').runNativeHookCli(process.argv.slice(2)).then(
     result => console.log(JSON.stringify(result)),
     error => { console.error(JSON.stringify({ code: /^[A-Z_]+$/.test(error?.message) ? error.message : 'HOOK_OPERATION_FAILED' })); process.exitCode = 1 }
