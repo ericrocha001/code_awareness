@@ -1,10 +1,14 @@
 export type WebAdapterSite = 'deepseek' | 'qwen'
 
+export type ChatTurnIdentitySource = 'dom-attribute' | 'dom-id' | 'fallback-position' | 'ambiguous'
+
 export interface ChatDomTurn {
   messageId: string
   role: 'assistant' | 'user' | 'system'
   text: string
   isComplete: boolean
+  identitySource?: ChatTurnIdentitySource
+  element?: Element
 }
 
 export interface SendMessageResult {
@@ -64,6 +68,76 @@ function isCodeWrapperChromeElement(el: Element): boolean {
   )
 }
 
+const REASONING_CLASS_RE =
+  /\b(?:ds-think|ds-thinking|ds-thought|think-content|thinking-content|thought-content|reasoning-content|thinking-block|reasoning-block|chain-of-thought)\b/i
+const REASONING_TESTID_RE = /think|thought|reason/i
+const STRONG_IDENTITY_ATTRS = ['data-message-id', 'data-msg-id', 'data-turn-id'] as const
+const STREAMING_ATTR_SELECTOR =
+  '[data-streaming="true"], [aria-busy="true"], [data-complete="false"], [data-state="streaming"], [data-status="streaming"]'
+
+function isReasoningElement(el: Element): boolean {
+  if (el.getAttribute('data-reasoning') === 'true' || el.getAttribute('data-thinking') === 'true') {
+    return true
+  }
+  const roleAttr = (el.getAttribute('data-role') ?? '').trim().toLowerCase()
+  if (roleAttr === 'reasoning' || roleAttr === 'thinking' || roleAttr === 'thought') {
+    return true
+  }
+  const testId = el.getAttribute('data-testid') ?? ''
+  if (testId && REASONING_TESTID_RE.test(testId)) {
+    return true
+  }
+  const cls = typeof el.className === 'string' ? el.className : ''
+  return Boolean(cls && REASONING_CLASS_RE.test(cls))
+}
+
+function isInsideReasoning(el: Element, boundary: Element): boolean {
+  let current: Element | null = el
+  while (current) {
+    if (isReasoningElement(current)) return true
+    if (current === boundary) break
+    current = current.parentElement
+  }
+  return false
+}
+
+function compareDomDocumentOrder(a: Element, b: Element): number {
+  if (a === b) return 0
+  if (typeof a.compareDocumentPosition !== 'function') return 0
+  const pos = a.compareDocumentPosition(b)
+  if (pos & 4) return -1
+  if (pos & 2) return 1
+  return 0
+}
+
+function resolveElementStrongIdentity(
+  el: Element
+): { messageId: string; identitySource: 'dom-attribute' | 'dom-id' } | null {
+  for (const attr of STRONG_IDENTITY_ATTRS) {
+    const val = el.getAttribute(attr)?.trim()
+    if (val) return { messageId: val, identitySource: 'dom-attribute' }
+  }
+  const domId = el.getAttribute('id')?.trim()
+  if (domId) {
+    return { messageId: domId, identitySource: 'dom-id' }
+  }
+  const descendantIds = new Set<string>()
+  for (const desc of Array.from(el.querySelectorAll('[data-message-id], [data-msg-id], [data-turn-id]'))) {
+    if (isInsideReasoning(desc, el)) continue
+    for (const attr of STRONG_IDENTITY_ATTRS) {
+      const val = desc.getAttribute(attr)?.trim()
+      if (val) {
+        descendantIds.add(val)
+        break
+      }
+    }
+  }
+  if (descendantIds.size === 1) {
+    return { messageId: Array.from(descendantIds)[0], identitySource: 'dom-attribute' }
+  }
+  return null
+}
+
 function serializeDomNodeToMarkdown(node: Node, insideBlockquote = false): string {
   if (node.nodeType === 3) {
     const text = node.textContent ?? ''
@@ -73,7 +147,7 @@ function serializeDomNodeToMarkdown(node: Node, insideBlockquote = false): strin
   if (!isElementNode(node)) return ''
 
   const tag = node.tagName.toUpperCase()
-  if (tag === 'STYLE' || tag === 'SCRIPT' || isCodeWrapperChromeElement(node)) {
+  if (tag === 'STYLE' || tag === 'SCRIPT' || isCodeWrapperChromeElement(node) || isReasoningElement(node)) {
     return ''
   }
 
@@ -119,25 +193,46 @@ export function extractTurnMarkdownText(container: Element): string {
   return serializeDomNodeToMarkdown(container, false).replace(/\n{3,}/g, '\n\n').trim()
 }
 
-export function collectTopLevelMessageElements(root: ParentNode, selectors: readonly string[]): Element[] {
-  const matched: Element[] = []
+function collectTopLevelMatchedElements(
+  root: ParentNode,
+  selectors: readonly string[],
+  predicate?: (el: Element) => boolean
+): Element[] {
   const matchedSet = new Set<Element>()
   for (const selector of selectors) {
-    for (const el of Array.from(root.querySelectorAll(selector))) {
-      if (!matchedSet.has(el)) {
-        matchedSet.add(el)
-        matched.push(el)
-      }
+    let nodes: NodeListOf<Element>
+    try {
+      nodes = root.querySelectorAll(selector)
+    } catch {
+      continue
+    }
+    for (const el of Array.from(nodes)) {
+      if (predicate && !predicate(el)) continue
+      matchedSet.add(el)
     }
   }
-  return matched.filter((el) => {
+  const topLevel: Element[] = []
+  for (const el of matchedSet) {
     let parent = el.parentElement
+    let hasMatchedAncestor = false
     while (parent) {
-      if (matchedSet.has(parent)) return false
+      if (matchedSet.has(parent)) {
+        hasMatchedAncestor = true
+        break
+      }
+      if (parent === (root as unknown as Element)) break
       parent = parent.parentElement
     }
-    return true
-  })
+    if (!hasMatchedAncestor) {
+      topLevel.push(el)
+    }
+  }
+  topLevel.sort(compareDomDocumentOrder)
+  return topLevel
+}
+
+export function collectTopLevelMessageElements(root: ParentNode, selectors: readonly string[]): Element[] {
+  return collectTopLevelMatchedElements(root, selectors)
 }
 
 export function isVisibleElement(el: Element | null): el is HTMLElement {
@@ -147,6 +242,13 @@ export function isVisibleElement(el: Element | null): el is HTMLElement {
   const styleAttr = el.getAttribute('style') ?? ''
   if (/display\s*:\s*none|visibility\s*:\s*hidden/i.test(styleAttr)) return false
   return true
+}
+
+export function readComposerText(composer: HTMLElement): string {
+  if (composer.tagName === 'TEXTAREA' || composer.tagName === 'INPUT') {
+    return (composer as HTMLTextAreaElement | HTMLInputElement).value ?? ''
+  }
+  return composer.textContent ?? ''
 }
 
 export function setInputOrEditableText(
@@ -216,7 +318,22 @@ export function createDebouncedMutationObserver(
     subtree: true,
     characterData: true,
     attributes: true,
-    attributeFilter: ['data-message-id', 'data-role', 'data-streaming', 'aria-busy', 'aria-disabled', 'disabled']
+    attributeFilter: [
+      'id',
+      'data-message-id',
+      'data-msg-id',
+      'data-turn-id',
+      'data-role',
+      'data-streaming',
+      'data-complete',
+      'data-state',
+      'data-status',
+      'aria-busy',
+      'aria-disabled',
+      'disabled',
+      'hidden',
+      'aria-hidden'
+    ]
   })
 
   return () => {
@@ -287,26 +404,58 @@ export class ConfiguredWebChatAdapter implements WebChatAdapter {
   readTurns(root: ParentNode): ChatDomTurn[] {
     const topLevel = collectTopLevelMessageElements(root, this.config.messageSelectors)
     const pageGenerating = this.isGenerating(root)
-    const contentSelector = this.config.contentSelectors.join(', ')
+    const extractedIds = topLevel.map((el) => resolveElementStrongIdentity(el))
+    const identityCounts = new Map<string, number>()
+    for (const item of extractedIds) {
+      if (!item) continue
+      const key = `${item.identitySource}:${item.messageId}`
+      identityCounts.set(key, (identityCounts.get(key) ?? 0) + 1)
+    }
+
     const turns: ChatDomTurn[] = []
 
     topLevel.forEach((el, index) => {
       const role = this.config.resolveRole(el)
-      const contentEl = (contentSelector ? el.querySelector(contentSelector) : null) ?? el
-      const text = extractTurnMarkdownText(contentEl)
-      const messageId =
-        el.getAttribute('data-message-id') ??
-        el.getAttribute('id') ??
-        `${this.site}-turn-${index}`
-      const nodeStreaming =
+      const contentContainers =
+        this.config.contentSelectors.length > 0
+          ? collectTopLevelMatchedElements(el, this.config.contentSelectors, (match) => !isInsideReasoning(match, el))
+          : []
+      const text =
+        contentContainers.length > 0
+          ? contentContainers
+              .map((container) => extractTurnMarkdownText(container))
+              .filter((part) => part.length > 0)
+              .join('\n\n')
+          : extractTurnMarkdownText(el)
+
+      const extracted = extractedIds[index]
+      let messageId: string
+      let identitySource: ChatTurnIdentitySource
+      if (extracted) {
+        messageId = extracted.messageId
+        const count = identityCounts.get(`${extracted.identitySource}:${extracted.messageId}`) ?? 0
+        identitySource = count > 1 ? 'ambiguous' : extracted.identitySource
+      } else {
+        messageId = `${this.site}-turn-${index}`
+        identitySource = 'fallback-position'
+      }
+
+      const hasStreamingAttr =
         el.getAttribute('data-streaming') === 'true' ||
         el.getAttribute('aria-busy') === 'true' ||
-        Boolean(el.querySelector('[data-streaming="true"], [aria-busy="true"]'))
+        el.getAttribute('data-complete') === 'false' ||
+        el.getAttribute('data-state') === 'streaming' ||
+        el.getAttribute('data-status') === 'streaming'
+      const nodeStreaming = hasStreamingAttr || Boolean(el.querySelector(STREAMING_ATTR_SELECTOR))
+      const hasActiveReasoning =
+        el.getAttribute('data-thinking') === 'true' ||
+        el.getAttribute('data-reasoning') === 'true' ||
+        Boolean(el.querySelector('[data-thinking="true"], [data-reasoning="true"]'))
       const isLast = index === topLevel.length - 1
-      const isComplete = !nodeStreaming && (!isLast || !pageGenerating)
+      const isComplete = !nodeStreaming && (!isLast || !pageGenerating) && !(role === 'assistant' && hasActiveReasoning && !text)
 
       if (text || role === 'assistant') {
-        turns.push({ messageId, role, text, isComplete })
+        turns.push({ messageId, role, text, isComplete, identitySource, element: el })
       }
     })
 
@@ -321,9 +470,19 @@ export class ConfiguredWebChatAdapter implements WebChatAdapter {
     if (!composer) {
       return { ok: false, reason: 'COMPOSER_NOT_FOUND' }
     }
+    if (readComposerText(composer).trim().length > 0) {
+      return { ok: false, reason: 'USER_DRAFT_PRESENT' }
+    }
 
     setInputOrEditableText(composer, text)
     await new Promise<void>((resolve) => setTimeout(resolve, 0))
+
+    if (this.isGenerating(root)) {
+      if (readComposerText(composer) === text) {
+        setInputOrEditableText(composer, '')
+      }
+      return { ok: false, reason: 'STREAMING_IN_PROGRESS' }
+    }
 
     let sendBtn: HTMLElement | null = null
     for (const selector of this.config.sendButtonSelectors) {
@@ -338,6 +497,9 @@ export class ConfiguredWebChatAdapter implements WebChatAdapter {
     }
 
     if (!sendBtn) {
+      if (readComposerText(composer) === text) {
+        setInputOrEditableText(composer, '')
+      }
       return { ok: false, reason: 'SEND_BUTTON_UNAVAILABLE' }
     }
 
