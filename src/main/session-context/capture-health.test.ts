@@ -276,3 +276,75 @@ it.each(['0.12.2', '0.13.4'])('recognizes numeric pending turns and qualified ag
   f.mode('empty')
   expect(await provider.inspectCapture()).toMatchObject({ configured: true, reason: 'SESSION_UNOBSERVED' })
 })
+
+it('recognizes official conditional Entire Git hooks with absolute paths while keeping capture independent and rejecting malformed lines', async () => {
+  const f = fixture('A', '0.13.4')
+  const conditionalHook = (exe: string, handler: 'prepare-commit-msg' | 'post-commit') =>
+    handler === 'prepare-commit-msg'
+      ? `#!/bin/sh\n# Entire CLI hooks\nif [ -f '${exe}' ]; then '${exe}' hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true; else :; fi\n`
+      : `#!/bin/sh\n# Entire CLI hooks\n# Post-commit hook: condense session data if commit has Entire-Checkpoint trailer\nif [ -f '${exe}' ]; then '${exe}' hooks git post-commit 2>/dev/null || true; else :; fi\n`
+  const writeHooks = (prepare: string, post: string) => {
+    writeFileSync(join(f.hooks, 'prepare-commit-msg'), prepare)
+    writeFileSync(join(f.hooks, 'post-commit'), post)
+  }
+
+  f.mode('unobserved')
+  for (const exe of [
+    'C:\\Users\\fixture\\.local\\bin\\entire.exe',
+    'C:\\Program Files\\Entire CLI\\entire.exe',
+    '/Users/fixture/Application Support/Entire CLI/entire'
+  ]) {
+    writeHooks(conditionalHook(exe, 'prepare-commit-msg'), conditionalHook(exe, 'post-commit'))
+    const health = await f.inspect({ trigger: 'RECHECK' })
+    expect(health).toMatchObject({
+      state: 'READY_CONFIGURED',
+      reason: 'SESSION_UNOBSERVED',
+      hooks: { git: 'READY', codex: 'READY' },
+      capture: { state: 'UNOBSERVED' }
+    })
+    expect(health.state).not.toBe('CAPTURE_OBSERVED')
+    expect(health.checkpoint.state).not.toBe('CHECKPOINT_VERIFIED')
+  }
+
+  writeHooks(
+    '#!/bin/sh\nexec entire.exe hooks git prepare-commit-msg "$1" "$2" 2>/dev/null || true\n',
+    '#!/bin/sh\nexec entire.exe hooks git post-commit\n'
+  )
+  expect(await f.inspect({ trigger: 'RECHECK' })).toMatchObject({
+    state: 'READY_CONFIGURED',
+    reason: 'SESSION_UNOBSERVED',
+    hooks: { git: 'READY', codex: 'READY' },
+    capture: { state: 'UNOBSERVED' }
+  })
+
+  const validPrepare = conditionalHook('C:\\Users\\fixture\\.local\\bin\\entire.exe', 'prepare-commit-msg')
+  const validPost = conditionalHook('C:\\Users\\fixture\\.local\\bin\\entire.exe', 'post-commit')
+  const negativePostHooks = [
+    `#!/bin/sh\n# if [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\fixture\\.local\\bin\\entire.exe' hooks git post-commit 2>/dev/null || true; else :; fi\n`,
+    `#!/bin/sh\necho "if [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\fixture\\.local\\bin\\entire.exe' hooks git post-commit 2>/dev/null || true; else :; fi"\n`,
+    conditionalHook('C:\\Users\\fixture\\.local\\bin\\other.exe', 'post-commit'),
+    `#!/bin/sh\nif [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\fixture\\.local\\bin\\entire.exe' hooks codex post-commit 2>/dev/null || true; else :; fi\n`,
+    `#!/bin/sh\nif [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\fixture\\.local\\bin\\entire.exe' hooks git post-commit-extra 2>/dev/null || true; else :; fi\n`,
+    conditionalHook('C:\\Users\\fixture\\.local\\bin\\entire.exe', 'prepare-commit-msg'),
+    ...['./entire.exe', '../bin/entire.exe', 'C:entire.exe', 'C:\\Users\\fixture\\..\\entire.exe',
+      '$HOME/.local/bin/entire', 'C:\\Users\\$USER\\entire.exe', '/usr/local/bin/$(entire)', 'C:\\Users\\fixture;evil\\entire.exe',
+      '\\\\server\\share\\entire.exe', '//server/share/entire.exe', '\\\\.\\C:\\entire.exe', 'C:\\Users\\CON\\entire.exe']
+      .map(candidate => conditionalHook(candidate, 'post-commit')),
+    `#!/bin/sh\nif [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\other\\.local\\bin\\entire.exe' hooks git post-commit 2>/dev/null || true; else :; fi\n`,
+    `#!/bin/sh\nif [ -f 'C:\\Users\\fixture\\.local\\bin\\entire.exe' ]; then 'C:\\Users\\fixture\\.local\\bin\\entire.exe' hooks git post-commit 2>/dev/null || true\n`
+  ]
+  for (const post of negativePostHooks) {
+    writeHooks(validPrepare, post)
+    expect(await f.inspect({ trigger: 'RECHECK' })).toMatchObject({
+      state: 'UNAVAILABLE',
+      reason: 'HOOK_INCOMPATIBLE',
+      hooks: { git: 'HOOK_INCOMPATIBLE' }
+    })
+  }
+  writeHooks(validPost, validPost)
+  expect(await f.inspect({ trigger: 'RECHECK' })).toMatchObject({
+    state: 'UNAVAILABLE',
+    reason: 'HOOK_INCOMPATIBLE',
+    hooks: { git: 'HOOK_INCOMPATIBLE' }
+  })
+}, 30000)
