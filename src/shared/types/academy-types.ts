@@ -280,6 +280,88 @@ export type AcademySkillVersionMetadata = Omit<AcademySkillVersion, 'package'>
 export type AcademyHistoryOptions = { metadataOnly?: boolean; version?: never } | { version: number; metadataOnly?: never }
 export type AcademyHistoryResult = AcademySkillVersion[] | AcademySkillVersionMetadata[] | AcademySkillVersion
 
+export type AcademyVersionContentState = 'PRESENT' | 'DELETED'
+
+export interface AcademyChangeListFilter {
+  skillId?: string
+  query?: string
+  after?: string
+  before?: string
+  origin?: AcademyVersionOrigin
+  limit?: number
+  cursor?: string
+}
+
+export interface AcademyChangeRecord {
+  skillId: string
+  skillName: string
+  version: number
+  previousVersion: number | null
+  createdAt: string
+  origin: AcademyVersionOrigin
+  packageHash: string
+  contentState?: AcademyVersionContentState
+  previousContentState?: AcademyVersionContentState
+}
+
+export interface AcademyChangeListResult {
+  changes: AcademyChangeRecord[]
+  nextCursor?: string
+}
+
+export interface AcademyChangeDiffInput {
+  skillId: string
+  targetVersion: number
+  baseVersion?: number
+  path?: string
+  offset?: number
+  limit?: number
+  textOffset?: number
+  textLimit?: number
+}
+
+export interface AcademyChangeDiffResult {
+  skillId: string
+  skillName: string
+  baseVersion: number | null
+  targetVersion: number
+  basePackageHash: string | null
+  targetPackageHash: string
+  baseContentState: AcademyVersionContentState | null
+  targetContentState: AcademyVersionContentState
+  contentState?: 'DELETED'
+  path?: string
+  changes: {
+    items: Array<{
+      path: string
+      kind: 'ADDED' | 'REMOVED' | 'MODIFIED'
+      literalEffect: 'WHITESPACE_ONLY' | 'UNKNOWN'
+      side: 'BEFORE' | 'AFTER'
+      line: number
+      lineCount: number
+      content: {
+        text: string
+        offset: number
+        totalCharacters: number
+        nextOffset: number | null
+      }
+    }>
+    total: number
+    offset: number
+    nextOffset: number | null
+  }
+  frontmatter: {
+    resolved: boolean
+    changedProperties: {
+      items: string[]
+      total: number
+      offset: number
+      nextOffset: number | null
+    }
+  }
+  semanticEffect: 'NOT_ASSESSED'
+}
+
 export interface AcademySkillDetail extends AcademySkillSummary {
   current: AcademySkillVersion
 }

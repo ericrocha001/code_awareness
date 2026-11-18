@@ -26,7 +26,8 @@ import type {
   AcademyImportConfirmationPreference
 } from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
-import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
+import { compareAcademyPackages, windowNumber } from './academy-change-evidence'
+import type { AcademyChangeDiffResult, AcademyChangeListResult, AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
 const PUBLICATION_CONSENT_VERSION = 'auto-include-global-skills/v1'
 const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
@@ -149,6 +150,53 @@ export class AcademyService {
     if (hasMetadata && (hasVersion || typeof options.metadataOnly !== 'boolean')) throw new AcademyError('INVALID_ARGUMENT')
     if (hasVersion && (!Number.isSafeInteger(options.version) || Number(options.version) < 1)) throw new AcademyError('INVALID_ARGUMENT')
     return this.store.history(id, options)
+  }
+  listChanges(input?: unknown): AcademyChangeListResult {
+    this.assertNotClosed()
+    return this.store.listChanges(input)
+  }
+  getChangeDiff(input: unknown): AcademyChangeDiffResult {
+    this.assertNotClosed()
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new AcademyError('INVALID_ARGUMENT')
+    const raw = input as Record<string, unknown>
+    if (Object.keys(raw).some(key => !['skillId', 'targetVersion', 'baseVersion', 'path', 'offset', 'limit', 'textOffset', 'textLimit'].includes(key))) {
+      throw new AcademyError('INVALID_ARGUMENT')
+    }
+    if (typeof raw.skillId !== 'string' || !raw.skillId.trim()) throw new AcademyError('INVALID_ARGUMENT')
+    if (!Number.isSafeInteger(raw.targetVersion) || Number(raw.targetVersion) < 1) throw new AcademyError('INVALID_ARGUMENT')
+    if (raw.baseVersion !== undefined && (!Number.isSafeInteger(raw.baseVersion) || Number(raw.baseVersion) < 1)) {
+      throw new AcademyError('INVALID_ARGUMENT')
+    }
+    if (raw.path !== undefined && (typeof raw.path !== 'string' || !raw.path)) throw new AcademyError('INVALID_ARGUMENT')
+
+    const offset = windowNumber(raw.offset as number | undefined, 0, Number.MAX_SAFE_INTEGER)
+    const limit = windowNumber(raw.limit as number | undefined, 10, 50)
+    const textOffset = windowNumber(raw.textOffset as number | undefined, 0, Number.MAX_SAFE_INTEGER)
+    const textLimit = windowNumber(raw.textLimit as number | undefined, 400, 4000)
+    if (!limit || !textLimit) throw new AcademyError('INVALID_ARGUMENT')
+
+    const path = raw.path as string | undefined
+    const { skillId, skillName, base, target } = this.store.readChangeDiffPair(
+      raw.skillId,
+      Number(raw.targetVersion),
+      raw.baseVersion === undefined ? undefined : Number(raw.baseVersion)
+    )
+    const diff = compareAcademyPackages(base ? base.package : null, target.package, { path, offset, limit, textOffset, textLimit })
+    return {
+      skillId,
+      skillName,
+      baseVersion: base ? base.version : null,
+      targetVersion: target.version,
+      basePackageHash: base ? base.packageHash : null,
+      targetPackageHash: target.packageHash,
+      baseContentState: base ? (base.contentState ?? 'PRESENT') : null,
+      targetContentState: target.contentState ?? 'PRESENT',
+      ...(target.contentState === 'DELETED' ? { contentState: 'DELETED' as const } : {}),
+      ...(path !== undefined ? { path } : {}),
+      changes: diff.changes,
+      frontmatter: diff.frontmatter,
+      semanticEffect: diff.semanticEffect
+    }
   }
   analyzeChangeImpact(input: unknown) { this.assertNotClosed(); return analyzeAcademyImpact(this.store, input) }
   verifyChangeImpact(input: unknown) { return verifyAcademyImpact(this.store, input) }

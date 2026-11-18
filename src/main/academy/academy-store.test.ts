@@ -537,5 +537,163 @@ describe('AcademyStore', () => {
       ])
     } finally { store.close() }
   })
+
+  it('lists global chronological changes with deterministic tie-breaking, stable keyset pagination, tombstones, filters, and zero package reads', () => {
+    const store = open()
+    const db = (store as unknown as { db: Database.Database }).db
+    try {
+      const a = store.create({ package: pkg('alpha_one', 'body mentions beta_two'), scope: 'GLOBAL', origin: 'UI' })
+      const b = store.create({ package: pkg('beta_two', 'body mentions alpha_one'), scope: 'PROJECT', origin: 'IMPORT' })
+      store.update({ skillId: a.id, expectedVersion: 1, package: pkg('alpha_one', 'v2'), origin: 'MCP' })
+      store.setEnabled(b.id, false, 1)
+      store.update({ skillId: b.id, expectedVersion: 1, package: pkg('beta_two', 'v2 disabled edit'), origin: 'LOCAL_CLI' })
+
+      // Cutover to local authority for global delete/reintroduce lifecycle
+      store.acceptGitSnapshots([gitSnapshot('a', null, [pkg('alpha_one', 'v2')])], null)
+      store.enableLocalAuthority('a')
+      store.deleteGlobalSkill(a.id, 2) // v3 DELETED
+      store.restoreDeletedGlobalSkill(a.id, 3) // v4 PRESENT (reintroduction)
+
+      // Introduce deterministic timestamps including an exact timestamp tie and a version gap (v5 created after deleting v2? No, delete v2 row on b after creating v3 to test gap)
+      store.update({ skillId: b.id, expectedVersion: 2, package: pkg('beta_two', 'v3'), origin: 'MCP' })
+      db.prepare('DELETE FROM academy_versions WHERE skill_id=? AND version=2').run(b.id)
+
+      const [firstId, secondId] = a.id < b.id ? [a.id, b.id] : [b.id, a.id]
+      const timestamps: Array<[string, number, string]> = [
+        [a.id, 1, '2026-11-01T10:00:00.000Z'],
+        [b.id, 1, '2026-11-02T10:00:00.000Z'],
+        [a.id, 2, '2026-11-03T10:00:00.000Z'],
+        [firstId, firstId === a.id ? 3 : 3, '2026-11-04T10:00:00.000Z'],
+        [secondId, secondId === a.id ? 3 : 3, '2026-11-04T10:00:00.000Z'],
+        [a.id, 4, '2026-11-05T10:00:00.000Z']
+      ]
+      for (const [skillId, version, createdAt] of timestamps) {
+        db.prepare('UPDATE academy_versions SET created_at=? WHERE skill_id=? AND version=?').run(createdAt, skillId, version)
+      }
+
+      // Corrupt package JSON in DB (leaving only b:3 intact for the mid-pagination update test) to prove listChanges never reads or parses packages
+      db.prepare('UPDATE academy_versions SET artifacts_json=? WHERE NOT (skill_id=? AND version=3)').run('{corrupt-json', b.id)
+      const prepare = vi.spyOn(db, 'prepare')
+      const historySpy = vi.spyOn(store, 'history')
+
+      const page1 = store.listChanges({ limit: 2 })
+      expect(page1.changes).toHaveLength(2)
+      expect(page1.nextCursor).toBeTruthy()
+      expect(page1.changes[0]).toMatchObject({
+        skillId: a.id,
+        skillName: 'alpha_one',
+        version: 4,
+        previousVersion: 3,
+        createdAt: '2026-11-05T10:00:00.000Z',
+        contentState: 'PRESENT',
+        previousContentState: 'DELETED'
+      })
+      // Tie at 2026-11-04T10:00:00.000Z breaks by skill_id ASC
+      expect(page1.changes[1]).toMatchObject({
+        skillId: firstId,
+        version: 3
+      })
+
+      const timelineSql = prepare.mock.calls.map(([sql]) => String(sql)).filter(sql => sql.includes('academy_versions'))
+      expect(timelineSql).toHaveLength(1)
+      expect(timelineSql[0]).not.toMatch(/\*|skill_md|artifacts_json/)
+      expect(historySpy).not.toHaveBeenCalled()
+      prepare.mockRestore()
+      historySpy.mockRestore()
+
+      // Insert a newer version between page 1 and page 2; must not shift or duplicate page 2
+      store.update({ skillId: b.id, expectedVersion: 3, package: pkg('beta_two', 'v4 newer'), origin: 'UI' })
+      db.prepare('UPDATE academy_versions SET created_at=? WHERE skill_id=? AND version=4').run('2026-11-06T10:00:00.000Z', b.id)
+      // Now corrupt ALL remaining versions too (including b:3 and b:4) before reading remaining pages
+      db.prepare('UPDATE academy_versions SET artifacts_json=?').run('{corrupt-json')
+
+      const page2 = store.listChanges({ limit: 2, cursor: page1.nextCursor })
+      const page3 = store.listChanges({ limit: 2, cursor: page2.nextCursor })
+      expect(page3.nextCursor).toBeUndefined()
+      const collected = [...page1.changes, ...page2.changes, ...page3.changes].map(c => `${c.skillId}:${c.version}`)
+      expect(collected).toEqual([
+        `${a.id}:4`,
+        `${firstId}:3`,
+        `${secondId}:3`,
+        `${a.id}:2`,
+        `${b.id}:1`,
+        `${a.id}:1`
+      ])
+
+      // Restarting query discovers the newly inserted v4 at the top
+      const fresh = store.listChanges({ limit: 2 })
+      expect(fresh.changes[0]).toMatchObject({ skillId: b.id, version: 4, previousVersion: 3, skillName: 'beta_two' })
+
+      // Verify tombstone state on a:3 and version gap predecessor on b:3 (v2 deleted -> previousVersion: 1)
+      const all = store.listChanges({ limit: 50 }).changes
+      expect(all.find(c => c.skillId === a.id && c.version === 3)).toMatchObject({ contentState: 'DELETED', previousContentState: 'PRESENT', previousVersion: 2 })
+      expect(all.find(c => c.skillId === b.id && c.version === 3)).toMatchObject({ previousVersion: 1 })
+      expect(all.find(c => c.skillId === a.id && c.version === 1)).toMatchObject({ previousVersion: null })
+
+      // Intersecting filters: query is case-insensitive on current skillName only (not body), after/before UTC normalized, origin, skillId
+      const filteredWindow = store.listChanges({
+        query: 'BETA_TWO',
+        after: '2026-11-04T12:00:00+02:00', // 10:00:00Z inclusive
+        before: '2026-11-04T10:00:00.000Z',
+        origin: 'MCP'
+      })
+      expect(filteredWindow.changes).toHaveLength(1)
+      expect(filteredWindow.changes[0]).toMatchObject({ skillId: b.id, version: 3, previousVersion: 1 })
+      expect(store.listChanges({ query: 'mentions' }).changes).toEqual([])
+      expect(store.listChanges({ skillId: a.id, origin: 'MCP' }).changes.map(c => c.version)).toEqual([2])
+
+      // Filter/limit tampering with cursor and invalid arguments must fail with INVALID_ARGUMENT
+      expect(() => store.listChanges({ limit: 3, cursor: page1.nextCursor })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }))
+      expect(() => store.listChanges({ skillId: a.id, limit: 2, cursor: page1.nextCursor })).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }))
+      for (const bad of [
+        null,
+        [],
+        { unknown: true },
+        { skillId: '' },
+        { query: '  ' },
+        { origin: 'UNKNOWN' },
+        { after: '2026-11-01' },
+        { after: '2026-02-30T00:00:00Z' },
+        { after: '2026-11-05T00:00:00Z', before: '2026-11-01T00:00:00Z' },
+        { limit: 0 },
+        { limit: 51 },
+        { limit: 1.5 },
+        { cursor: 'not-valid' },
+        { cursor: Buffer.from(JSON.stringify({ wrong: 1 })).toString('base64url') }
+      ]) {
+        expect(() => store.listChanges(bad)).toThrow(expect.objectContaining({ code: 'INVALID_ARGUMENT' }))
+      }
+    } finally { store.close() }
+  })
+
+  it('reads only the selected version pair and true predecessor across gaps for change diff', () => {
+    const store = open()
+    const db = (store as unknown as { db: Database.Database }).db
+    try {
+      const skill = store.create({ package: pkg('diff_pair', 'v1'), scope: 'GLOBAL', origin: 'UI' })
+      store.update({ skillId: skill.id, expectedVersion: 1, package: pkg('diff_pair', 'v2'), origin: 'MCP' })
+      store.update({ skillId: skill.id, expectedVersion: 2, package: pkg('diff_pair', 'v3'), origin: 'MCP' })
+      store.update({ skillId: skill.id, expectedVersion: 3, package: pkg('diff_pair', 'v4'), origin: 'UI' })
+      db.prepare('DELETE FROM academy_versions WHERE skill_id=? AND version=2').run(skill.id)
+      // Corrupt v4 (current) to prove readChangeDiffPair(skill.id, 3) does not read current or unrelated versions
+      db.prepare('UPDATE academy_versions SET artifacts_json=? WHERE skill_id=? AND version=4').run('{corrupt-json', skill.id)
+
+      const prepare = vi.spyOn(db, 'prepare')
+      const pair = store.readChangeDiffPair(skill.id, 3)
+      expect(pair.base?.version).toBe(1)
+      expect(pair.target.version).toBe(3)
+      const versionQueries = prepare.mock.calls.map(([sql]) => String(sql)).filter(sql => sql.includes('academy_versions'))
+      expect(versionQueries.every(sql => !sql.includes('version=4'))).toBe(true)
+      prepare.mockRestore()
+
+      const creationPair = store.readChangeDiffPair(skill.id, 1)
+      expect(creationPair.base).toBeNull()
+      expect(creationPair.target.version).toBe(1)
+
+      expect(() => store.readChangeDiffPair('absent', 1)).toThrow(expect.objectContaining({ code: 'SKILL_NOT_FOUND' }))
+      expect(() => store.readChangeDiffPair(skill.id, 2)).toThrow(expect.objectContaining({ code: 'VERSION_NOT_FOUND' }))
+      expect(() => store.readChangeDiffPair(skill.id, 3, 2)).toThrow(expect.objectContaining({ code: 'VERSION_NOT_FOUND' }))
+    } finally { store.close() }
+  })
 })
 
