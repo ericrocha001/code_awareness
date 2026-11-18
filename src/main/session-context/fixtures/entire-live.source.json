@@ -1,9 +1,24 @@
 {
   "provider": "Entire CLI 0.12.2",
   "observedOn": "2026-11-01",
-  "commands": ["session list --json", "session info <id> --json", "session tokens <id> --json"],
+  "commands": [
+    "session list --json",
+    "session info <id> --json",
+    "session tokens <id> --json"
+  ],
   "fixture": "../entire-live.test.ts setup",
   "provenance": "Locally observed JSON field names and token metrics; mixed-Worktree fixture derived from the existing repository sessions.",
   "sanitization": "Session IDs, branches and physical roots replaced; last_prompt and private data replaced by adversarial sentinels. Transcript/auth fields and invalid file paths are synthetic negative controls. No transcript was acquired.",
-  "limitations": "Schema/projection fixtures do not prove live capture or checkpoint association. The opt-in Channel acceptance uses the installed pinned executable and preexisting real sessions."
+  "limitations": "Schema/projection fixtures do not prove live capture or checkpoint association. The opt-in Channel acceptance uses the installed pinned executable and preexisting real sessions.",
+  "compatibilityQualification": {
+    "version": "0.13.4",
+    "observedOn": "2026-11-18",
+    "runtimeSha256": "cd6952a451c65024bb646314d5aa411a86ca0c9afb4687d5f855467644acc99a",
+    "sources": [
+      "https://github.com/entireio/cli/blob/v0.13.4/cmd/entire/cli/sessions.go",
+      "https://github.com/entireio/cli/blob/v0.13.4/cmd/entire/cli/session_tokens.go",
+      "https://github.com/entireio/cli/blob/v0.13.4/api/checkpoint/metadata.go"
+    ],
+    "qualification": "Existing inline sanitized fixtures use the pinned sessionInfoJSON/sessionTokensJSON fields; numeric turns/pending_turns and optional resolution. Real agent list observed; current returned no session state. Raw --transcript/full.jsonl remains agent-native; compact transcript.jsonl is a separate format. This is source-contract qualification, not live acceptance."
+  }
 }

@@ -59,7 +59,7 @@ it('defaults to bounded Codex health and selects the Antigravity IDE without pro
   expect(f.store().captureHealth(f.target, 'worktree')).toBeUndefined()
   expect(watched.map(path => readFileSync(path, 'utf8'))).toEqual(before)
 }, 20000)
-function fixture(repositoryId = 'A') {
+function fixture(repositoryId = 'A', version = '0.12.2') {
   const base = mkdtempSync(join(tmpdir(), 'capture-health-')), root = join(base, 'repo'), disabled = join(base, 'disabled'), hooks = join(base, 'hooks')
   mkdirSync(root); mkdirSync(disabled); mkdirSync(hooks)
   cleanup.push(() => {
@@ -84,7 +84,7 @@ function fixture(repositoryId = 'A') {
   let store = new SessionStore(path, repositoryId); cleanup.push(() => store.close())
   const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire')
   writeFileSync(executable, 'pinned fixture')
-  writeFileSync(join(dirname(path), 'session-context.provider.json'), JSON.stringify({ enabled: true, repositoryId, executable, sha256: digest('pinned fixture'), version: '0.12.2' }))
+  writeFileSync(join(dirname(path), 'session-context.provider.json'), JSON.stringify({ enabled: true, repositoryId, executable, sha256: digest('pinned fixture'), version }))
   let mode = 'observed', active = true, entireCalls = 0
   const assert = () => { if (!active) throw new Error('PROJECT_CONTEXT_CHANGED') }
   const run: CommandRunner = async (exe, args, cwd, limit, consume, timeout, signal) => {
@@ -95,12 +95,12 @@ function fixture(repositoryId = 'A') {
     entireCalls++
     if (mode === 'timeout') return { code: -1, text: '', timedOut: true, limited: false }
     if (args[0] === 'agent') return { code: 0, text: 'Agents:\n  ✓ codex\n  ✓ antigravity\n    claude-code\n', limited: false }
-    if (args[0] === 'version') return { code: 0, text: 'Entire CLI 0.12.2', limited: false }
+    if (args[0] === 'version') return { code: 0, text: 'Entire CLI ' + version, limited: false }
     if (args.includes('--help')) return { code: 0, text: '--json --transcript', limited: false }
     if (mode === 'cancel') active = false
     return { code: 0, limited: false, text: JSON.stringify(args[1] === 'current'
       ? { resolution: mode === 'unobserved' ? 'worktree' : 'caller-env', session: { session_id: 'captured-session' } }
-      : { session_id: 'captured-session', agent: 'Codex', status: 'active', worktree_path: cwd, turns: mode === 'empty' ? 0 : 1,
+      : { session_id: 'captured-session', agent: 'Codex', status: 'active', worktree_path: cwd, turns: ['empty', 'pending'].includes(mode) ? 0 : 1, pending_turns: mode === 'pending' ? 1 : 0,
         last_prompt: 'PRIVATE_PROMPT', transcript: 'PRIVATE_TRANSCRIPT' }) }
   }
   const target = { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }
@@ -267,3 +267,12 @@ it('U1 surfaces discriminative Entire diagnostic through get_system_health(sourc
   expect(JSON.stringify(health)).not.toContain(f.root)
   expect(JSON.stringify(liveErr)).not.toContain(f.root)
 }, 20000)
+
+it.each(['0.12.2', '0.13.4'])('recognizes numeric pending turns and qualified agent list on %s without inventing capture', async version => {
+  const f = fixture('A', version)
+  const provider = new EntireProvider(f.store(), f.root, () => {}, f.run)
+  f.mode('pending')
+  expect(await provider.inspectCapture()).toMatchObject({ configured: true, reason: 'CAPTURE_OBSERVED', providerSessionId: 'captured-session' })
+  f.mode('empty')
+  expect(await provider.inspectCapture()).toMatchObject({ configured: true, reason: 'SESSION_UNOBSERVED' })
+})

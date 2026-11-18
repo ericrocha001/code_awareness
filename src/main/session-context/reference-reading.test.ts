@@ -10,11 +10,14 @@ import { executeSessionTool } from './mcp'
 import { digest } from './privacy'
 import { legacyStoreFixture } from './fixtures/legacy-store-fixture'
 import { reconcileRegistry } from './registry-reconciliation'
+import { readCheckpointTopMetadata } from './checkpoint'
+import { observeCheckpoint } from './checkpoint-observation'
+import { checkpointTranscriptSource } from './checkpoint-transcript'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
 const data = (result: { content: readonly unknown[] }) => JSON.parse((result.content[0] as { text: string }).text)
-async function fixture(legacyText?: string) {
+async function fixture(legacyText?: string, version = '0.12.2') {
   const base = mkdtempSync(join(tmpdir(), 'reference-reading-')), root = join(base, 'repo')
   mkdirSync(root)
   cleanup.push(() => {
@@ -30,7 +33,7 @@ async function fixture(legacyText?: string) {
   }
   const store = new SessionStore(path, 'repo'); cleanup.push(() => store.close())
   const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire'); writeFileSync(executable, 'fixture Entire executable')
-  writeFileSync(join(dirname(store.path), 'session-context.provider.json'), JSON.stringify({ enabled: true, repositoryId: 'repo', executable, version: '0.12.2', sha256: digest('fixture Entire executable') }))
+  writeFileSync(join(dirname(store.path), 'session-context.provider.json'), JSON.stringify({ enabled: true, repositoryId: 'repo', executable, version, sha256: digest('fixture Entire executable') }))
   mkdirSync(join(root, '.entire')); writeFileSync(join(root, '.entire/settings.local.json'), JSON.stringify({ strategy_options: { push_sessions: false }, telemetry: false }))
   const sessions: { session_id: string; agent: string; status: string; worktree_path: string }[] = []
   const calls: string[][] = []
@@ -39,7 +42,7 @@ async function fixture(legacyText?: string) {
     if (args.includes('ls-files')) return { code: 1, text: '', limited: false }
     if (args.includes('--git-common-dir')) return { code: 0, text: join(root, '.git'), limited: false }
     if (_exe === 'git') return runReadOnly(_exe, args, cwd, limit, consume, timeout)
-    if (args[0] === 'version') return { code: 0, text: 'Entire CLI 0.12.2', limited: false }
+    if (args[0] === 'version') return { code: 0, text: 'Entire CLI ' + version, limited: false }
     if (args.includes('--help')) return { code: 0, text: '--json --transcript', limited: false }
     if (args.includes('--transcript')) throw new Error('FIXTURE_MUST_USE_ENTIRE_COPY')
     return { code: 0, text: JSON.stringify(args[1] === 'list' ? sessions : sessions.find(session => session.session_id === args[2])), limited: false }
@@ -77,8 +80,8 @@ it('indexes distinct Entire agents through SQLite and MCP without a vendor accou
   } finally { db.close() }
   expect(f.calls.some(args => args.includes('app-server') || args.includes('--transcript'))).toBe(false)
 })
-it('reopens the literal from a verified checkpoint blob when the local Entire copy disappears', async () => {
-  const f = await fixture(), checkpoint = 'abcdef123456'
+it.each(['0.12.2', '0.13.4'])('reopens the literal from a verified %s checkpoint blob with runtime 0.13.4', async producerVersion => {
+  const f = await fixture(undefined, '0.13.4'), checkpoint = 'abcdef123456'
   f.add('checkpoint-session', 'codex', [{ type: 'session_meta', payload: { id: 'checkpoint-session', cwd: f.root } }, { type: 'event_msg', payload: { type: 'user_message', message: 'checkpoint literal token=private-fixture' } }])
   await f.provider.refresh()
   const session = f.store.byProvider('checkpoint-session')!
@@ -86,19 +89,47 @@ it('reopens the literal from a verified checkpoint blob when the local Entire co
   const blob = (text: string | Buffer) => git(['hash-object', '-w', '--stdin'], text)
   const sourcePath = join(f.root, '.entire/metadata/checkpoint-session/full.jsonl')
   const full = blob(readFileSync(sourcePath))
-  const metadata = blob(JSON.stringify({ cli_version: '0.12.2', checkpoint_id: checkpoint, session_id: 'checkpoint-session', agent: 'Codex' }))
+  const metadata = blob(JSON.stringify({ cli_version: producerVersion, checkpoint_id: checkpoint, session_id: 'checkpoint-session', agent: 'Codex' }))
   const tree = git(['mktree'], `100644 blob ${metadata}\tmetadata.json\n100644 blob ${full}\tfull.jsonl\n`)
-  const top = blob(JSON.stringify({ cli_version: '0.12.2', checkpoint_id: checkpoint, sessions: [{}] }))
+  const top = blob(JSON.stringify({ cli_version: producerVersion, checkpoint_id: checkpoint, sessions: [{}] }))
   const root = git(['mktree'], `040000 tree ${tree}\t0\n100644 blob ${top}\tmetadata.json\n`)
   const commit = git(['commit-tree', root], `fixture\n\nEntire-Checkpoint: ${checkpoint}\n`)
   git(['update-ref', `refs/entire/checkpoints/56/${checkpoint}`, commit])
   await reconcileRegistry(f.store, f.run, f.root, { kind: 'COMMIT', id: commit }, () => {})
+  expect((await readCheckpointTopMetadata(f.run, f.root, checkpoint)).json.cli_version).toBe(producerVersion)
+  expect(await observeCheckpoint(f.run, f.root, { checkpointId: checkpoint }, () => {})).toMatchObject({ state: 'VERIFIED', sessionIds: ['checkpoint-session'] })
   unlinkSync(sourcePath)
   expect(await f.provider.refresh(session.id)).toMatchObject({ importState: 'TRANSCRIPT_REFERENCED', eventCount: 1 })
   expect(f.store.references.source(session.id)?.locator.kind).toBe('ENTIRE_CHECKPOINT')
   const result = data(await executeSessionTool(f.store, f.provider, 'read_agent_session_event', { sessionId: session.id, eventId: f.store.events(session.id, {}, 0, 1)[0].id, expectedRevision: f.store.session(session.id).revision }, () => {}))
   expect(result.content).toBe('checkpoint literal token=[REDACTED]')
   expect(result.complete).toBe(true)
+  const persisted = f.store.references.source(session.id)
+  const reopened = new SessionStore(f.store.path, 'repo')
+  try {
+    const provider = new EntireProvider(reopened, f.root, () => {}, f.run)
+    const current = reopened.session(session.id), event = reopened.events(session.id, {}, 0, 1)[0]
+    expect((await provider.readEvent(current, event, 0)).content).toBe(result.content)
+    expect(reopened.references.source(session.id)).toEqual(persisted)
+    expect(await provider.refresh(session.id)).toMatchObject({ replay: true })
+  } finally { reopened.close() }
+  for (const invalid of [
+    { topVersion: '0.13.40', sessionVersion: producerVersion, checkpointId: checkpoint, code: 'PROVIDER_SCHEMA_UNSUPPORTED' },
+    { topVersion: producerVersion, sessionVersion: '0.13.4-rc.1', checkpointId: checkpoint, code: 'SOURCE_IDENTITY_CONFLICT' },
+    { topVersion: producerVersion, sessionVersion: producerVersion, checkpointId: 'abcdef654321', code: 'SOURCE_IDENTITY_CONFLICT' }
+  ]) {
+    const invalidMetadata = blob(JSON.stringify({ cli_version: invalid.sessionVersion, checkpoint_id: invalid.checkpointId, session_id: 'checkpoint-session', agent: 'Codex' }))
+    const invalidTree = git(['mktree'], `100644 blob ${invalidMetadata}\tmetadata.json\n100644 blob ${full}\tfull.jsonl\n`)
+    const invalidTop = blob(JSON.stringify({ cli_version: invalid.topVersion, checkpoint_id: checkpoint, sessions: [{}] }))
+    const invalidRoot = git(['mktree'], `040000 tree ${invalidTree}\t0\n100644 blob ${invalidTop}\tmetadata.json\n`)
+    git(['update-ref', `refs/entire/checkpoints/56/${checkpoint}`, invalidRoot])
+    await expect(checkpointTranscriptSource(f.store, f.store.session(session.id), f.run, f.root, () => {})).rejects.toThrow(invalid.code)
+    if (invalid.code === 'PROVIDER_SCHEMA_UNSUPPORTED') {
+      await expect(readCheckpointTopMetadata(f.run, f.root, checkpoint)).rejects.toThrow(invalid.code)
+      expect(await observeCheckpoint(f.run, f.root, { checkpointId: checkpoint }, () => {})).toMatchObject({ state: 'UNSUPPORTED' })
+    }
+    await expect(f.provider.readEvent(f.store.session(session.id), f.store.events(session.id, {}, 0, 1)[0], 0)).rejects.toThrow('SOURCE_REVISION_CHANGED')
+  }
 }, 30000)
 it('discards legacy text explicitly and reads the available Entire source after restart without comparing old content', async () => {
   const f = await fixture('old content intentionally discarded'), session = f.store.byProvider('legacy')!, event = f.store.events(session.id, {}, 0, 1)[0]

@@ -20,7 +20,7 @@ import { createMcpHttpServer } from '../mcp/mcp-http-server'
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
 const data = (result: Awaited<ReturnType<typeof executeSessionTool>>) => JSON.parse(result.content[0].text)
-async function setup() {
+async function setup(version = '0.12.2', observedVersion = version) {
   const base = mkdtempSync(join(tmpdir(), 'entire-live-')), root = join(base, 'repo'), sibling = join(base, 'sibling')
   mkdirSync(root); mkdirSync(sibling)
   cleanup.push(() => rmSync(base, { force: true, recursive: true }))
@@ -31,7 +31,7 @@ async function setup() {
   const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire')
   writeFileSync(executable, 'live pinned fixture')
   const configPath = join(dirname(store.path), 'session-context.provider.json')
-  writeFileSync(configPath, JSON.stringify({ enabled: true, repositoryId: 'A', executable, sha256: digest('live pinned fixture'), version: '0.12.2' }))
+  writeFileSync(configPath, JSON.stringify({ enabled: true, repositoryId: 'A', executable, sha256: digest('live pinned fixture'), version }))
   const targets: LiveSessionTarget[] = [root, sibling].map((path, index) => ({ root: path, worktreeId: String(index + 1).repeat(64), generation: String(index + 3).repeat(64), fingerprint: sourceFingerprint(path) }))
   const rows = [root, sibling].map((path, index) => ({ session_id: `session-${index}`, agent: 'Codex', status: 'ended', model: 'gpt-6.1-sol', branch: 'feature/live',
     worktree_path: path, started_at: '2026-10-30T00:00:00Z', turns: 63, pending_turns: 4, checkpoints: 4,
@@ -43,7 +43,7 @@ async function setup() {
   const run: CommandRunner = async (exe, args, cwd, limit, consume, timeout, signal) => {
     calls.push(args)
     if (exe === 'git') return runReadOnly(exe, args, cwd, limit, consume, timeout, signal)
-    if (args[0] === 'version') return { code: 0, text: 'Entire CLI 0.12.2', limited: false }
+    if (args[0] === 'version') return { code: 0, text: 'Entire CLI ' + observedVersion, limited: false }
     if (args.includes('--help')) return { code: 0, text: '--json', limited: false }
     if (mode === 'switch') current = false
     if (mode === 'limit') return { code: -1, text: 'PRIVATE_STDOUT', limited: true }
@@ -59,8 +59,8 @@ async function setup() {
 }
 
 describe('Entire live consultative contracts', () => {
-  it('publishes exactly three additional tools and projects mixed live sources without importing or leaking bodies', async () => {
-    const f = await setup(), revision = f.store.catalogRevision(), before = readFileSync(f.store.path)
+  it.each(['0.12.2', '0.13.4'])('publishes exactly three additional tools and projects mixed live sources without importing or leaking bodies on %s', async version => {
+    const f = await setup(version), revision = f.store.catalogRevision(), before = readFileSync(f.store.path)
     const catalog = data(await f.call('discover_entire_sessions', {}))
     expect(catalog).toMatchObject({ source: 'ENTIRE_LIVE', transcriptImported: false, coverage: 'COMPLETE', matched: 2 })
     expect(catalog.sessions.map((s: any) => s.worktreeId)).toEqual(f.targets.map(t => t.worktreeId))
@@ -89,6 +89,17 @@ describe('Entire live consultative contracts', () => {
       expect(result.isError).not.toBe(true)
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(SESSION_RESPONSE_BUDGETS[name])
     }
+  })
+
+  it.each(['0.13.40', '0.13.4-rc.1', 'v0.13.4', 'prefix0.13.4'])('rejects observed version %s against the exact pin', async observed => {
+    const f = await setup('0.13.4', observed)
+    expect(data(await f.call('discover_entire_sessions', {}))).toMatchObject({ code: 'PROVIDER_VERSION_MISMATCH' })
+    expect(f.store.count()).toBe(0)
+  })
+  it.each(['0.13.40', '0.13.4-rc.1'])('rejects an unqualified pinned version %s', async version => {
+    const f = await setup(version)
+    expect(data(await f.call('discover_entire_sessions', {}))).toMatchObject({ code: 'PROVIDER_SCHEMA_UNSUPPORTED' })
+    expect(f.store.count()).toBe(0)
   })
 
   it('reports bounded or unavailable inventory and rejects foreign sessions, stale targets and invalid inputs', async () => {
