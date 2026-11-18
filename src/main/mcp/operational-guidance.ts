@@ -9,6 +9,9 @@ export interface OperationalGuidance {
   operationId?: string
   activeOperationId?: string
   activeRunId?: string
+  slotState?: 'ACTIVE_OPERATION' | 'QUARANTINED_AWAITING_CONFIRMATION' | 'QUARANTINED_UNRECOVERABLE'
+  phase?: string
+  diagnostic?: string
 }
 
 export const MCP_REQUEST_BUDGET_MS = 20_000

@@ -5,9 +5,10 @@ import { CLI_TRUST_SCOPES } from '../../shared/types/cli-policy-types'
 import type { CancelCliExecutionInput, CliApprovalHandler, CliCommandDescriptor, CliExecutionRecord, CliExecutionSnapshot, CliInvestigationSummary, CliProposal, CliTimeoutProfile, GetCliExecutionInput, GetCliInvestigationInput, PrepareCliExecutionInput, PrepareCliInvestigationInput, StartCliExecutionInput } from './cli-execution-types'
 import { detectRisks, resolveCliCommand } from './cli-command-resolver'
 import { isConsultativeCommand } from './cli-consultative-policy'
-import { CliProcessSupervisor } from './cli-process-supervisor'
+import { CliProcessSupervisor, type SupervisorTerminationReconciliation } from './cli-process-supervisor'
 import { CliOutputBuffer } from './cli-output-buffer'
 import type { CliResolvedWorktree, CliWorktreeSelector } from './cli-execution-types'
+import type { OperationalGuidance } from '../mcp/operational-guidance'
 
 export interface CliExecutionServiceOptions {
   repoRoot: string
@@ -51,6 +52,7 @@ export class CliExecutionService {
   private readonly investigationBuffers = new Map<string, Map<number, CliOutputBuffer>>()
   private activeOperationId: string | null = null
   private activeExecutionToken: string | null = null
+  private activeLaunchToken: string | null = null
   private activeRecord: CliExecutionRecord | null = null
 
   constructor(options: CliExecutionServiceOptions) {
@@ -72,6 +74,55 @@ export class CliExecutionService {
   isEnabled(): boolean { return this.enabled }
   getRepositoryId(): string | null { return this.repositoryId }
   getActiveOperationId(): string | null { return this.activeOperationId }
+  getBusyGuidance(): OperationalGuidance {
+    const activeId = this.activeOperationId ?? undefined
+    const active = this.activeOperationId ? (this.activeRecord ?? this.executions.get(this.activeOperationId)) : undefined
+    const phase = active?.phase ?? this.supervisor.phase
+    const diagnostic = active?.diagnostic ?? this.supervisor.failureDiagnostic
+    if (phase === 'TERMINATION_UNCONFIRMED') {
+      if (this.supervisor.isAwaitingTerminationConfirmation) {
+        return {
+          code: 'CLI_EXECUTION_BUSY',
+          activeOperationId: activeId,
+          slotState: 'QUARANTINED_AWAITING_CONFIRMATION',
+          phase: 'TERMINATION_UNCONFIRMED',
+          ...(diagnostic ? { diagnostic } : {}),
+          retryability: 'SAFE_AFTER_BACKOFF',
+          retryAfterMs: 1000,
+          recommendedAction: 'QUERY_OPERATION_STATUS_AND_AWAIT_TERMINATION_EVIDENCE'
+        }
+      }
+      return {
+        code: 'CLI_EXECUTION_BUSY',
+        activeOperationId: activeId,
+        slotState: 'QUARANTINED_UNRECOVERABLE',
+        phase: 'TERMINATION_UNCONFIRMED',
+        ...(diagnostic ? { diagnostic } : {}),
+        retryability: 'NOT_SAFE',
+        recommendedAction: 'INSPECT_OPERATION_AND_REQUIRE_AUTHORIZED_INTERVENTION'
+      }
+    }
+    return {
+      code: 'CLI_EXECUTION_BUSY',
+      activeOperationId: activeId,
+      slotState: 'ACTIVE_OPERATION',
+      phase,
+      retryability: 'SAFE_AFTER_BACKOFF',
+      retryAfterMs: 3000,
+      recommendedAction: 'FOLLOW_ACTIVE_OPERATION'
+    }
+  }
+  private describeBusyError(): string {
+    const guidance = this.getBusyGuidance()
+    const detail = guidance.diagnostic ? ` (${guidance.diagnostic})` : ''
+    if (guidance.slotState === 'QUARANTINED_AWAITING_CONFIRMATION') {
+      return `CLI_EXECUTION_BUSY: slot quarantined for operation ${this.activeOperationId} in TERMINATION_UNCONFIRMED${detail}; query get_cli_execution and await native owner termination evidence`
+    }
+    if (guidance.slotState === 'QUARANTINED_UNRECOVERABLE') {
+      return `CLI_EXECUTION_BUSY: slot quarantined for operation ${this.activeOperationId} in TERMINATION_UNCONFIRMED${detail}; unrecoverable without native termination proof — query get_cli_execution and require authorized runtime intervention`
+    }
+    return `CLI_EXECUTION_BUSY: active operation ${this.activeOperationId} in progress (${guidance.phase}); query get_cli_execution or await completion`
+  }
   async getPolicyForWorktree(selector?: CliWorktreeSelector): Promise<CliPolicy> {
     if (!this.enabled) return { ...supervised, revision: 'disabled' }
     if (selector === undefined) return this.policyForTarget(undefined)
@@ -149,7 +200,7 @@ export class CliExecutionService {
       if (this.investigationSteps.has(input.operationId) !== investigation) throw new Error('OPERATION_KIND_CONFLICT')
       return
     }
-    if (this.activeOperationId !== null) throw new Error(`CLI_EXECUTION_BUSY: active operation ${this.activeOperationId} in progress`)
+    if (this.activeOperationId !== null) throw new Error(this.describeBusyError())
     const proposal = this.proposals.get(input.proposalId)
     if (!proposal) throw new Error('PROPOSAL_NOT_FOUND')
     if (!!proposal.commands !== investigation) throw new Error('OPERATION_KIND_CONFLICT')
@@ -262,13 +313,42 @@ export class CliExecutionService {
           }).finally(() => { monitoring = false })
         }, 500)
         const unitTimeoutMaxMs = proposal.timeoutProfile === 'BUILDX_AGENTIC_UNIT' ? AGENTIC_MAX_TIMEOUT_MS : STANDARD_MAX_TIMEOUT_MS
+        const launchToken = randomUUID()
+        this.activeLaunchToken = launchToken
+        let reconciledDuringRun = false
         const completion = this.supervisor.launch(command, {
           ownerPath: this.ownerPath,
           ...(steps
             ? { timeoutMs: Math.min(budgets.commandTimeoutMs, deadline - Date.now()), maxTimeoutMs: STANDARD_MAX_TIMEOUT_MS, maxTotalOutputBytes: Math.min(budgets.stepOutputBytes, budgets.totalOutputBytes - outputBytes) }
             : { timeoutMs: Math.min(proposal.timeoutMs ?? this.defaultTimeoutMs, unitTimeoutMaxMs), maxTimeoutMs: unitTimeoutMaxMs }),
           authorizeResume: () => stepAuthorize(index, command),
-          onRunning: () => { step.status = record.status = 'RUNNING'; step.phase = record.phase = 'RUNNING' }
+          onRunning: () => { step.status = record.status = 'RUNNING'; step.phase = record.phase = 'RUNNING' },
+          onTerminationConfirmed: (reconciliation: SupervisorTerminationReconciliation) => {
+            if (reconciledDuringRun && step.phase === 'TERMINAL') return
+            if (this.activeOperationId === record.operationId && this.activeLaunchToken !== launchToken) return
+            reconciledDuringRun = true
+            const finishedAt = new Date().toISOString()
+            step.status = 'FAILED'
+            step.phase = 'TERMINAL'
+            step.diagnostic = reconciliation.diagnostic
+            step.treeObservation = reconciliation.treeObservation
+            step.durationMs = reconciliation.durationMs
+            step.finishedAt = finishedAt
+            if (step !== record) {
+              record.status = 'FAILED'
+              record.phase = 'TERMINAL'
+              record.diagnostic = reconciliation.diagnostic
+              record.treeObservation = reconciliation.treeObservation
+              record.finishedAt = finishedAt
+              record.durationMs = Date.parse(finishedAt) - Date.parse(record.startedAt!)
+            }
+            if (this.activeOperationId === record.operationId && this.activeLaunchToken === launchToken && !this.supervisor.isRunning) {
+              this.activeOperationId = null
+              this.activeExecutionToken = null
+              this.activeLaunchToken = null
+              this.activeRecord = null
+            }
+          }
         })
         const buffer = this.supervisor.output
         if (buffer) {
@@ -277,13 +357,15 @@ export class CliExecutionService {
         }
         const result = await completion
         clearInterval(monitor); monitor = undefined
-        Object.assign(step, result, { phase: this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL' })
-        if (!this.supervisor.isRunning) step.finishedAt = new Date().toISOString()
-        if (step !== record) Object.assign(record, { status: step.status === 'SUCCEEDED' ? 'RUNNING' : step.status,
-          phase: step.status === 'SUCCEEDED' ? 'RUNNING' : step.phase, diagnostic: step.diagnostic, exitCode: step.exitCode, treeObservation: step.treeObservation })
+        if (!reconciledDuringRun) {
+          Object.assign(step, result, { phase: this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL' })
+          if (!this.supervisor.isRunning) step.finishedAt = new Date().toISOString()
+          if (step !== record) Object.assign(record, { status: step.status === 'SUCCEEDED' ? 'RUNNING' : step.status,
+            phase: step.status === 'SUCCEEDED' ? 'RUNNING' : step.phase, diagnostic: step.diagnostic, exitCode: step.exitCode, treeObservation: step.treeObservation })
+        }
         const output = buffer?.readPage()
         outputBytes += (output?.totalStdoutBytes ?? 0) + (output?.totalStderrBytes ?? 0)
-        if (result.status !== 'SUCCEEDED' || result.treeObservation?.activeProcesses !== 0 || result.treeObservation.handlesClosed !== true || this.supervisor.isRunning) break
+        if (reconciledDuringRun || result.status !== 'SUCCEEDED' || result.treeObservation?.activeProcesses !== 0 || result.treeObservation.handlesClosed !== true || this.supervisor.isRunning) break
       }
     } catch (error) {
       record.status = this.supervisor.isRunning ? 'FAILED' : 'REFUSED'
@@ -295,9 +377,10 @@ export class CliExecutionService {
       if (!this.supervisor.isRunning) {
         if (steps && steps.length === proposal.commands!.length && steps.every(step => step.status === 'SUCCEEDED') && record.status === 'RUNNING') record.status = 'SUCCEEDED'
         if (record.status === 'AWAITING_APPROVAL' || record.status === 'RUNNING') { record.status = 'CANCELLED'; record.diagnostic ??= 'AUTHORITY_CHANGED' }
-        record.phase = 'TERMINAL'; record.finishedAt = new Date().toISOString()
+        record.phase = 'TERMINAL'
+        record.finishedAt ??= new Date().toISOString()
         record.durationMs = Date.parse(record.finishedAt) - Date.parse(record.startedAt!)
-        if (this.activeOperationId === record.operationId) { this.activeOperationId = null; this.activeExecutionToken = null; this.activeRecord = null }
+        if (this.activeOperationId === record.operationId) { this.activeOperationId = null; this.activeExecutionToken = null; this.activeLaunchToken = null; this.activeRecord = null }
       } else record.phase = 'TERMINATION_UNCONFIRMED'
     }
   }
@@ -327,13 +410,23 @@ export class CliExecutionService {
     if (this.activeOperationId === input.operationId) {
       this.activeExecutionToken = null
       if (this.supervisor.isRunning) {
-        record.phase = 'STOPPING'
+        if (record.phase !== 'TERMINATION_UNCONFIRMED') record.phase = 'STOPPING'
         const result = await this.supervisor.cancel()
-        Object.assign(record, result)
-        if (this.activeRecord) Object.assign(this.activeRecord, result, { phase: this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL' })
-      } else { record.status = 'CANCELLED'; record.diagnostic = 'CANCELLED_BEFORE_APPROVAL'; this.proposals.get(record.proposalId)!.status = 'REFUSED' }
-      record.phase = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL'
-      if (!this.supervisor.isRunning) { record.finishedAt = new Date().toISOString(); this.activeOperationId = null; this.activeRecord = null }
+        if (this.executions.get(input.operationId)?.phase !== 'TERMINAL') {
+          Object.assign(record, result)
+          if (this.activeRecord && this.activeRecord.phase !== 'TERMINAL') {
+            Object.assign(this.activeRecord, result, { phase: this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL' })
+          }
+          record.phase = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL'
+        }
+      } else {
+        record.status = 'CANCELLED'; record.diagnostic = 'CANCELLED_BEFORE_APPROVAL'; this.proposals.get(record.proposalId)!.status = 'REFUSED'
+        record.phase = 'TERMINAL'
+      }
+      if (!this.supervisor.isRunning && this.activeOperationId === input.operationId) {
+        record.finishedAt ??= new Date().toISOString()
+        this.activeOperationId = null; this.activeLaunchToken = null; this.activeRecord = null
+      }
     }
     return this.getSnapshot(input.operationId)
   }
@@ -352,7 +445,7 @@ export class CliExecutionService {
     if (!operationId) return
     await this.cancel({ operationId })
     const record = this.executions.get(operationId)
-    if (record?.phase === 'TERMINAL') record.diagnostic = reason
+    if (record?.phase === 'TERMINAL' && record.status === 'CANCELLED') record.diagnostic = reason
   }
   private assertEnabled(): void { if (!this.enabled) throw new Error('CLI_EXECUTION_DISABLED') }
   private resolveTimeoutBudget(

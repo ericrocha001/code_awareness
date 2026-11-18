@@ -1,10 +1,17 @@
 import './cli-native-test-setup'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, existsSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import type { CliPolicy } from '../../shared/types/cli-policy-types'
 import { CliExecutionService } from './cli-execution-service'
-import { CliProcessSupervisor } from './cli-process-supervisor'
+import { CliProcessSupervisor, type SupervisorTerminationReconciliation } from './cli-process-supervisor'
+
+const require = createRequire(join(process.cwd(), 'package.json'))
+const { build: buildCliOwner } = require('./scripts/cli-execution/build.cjs') as {
+  build: (test?: boolean) => { executable: string }
+}
 
 const directories: string[] = []
 const services: CliExecutionService[] = []
@@ -74,20 +81,131 @@ describe('CLI lifecycle authorization and tree completion', () => {
     await until(() => service.getActiveOperationId() === null)
     expect(service.get({ operationId: 'expired' }).status).toBe('CANCELLED')
   })
-  it.each(['owner', 'control'] as const)('%s loss quarantines slot instead of claiming cancellation or freeing a spawn', async loss => {
-    const root = directory(), supervisor = new CliProcessSupervisor()
-    const completion = supervisor.launch({ executable: process.execPath, originalExecutable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: root, relativeCwd: '.', displayCommandLine: 'fixture' })
-    await until(() => supervisor.phase === 'RUNNING')
-    if (loss === 'owner') (supervisor as any).owner.kill()
-    else (supervisor as any).control.destroy()
-    const result = await completion
-    expect(result.status).toBe('FAILED')
-    expect(result.diagnostic).toContain('TERMINATION_UNCONFIRMED')
-    expect(supervisor.isRunning).toBe(true)
-    expect(supervisor.phase).toBe('TERMINATION_UNCONFIRMED')
-    expect(() => supervisor.launch({} as any)).toThrow('SUPERVISOR_BUSY')
-    expect((await supervisor.cancel()).status).toBe('FAILED')
-  }, 10000)
+  it('owner loss retains quarantine while control loss drains verified v2 owner and recovers slot as FAILED', async () => {
+    const root = directory(), killedSupervisor = new CliProcessSupervisor()
+    const killedCompletion = killedSupervisor.launch({ executable: process.execPath, originalExecutable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: root, relativeCwd: '.', displayCommandLine: 'fixture' })
+    await until(() => killedSupervisor.phase === 'RUNNING')
+    ;(killedSupervisor as any).owner.kill()
+    const killedResult = await killedCompletion
+    expect(killedResult.status).toBe('FAILED')
+    expect(killedResult.diagnostic).toContain('TERMINATION_UNCONFIRMED')
+    expect(killedSupervisor.isRunning).toBe(true)
+    expect(killedSupervisor.phase).toBe('TERMINATION_UNCONFIRMED')
+    expect(killedSupervisor.isAwaitingTerminationConfirmation).toBe(false)
+    expect(() => killedSupervisor.launch({} as any)).toThrow('SUPERVISOR_BUSY')
+    expect((await killedSupervisor.cancel()).status).toBe('FAILED')
+
+    const recoveredSupervisor = new CliProcessSupervisor()
+    const recoveredCompletion = recoveredSupervisor.launch({ executable: process.execPath, originalExecutable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'], cwd: root, relativeCwd: '.', displayCommandLine: 'fixture' })
+    await until(() => recoveredSupervisor.phase === 'RUNNING')
+    ;(recoveredSupervisor as any).control.destroy()
+    const recoveredResult = await recoveredCompletion
+    expect(recoveredResult.status).toBe('FAILED')
+    expect(recoveredResult.diagnostic).toBe('CONTROL_LOST:RECOVERED_CLEANUP_CONFIRMED')
+    expect(recoveredResult.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+    expect(recoveredSupervisor.isRunning).toBe(false)
+    expect(recoveredSupervisor.phase).toBe('TERMINAL')
+
+    const nextResult = await recoveredSupervisor.launch({ executable: process.execPath, originalExecutable: process.execPath, args: ['-e', 'process.exit(0)'], cwd: root, relativeCwd: '.', displayCommandLine: 'next' })
+    expect(nextResult.status).toBe('SUCCEEDED')
+    expect(recoveredSupervisor.isRunning).toBe(false)
+  }, 15000)
+  it('cooperative terminate on AUTHORIZING handshake timeout prevents late resume and preserves FAILED', async () => {
+    const root = directory(), sentinel = join(root, 'late-resume-must-not-run'), barrier = deferred<string>()
+    let calls = 0
+    const service = new CliExecutionService({
+      repoRoot: root, enabledByDefault: true, approvalHandler: async () => true,
+      getFingerprint: async () => { if (++calls === 3) return barrier.promise; return 'identity' }
+    })
+    services.push(service)
+    const supervisor = (service as any).supervisor as CliProcessSupervisor
+    const originalLaunch = supervisor.launch.bind(supervisor)
+    vi.spyOn(supervisor, 'launch').mockImplementation((command, opts = {}) =>
+      originalLaunch(command, { ...opts, handshakeTimeoutMs: 400, drainTimeoutMs: 1000 })
+    )
+    const proposal = await service.prepare({ executable: process.execPath, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(sentinel)}, 'unsafe')`] })
+    service.start({ proposalId: proposal.proposalId, operationId: 'auth-timeout' })
+    await until(() => service.get({ operationId: 'auth-timeout' }).phase === 'TERMINAL')
+    barrier.resolve('identity')
+    await new Promise(resolve => setTimeout(resolve, 60))
+    const snap = service.get({ operationId: 'auth-timeout' })
+    expect(snap.status).toBe('FAILED')
+    expect(snap.phase).toBe('TERMINAL')
+    expect(snap.diagnostic).toBe('NATIVE_HANDSHAKE_TIMEOUT:RECOVERED_CLEANUP_CONFIRMED')
+    expect(snap.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+    expect(service.getActiveOperationId()).toBeNull()
+    expect(existsSync(sentinel)).toBe(false)
+  }, 15000)
+  it('reconciles late 205 confirmation in CliExecutionService, protects against stale callback races, and unlocks one new execution', async () => {
+    const root = directory(), testOwner = buildCliOwner(true).executable
+    let policy: CliPolicy = { mode: 'AUTONOMOUS_TRUSTED', revision: 'rev-1', rule: 'local-repository-trust' }
+    const service = new CliExecutionService({
+      repoRoot: root, enabledByDefault: true, ownerPath: testOwner,
+      getPolicy: () => policy, getFingerprint: async () => 'stable-fp', approvalHandler: async () => true
+    })
+    services.push(service)
+    const supervisor = (service as any).supervisor as CliProcessSupervisor
+    const originalLaunch = supervisor.launch.bind(supervisor)
+    let capturedOnConfirmed: ((reconciliation: SupervisorTerminationReconciliation) => void) | undefined
+    vi.spyOn(supervisor, 'launch').mockImplementation((command, opts = {}) => {
+      capturedOnConfirmed = opts.onTerminationConfirmed
+      return originalLaunch(command, { ...opts, drainTimeoutMs: 100 })
+    })
+
+    const stalledProposal = await service.prepare({
+      executable: process.execPath,
+      args: ['-e', 'setInterval(()=>{},1000)', '--', '--ca-cli-test-fault=postcreate-drain-delay']
+    })
+    service.start({ proposalId: stalledProposal.proposalId, operationId: 'op-late-recover' })
+    await until(() => service.get({ operationId: 'op-late-recover' }).phase === 'RUNNING')
+    ;(supervisor as any).control.destroy()
+
+    await until(() => service.get({ operationId: 'op-late-recover' }).phase === 'TERMINATION_UNCONFIRMED')
+    expect(service.get({ operationId: 'op-late-recover' }).status).toBe('FAILED')
+    expect(service.getActiveOperationId()).toBe('op-late-recover')
+    expect(service.getBusyGuidance().slotState).toBe('QUARANTINED_AWAITING_CONFIRMATION')
+
+    const blockedProposal = await service.prepare({ executable: process.execPath, args: ['-e', 'console.log("OK_AFTER")'] })
+    expect(() => service.start({ proposalId: blockedProposal.proposalId, operationId: 'op-blocked' })).toThrow('CLI_EXECUTION_BUSY')
+
+    // Policy revocation and cancel during quarantine cannot falsely resolve or unlock before owner proof.
+    policy = { ...policy, revision: 'rev-2' }
+    service.refreshPolicy()
+    const cancelledSnap = await service.cancel({ operationId: 'op-late-recover' })
+    expect(cancelledSnap.status).toBe('FAILED')
+
+    await until(() => service.get({ operationId: 'op-late-recover' }).phase === 'TERMINAL')
+    const recoveredSnap = service.get({ operationId: 'op-late-recover' })
+    expect(recoveredSnap.status).toBe('FAILED')
+    expect(recoveredSnap.phase).toBe('TERMINAL')
+    expect(recoveredSnap.diagnostic).toBe('CONTROL_LOST:RECOVERED_CLEANUP_CONFIRMED')
+    expect(recoveredSnap.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+    expect(service.getActiveOperationId()).toBeNull()
+    const staleCallback = capturedOnConfirmed
+
+    // Start a new operation after policy refresh and verify stale callback replay is idempotent and harmless.
+    const nextProposal = await service.prepare({ executable: process.execPath, args: ['-e', 'console.log("NEW_RUNNING"); setInterval(()=>{},1000)'] })
+    service.start({ proposalId: nextProposal.proposalId, operationId: 'op-new-active' })
+    await until(() => service.get({ operationId: 'op-new-active' }).phase === 'RUNNING')
+    // Replay old operation's confirmation callback while a new operation owns the slot.
+    expect(staleCallback).toBeTypeOf('function')
+    staleCallback!({
+      status: 'FAILED', phase: 'TERMINAL', confirmationKind: 'CLEANUP_CONFIRMED',
+      initialCause: 'CONTROL_LOST', diagnostic: 'CONTROL_LOST:RECOVERED_CLEANUP_CONFIRMED',
+      durationMs: 10, treeObservation: { activeProcesses: 0, handlesClosed: true }
+    })
+    expect(service.get({ operationId: 'op-new-active' }).phase).toBe('RUNNING')
+    expect(service.get({ operationId: 'op-new-active' }).status).toBe('RUNNING')
+    expect(service.getActiveOperationId()).toBe('op-new-active')
+    await service.cancel({ operationId: 'op-new-active' })
+
+    const healthyProposal = await service.prepare({ executable: process.execPath, args: ['-e', 'console.log("HEALTHY_OK")'] })
+    service.start({ proposalId: healthyProposal.proposalId, operationId: 'op-healthy' })
+    await until(() => service.get({ operationId: 'op-healthy' }).phase === 'TERMINAL')
+    const healthySnap = service.get({ operationId: 'op-healthy' })
+    expect(healthySnap.status).toBe('SUCCEEDED')
+    expect(healthySnap.stdout.trim()).toBe('HEALTHY_OK')
+  }, 15000)
   it('simulated failed termination cannot become CANCELLED on cancel/shutdown or release the service slot', async () => {
     const service = new CliExecutionService({ repoRoot: directory(), enabledByDefault: true, approvalHandler: async () => true })
     services.push(service)
