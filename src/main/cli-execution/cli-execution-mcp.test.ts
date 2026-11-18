@@ -2,10 +2,17 @@ import './cli-native-test-setup'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { join } from 'node:path'
 import { mkdirSync, rmSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { textContent } from '../mcp/mcp-test-content'
 import { CliExecutionService } from './cli-execution-service'
+import type { CliProcessSupervisor } from './cli-process-supervisor'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from './cli-execution-mcp'
+
+const require = createRequire(join(process.cwd(), 'package.json'))
+const { build: buildCliOwner } = require('./scripts/cli-execution/build.cjs') as {
+  build: (test?: boolean) => { executable: string }
+}
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
 import { bindProjectNavigation } from '../core/context/project-context-navigation'
@@ -360,4 +367,88 @@ describe('U2 — Local Authorization & MCP Integration', () => {
     expect(badTimeout.isError).toBe(true)
     expect(JSON.parse(textContent(badTimeout.content[0])).code).toBe('INVALID_ARGUMENT')
   })
+
+  it('Property 11: CLI_EXECUTION_BUSY via MCP distingue operação ativa, quarentena recuperável e quarentena não recuperável, e libera após 205', async () => {
+    const testOwner = buildCliOwner(true).executable
+    const busyService = new CliExecutionService({
+      repoRoot: testDir,
+      repositoryId: 'repo-test',
+      enabledByDefault: true,
+      ownerPath: testOwner,
+      getFingerprint: async () => fingerprintValue,
+      approvalHandler: async () => true
+    })
+    const supervisor = (busyService as any).supervisor as CliProcessSupervisor
+    const originalLaunch = supervisor.launch.bind(supervisor)
+    vi.spyOn(supervisor, 'launch').mockImplementation((command, opts = {}) =>
+      originalLaunch(command, { ...opts, drainTimeoutMs: 100 })
+    )
+
+    try {
+      const pActive = await busyService.prepare({ executable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'] })
+      const pOther = await busyService.prepare({ executable: process.execPath, args: ['-e', 'console.log("NEXT_OK")'] })
+      await executeCliTool(busyService, 'start_cli_execution', { proposalId: pActive.proposalId, operationId: 'mcp-active' })
+      await waitForStatus(busyService, 'mcp-active', ['RUNNING'])
+
+      const activeBusy = JSON.parse(textContent((await executeCliTool(busyService, 'start_cli_execution', { proposalId: pOther.proposalId, operationId: 'mcp-blocked-1' })).content[0]))
+      expect(activeBusy).toMatchObject({
+        code: 'CLI_EXECUTION_BUSY',
+        activeOperationId: 'mcp-active',
+        slotState: 'ACTIVE_OPERATION',
+        recommendedAction: 'FOLLOW_ACTIVE_OPERATION'
+      })
+      await busyService.cancel({ operationId: 'mcp-active' })
+
+      const pDrain = await busyService.prepare({ executable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)', '--', '--ca-cli-test-fault=postcreate-drain-delay'] })
+      await executeCliTool(busyService, 'start_cli_execution', { proposalId: pDrain.proposalId, operationId: 'mcp-quarantine' })
+      await waitForStatus(busyService, 'mcp-quarantine', ['RUNNING'])
+      ;(supervisor as any).control.destroy()
+      await waitForStatus(busyService, 'mcp-quarantine', ['FAILED'])
+
+      const awaitingBusy = JSON.parse(textContent((await executeCliTool(busyService, 'start_cli_execution', { proposalId: pOther.proposalId, operationId: 'mcp-blocked-2' })).content[0]))
+      expect(awaitingBusy).toMatchObject({
+        code: 'CLI_EXECUTION_BUSY',
+        activeOperationId: 'mcp-quarantine',
+        slotState: 'QUARANTINED_AWAITING_CONFIRMATION',
+        phase: 'TERMINATION_UNCONFIRMED',
+        retryability: 'SAFE_AFTER_BACKOFF',
+        recommendedAction: 'QUERY_OPERATION_STATUS_AND_AWAIT_TERMINATION_EVIDENCE'
+      })
+
+      const deadline = Date.now() + 5000
+      let getSnap: any
+      while (Date.now() < deadline) {
+        getSnap = JSON.parse(textContent((await executeCliTool(busyService, 'get_cli_execution', { operationId: 'mcp-quarantine' })).content[0]))
+        if (getSnap.phase === 'TERMINAL') break
+        await new Promise(r => setTimeout(r, 25))
+      }
+      expect(getSnap.status).toBe('FAILED')
+      expect(getSnap.phase).toBe('TERMINAL')
+
+      const healthyPrep = JSON.parse(textContent((await executeCliTool(busyService, 'prepare_cli_execution', { executable: process.execPath, args: ['-e', 'console.log("MCP_RECOVERED_OK")'] })).content[0]))
+      await executeCliTool(busyService, 'start_cli_execution', { proposalId: healthyPrep.proposalId, operationId: 'mcp-recovered' })
+      const healthySnap = await waitForStatus(busyService, 'mcp-recovered', ['SUCCEEDED', 'FAILED'])
+      expect(healthySnap.status).toBe('SUCCEEDED')
+      expect(healthySnap.stdout.trim()).toBe('MCP_RECOVERED_OK')
+
+      const pKill = await busyService.prepare({ executable: process.execPath, args: ['-e', 'setInterval(()=>{},1000)'] })
+      const pAfterKill = await busyService.prepare({ executable: process.execPath, args: ['-v'] })
+      await executeCliTool(busyService, 'start_cli_execution', { proposalId: pKill.proposalId, operationId: 'mcp-killed' })
+      await waitForStatus(busyService, 'mcp-killed', ['RUNNING'])
+      ;(supervisor as any).owner.kill()
+      await waitForStatus(busyService, 'mcp-killed', ['FAILED'])
+
+      const unrecoverableBusy = JSON.parse(textContent((await executeCliTool(busyService, 'start_cli_execution', { proposalId: pAfterKill.proposalId, operationId: 'mcp-blocked-3' })).content[0]))
+      expect(unrecoverableBusy).toMatchObject({
+        code: 'CLI_EXECUTION_BUSY',
+        activeOperationId: 'mcp-killed',
+        slotState: 'QUARANTINED_UNRECOVERABLE',
+        phase: 'TERMINATION_UNCONFIRMED',
+        retryability: 'NOT_SAFE',
+        recommendedAction: 'INSPECT_OPERATION_AND_REQUIRE_AUTHORIZED_INTERVENTION'
+      })
+    } finally {
+      try { await busyService.shutdown() } catch {}
+    }
+  }, 15000)
 })

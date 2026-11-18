@@ -294,13 +294,7 @@ export async function executeCliTool(
     const code = message.split(':')[0]
     if (['NOT_AUTO_AUTHORIZED', 'POLICY_CHANGED', 'OPERATION_KIND_CONFLICT', 'INVESTIGATION_COMMAND_LIMIT', 'MANIFEST_SIZE_LIMIT', 'SUMMARY_SIZE_LIMIT', 'INVALID_OUTPUT_INDEX', 'INVALID_OUTPUT_CURSOR', 'OUTPUT_INDEX_REQUIRED'].includes(code)) return error(code, code === 'NOT_AUTO_AUTHORIZED' ? 'Select SUPERVISED locally; no command was executed' : undefined)
     if (/CLI_EXECUTION_BUSY/.test(message)) {
-      return operationalFailure({
-        code: 'CLI_EXECUTION_BUSY',
-        activeOperationId: service.getActiveOperationId() ?? undefined,
-        retryability: 'SAFE_AFTER_BACKOFF',
-        retryAfterMs: 3000,
-        recommendedAction: 'FOLLOW_ACTIVE_OPERATION'
-      })
+      return operationalFailure(service.getBusyGuidance())
     }
     if (/CLI_EXECUTION_DISABLED/.test(message)) {
       return error('CLI_EXECUTION_DISABLED', message)
