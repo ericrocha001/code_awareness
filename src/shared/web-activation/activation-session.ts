@@ -23,6 +23,9 @@ export type ActivationSessionState =
 
 export type WebActivationTransportErrorCode =
   | 'APP_UNAVAILABLE'
+  | 'TIMEOUT'
+  | 'INVALID_MCP_RESPONSE'
+  | 'TOOL_EXECUTION_ERROR'
   | 'SESSION_INVALIDATED'
   | 'CONSENT_REQUIRED'
   | 'ORIGIN_NOT_ALLOWED'
@@ -38,19 +41,29 @@ export interface WebActivationStatusResponse {
   instanceId?: string | null
   bindingId?: string | null
   catalogRevision?: string | null
+  consents?: {
+    metadata: boolean
+    literalSource: boolean
+  }
   errorCode?: WebActivationTransportErrorCode
 }
 
 export interface WebActivationMcpTransportResult {
   ok: boolean
   mcp?: {
+    id?: string | number | null
     result?: unknown
     error?: { code?: number; message?: string }
   }
   error?: {
     code: WebActivationTransportErrorCode
     message: string
-    details?: Record<string, unknown>
+    details?: {
+      phase?: string
+      timeoutMs?: number
+      executionStateUnknown?: boolean
+      [key: string]: unknown
+    }
   }
 }
 
@@ -107,12 +120,19 @@ interface ActingWindow {
   resourcesByUri: Map<string, SkillResourceDescriptor>
 }
 
+export interface ActivationClock {
+  setTimeout(cb: () => void, ms: number): unknown
+  clearTimeout(timer: unknown): void
+}
+
 export interface ActivationSessionOptions {
   site: 'deepseek' | 'qwen' | string
   serverId?: string
   transport: WebActivationTransport
   maxCyclesPerUserTurn?: number
   maxResultChars?: number
+  logicalCallTimeoutMs?: number
+  clock?: ActivationClock
   requireContentApproval?: boolean
   requestSkillApproval?: (input: {
     server: string
@@ -139,6 +159,7 @@ export interface ProcessTurnResult {
   executedCalls: Array<{
     requestId: string
     method: string
+    toolName?: string
     ok: boolean
     errorCode?: string
   }>
@@ -148,7 +169,74 @@ export interface ProcessTurnResult {
 
 const DEFAULT_MAX_CYCLES_PER_USER_TURN = 6
 const DEFAULT_MAX_RESULT_CHARS = 32_000
+const DEFAULT_LOGICAL_CALL_TIMEOUT_MS = 75_000
+const MAX_SAFE_ERROR_MESSAGE_CHARS = 400
 const SHA256_PREFIX_RE = /^sha256:[0-9a-f]{64}$/i
+
+function sanitizeCompactErrorMessage(raw: unknown, fallback: string): string {
+  const text = raw instanceof Error ? raw.message : typeof raw === 'string' ? raw : fallback
+  const trimmed = text
+    .split(/\r?\n/)
+    .filter((line) => !/^\s+at\s+/.test(line))
+    .join(' ')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!trimmed) return fallback
+  return trimmed.length > MAX_SAFE_ERROR_MESSAGE_CHARS
+    ? `${trimmed.slice(0, MAX_SAFE_ERROR_MESSAGE_CHARS - 3)}...`
+    : trimmed
+}
+
+function extractMcpToolError(
+  mcpResult: unknown
+): { code: string; message: string } | null {
+  if (!mcpResult || typeof mcpResult !== 'object' || Array.isArray(mcpResult)) {
+    return null
+  }
+  const obj = mcpResult as { isError?: unknown; content?: unknown; code?: unknown; message?: unknown }
+  if (obj.isError !== true) {
+    return null
+  }
+  let rawText = ''
+  if (Array.isArray(obj.content)) {
+    rawText = obj.content
+      .map((item) =>
+        item && typeof item === 'object' && typeof (item as { text?: unknown }).text === 'string'
+          ? (item as { text: string }).text
+          : ''
+      )
+      .filter(Boolean)
+      .join(' ')
+  }
+  let code = typeof obj.code === 'string' && /^[A-Z][A-Z0-9_]{2,64}$/.test(obj.code) ? obj.code : 'TOOL_EXECUTION_ERROR'
+  let message = rawText
+  if (rawText.trim().startsWith('{')) {
+    try {
+      const parsed = JSON.parse(rawText) as { code?: unknown; message?: unknown; error?: unknown }
+      if (typeof parsed.code === 'string' && /^[A-Z][A-Z0-9_]{2,64}$/.test(parsed.code)) {
+        code = parsed.code
+      }
+      if (typeof parsed.message === 'string' && parsed.message.trim()) {
+        message = parsed.message
+      } else if (typeof parsed.error === 'string' && parsed.error.trim()) {
+        message = parsed.error
+      }
+    } catch {
+      // Keep plain text when content is not structured JSON
+    }
+  } else {
+    const codePrefix = /^([A-Z][A-Z0-9_]{2,64}):\s*(.+)$/s.exec(rawText.trim())
+    if (codePrefix) {
+      code = codePrefix[1]
+      message = codePrefix[2]
+    }
+  }
+  return {
+    code,
+    message: sanitizeCompactErrorMessage(message, 'Read-only MCP tool execution failed')
+  }
+}
 
 async function computeSha256Hex(bytes: Uint8Array): Promise<{ hex: string; digest: string; byteLength: number }> {
   const cryptoObj = (globalThis as unknown as {
@@ -249,6 +337,8 @@ export class ActivationSession {
   private readonly transport: WebActivationTransport
   private readonly maxCyclesPerUserTurn: number
   private readonly maxResultChars: number
+  private readonly logicalCallTimeoutMs: number
+  private readonly clock: ActivationClock
   private readonly requireContentApproval: boolean
   private readonly requestSkillApproval?: ActivationSessionOptions['requestSkillApproval']
 
@@ -259,6 +349,9 @@ export class ActivationSession {
   private bindingId: string | null = null
   private catalogRevision: string | null = null
   private sessionNonce = ''
+  private sessionGeneration = 0
+  private activeCallToken = 0
+  private activeCallGuard: () => boolean = () => true
 
   private catalogSkills: BootstrapSkillSummary[] = []
   private internalSkillsByUri = new Map<string, SkillEntryDescriptor>()
@@ -280,6 +373,11 @@ export class ActivationSession {
     this.transport = options.transport
     this.maxCyclesPerUserTurn = options.maxCyclesPerUserTurn ?? DEFAULT_MAX_CYCLES_PER_USER_TURN
     this.maxResultChars = options.maxResultChars ?? DEFAULT_MAX_RESULT_CHARS
+    this.logicalCallTimeoutMs = options.logicalCallTimeoutMs ?? DEFAULT_LOGICAL_CALL_TIMEOUT_MS
+    this.clock = options.clock ?? {
+      setTimeout: (cb, ms) => globalThis.setTimeout(cb, ms),
+      clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>)
+    }
     this.requireContentApproval = options.requireContentApproval ?? false
     this.requestSkillApproval = options.requestSkillApproval
   }
@@ -340,6 +438,8 @@ export class ActivationSession {
   }
 
   private purgeEphemeralSessionState(preserveVerifiedCache = false): void {
+    this.sessionGeneration += 1
+    this.activeCallToken += 1
     this.heldEntry = null
     this.activeChatPresence.clear()
     this.seenRequestIds.clear()
@@ -687,19 +787,21 @@ export class ActivationSession {
     const executedCalls: ProcessTurnResult['executedCalls'] = []
 
     for (const bad of parsed.rejected) {
+      const requestId = bad.requestId ?? 'invalid'
       emulatedResponses.push(
         formatActivationResultEnvelope({
           protocol: ACTIVATION_CONTRACT_PROTOCOL,
-          requestId: 'invalid',
+          requestId,
           server: this.serverId,
           ok: false,
           error: { code: bad.code, message: bad.message }
         })
       )
-      executedCalls.push({ requestId: 'invalid', method: 'invalid', ok: false, errorCode: bad.code })
+      executedCalls.push({ requestId, method: 'invalid', ok: false, errorCode: bad.code })
     }
 
-    for (const call of parsed.calls) {
+    for (let i = 0; i < parsed.calls.length; i += 1) {
+      const call = parsed.calls[i]
       if (this.seenRequestIds.has(call.requestId)) {
         emulatedResponses.push(
           formatActivationResultEnvelope({
@@ -716,19 +818,27 @@ export class ActivationSession {
 
       if (this.turnCycleCount >= this.maxCyclesPerUserTurn) {
         this.clearActingWindow()
-        emulatedResponses.push(
-          formatActivationResultEnvelope({
-            protocol: ACTIVATION_CONTRACT_PROTOCOL,
-            requestId: call.requestId,
-            server: this.serverId,
+        for (let j = i; j < parsed.calls.length; j += 1) {
+          const skipped = parsed.calls[j]
+          emulatedResponses.push(
+            formatActivationResultEnvelope({
+              protocol: ACTIVATION_CONTRACT_PROTOCOL,
+              requestId: skipped.requestId,
+              server: this.serverId,
+              ok: false,
+              error: {
+                code: 'CYCLE_LIMIT_EXCEEDED',
+                message: `Exceeded maximum of ${this.maxCyclesPerUserTurn} activation calls for this turn`
+              }
+            })
+          )
+          executedCalls.push({
+            requestId: skipped.requestId,
+            method: skipped.method,
             ok: false,
-            error: {
-              code: 'CYCLE_LIMIT_EXCEEDED',
-              message: `Exceeded maximum of ${this.maxCyclesPerUserTurn} activation calls for this turn`
-            }
+            errorCode: 'CYCLE_LIMIT_EXCEEDED'
           })
-        )
-        executedCalls.push({ requestId: call.requestId, method: call.method, ok: false, errorCode: 'CYCLE_LIMIT_EXCEEDED' })
+        }
         break
       }
 
@@ -736,11 +846,14 @@ export class ActivationSession {
       this.turnCycleCount += 1
       this.state = 'WAITING_TOOL'
 
-      const resultEnvelope = await this.executeSingleCall(call)
+      const resultEnvelope = await this.executeCallWithDeadline(call)
       emulatedResponses.push(formatActivationResultEnvelope(resultEnvelope))
       executedCalls.push({
         requestId: call.requestId,
         method: call.method,
+        ...(typeof call.params.name === 'string' && call.params.name.trim()
+          ? { toolName: call.params.name.trim() }
+          : {}),
         ok: resultEnvelope.ok,
         ...(resultEnvelope.error ? { errorCode: resultEnvelope.error.code } : {})
       })
@@ -763,9 +876,78 @@ export class ActivationSession {
     }
   }
 
+  private async executeCallWithDeadline(call: ParsedActivationCall): Promise<ActivationEnvelopeResultPayload> {
+    const startSessionGen = this.sessionGeneration
+    const callToken = ++this.activeCallToken
+    let settled = false
+    const previousGuard = this.activeCallGuard
+    const guard = () =>
+      !settled &&
+      this.sessionGeneration === startSessionGen &&
+      this.activeCallToken === callToken
+    this.activeCallGuard = guard
+
+    let timeoutTimer: unknown = null
+    try {
+      const deadlinePromise = new Promise<ActivationEnvelopeResultPayload>((resolve) => {
+        timeoutTimer = this.clock.setTimeout(() => {
+          if (settled) return
+          settled = true
+          if (this.sessionGeneration === startSessionGen && this.getState() === 'WAITING_TOOL') {
+            this.state = 'RESUMING'
+          }
+          resolve({
+            protocol: ACTIVATION_CONTRACT_PROTOCOL,
+            requestId: call.requestId,
+            server: this.serverId,
+            ok: false,
+            error: {
+              code: 'TIMEOUT',
+              message: `Activation call timed out after ${this.logicalCallTimeoutMs}ms (phase: execution); remote execution outcome is unknown, do not assume it failed to run.`
+            }
+          })
+        }, this.logicalCallTimeoutMs)
+      })
+
+      const executionPromise = Promise.resolve()
+        .then(() => this.executeSingleCall(call, guard))
+        .catch((err): ActivationEnvelopeResultPayload => ({
+          protocol: ACTIVATION_CONTRACT_PROTOCOL,
+          requestId: call.requestId,
+          server: this.serverId,
+          ok: false,
+          error: {
+            code: 'EXECUTION_ERROR',
+            message: sanitizeCompactErrorMessage(err, 'Activation call failed unexpectedly')
+          }
+        }))
+
+      const outcome = await Promise.race([executionPromise, deadlinePromise])
+      settled = true
+      return outcome
+    } finally {
+      settled = true
+      if (timeoutTimer !== null) {
+        this.clock.clearTimeout(timeoutTimer)
+      }
+      if (this.activeCallGuard === guard) {
+        this.activeCallGuard = previousGuard
+      }
+      if (this.sessionGeneration === startSessionGen && this.getState() === 'WAITING_TOOL') {
+        this.state = 'RESUMING'
+      }
+    }
+  }
+
   private mapTransportFailure(requestId: string, res: WebActivationMcpTransportResult): ActivationEnvelopeResultPayload {
     const errCode = res.error?.code ?? 'MCP_ERROR'
-    const errMsg = res.error?.message ?? 'MCP request failed'
+    const phase = typeof res.error?.details?.phase === 'string' ? res.error.details.phase : undefined
+    const rawMsg = res.error?.message ?? 'MCP request failed'
+    const compactMsg = sanitizeCompactErrorMessage(rawMsg, 'MCP request failed')
+    const errMsg =
+      errCode === 'TIMEOUT'
+        ? `${compactMsg}${phase ? ` (phase: ${phase})` : ''} — execution state may be unknown.`
+        : compactMsg
     if (errCode === 'CONSENT_REQUIRED') {
       this.revoke()
     } else if (errCode === 'APP_UNAVAILABLE') {
@@ -773,7 +955,7 @@ export class ActivationSession {
       this.state = 'UNAVAILABLE'
     } else if (errCode === 'SESSION_INVALIDATED') {
       this.invalidate()
-    } else {
+    } else if (errCode !== 'TIMEOUT') {
       this.clearActingWindow()
     }
     return {
@@ -804,7 +986,10 @@ export class ActivationSession {
     return null
   }
 
-  private async executeSingleCall(call: ParsedActivationCall): Promise<ActivationEnvelopeResultPayload> {
+  private async executeSingleCall(
+    call: ParsedActivationCall,
+    guard: () => boolean = () => true
+  ): Promise<ActivationEnvelopeResultPayload> {
     if (call.method === 'tools.schema' || call.method === 'tools/describe') {
       return await this.executeToolsSchemaCall(call.requestId, call.params)
     }
@@ -896,10 +1081,39 @@ export class ActivationSession {
     })
 
     if (!res.ok) {
+      if (!guard()) {
+        return {
+          protocol: ACTIVATION_CONTRACT_PROTOCOL,
+          requestId: call.requestId,
+          server: this.serverId,
+          ok: false,
+          error: { code: 'TIMEOUT', message: 'Call superseded or timed out before transport response completed' }
+        }
+      }
       return this.mapTransportFailure(call.requestId, res)
     }
 
-    if (res.mcp?.error) {
+    if (!guard()) {
+      return {
+        protocol: ACTIVATION_CONTRACT_PROTOCOL,
+        requestId: call.requestId,
+        server: this.serverId,
+        ok: false,
+        error: { code: 'TIMEOUT', message: 'Call superseded or timed out before result processing' }
+      }
+    }
+
+    if (!res.mcp || typeof res.mcp !== 'object' || Array.isArray(res.mcp)) {
+      return {
+        protocol: ACTIVATION_CONTRACT_PROTOCOL,
+        requestId: call.requestId,
+        server: this.serverId,
+        ok: false,
+        error: { code: 'INVALID_MCP_RESPONSE', message: 'Bridge returned missing or malformed MCP payload' }
+      }
+    }
+
+    if (res.mcp.error) {
       this.clearActingWindow()
       return {
         protocol: ACTIVATION_CONTRACT_PROTOCOL,
@@ -908,12 +1122,22 @@ export class ActivationSession {
         ok: false,
         error: {
           code: `JSONRPC_${res.mcp.error.code ?? -32000}`,
-          message: res.mcp.error.message ?? 'MCP server returned JSON-RPC error'
+          message: sanitizeCompactErrorMessage(res.mcp.error.message, 'MCP server returned JSON-RPC error')
         }
       }
     }
 
-    const mcpResult = res.mcp?.result
+    if (!('result' in res.mcp) || res.mcp.result === undefined) {
+      return {
+        protocol: ACTIVATION_CONTRACT_PROTOCOL,
+        requestId: call.requestId,
+        server: this.serverId,
+        ok: false,
+        error: { code: 'INVALID_MCP_RESPONSE', message: 'MCP response omitted both result and error' }
+      }
+    }
+
+    const mcpResult = res.mcp.result
 
     if (normalizedMethod === 'skills/get') {
       return await this.handleSkillsGetResult(call.requestId, requestedUri, mcpResult)
@@ -1328,6 +1552,19 @@ export class ActivationSession {
       }
     }
 
+    if (!this.activeCallGuard()) {
+      return {
+        ok: false,
+        envelope: {
+          protocol: ACTIVATION_CONTRACT_PROTOCOL,
+          requestId,
+          server: this.serverId,
+          ok: false,
+          error: { code: 'TIMEOUT', message: 'Skill activation superseded or timed out' }
+        }
+      }
+    }
+
     if (responseCatalogRevision && this.catalogRevision !== null && responseCatalogRevision !== this.catalogRevision) {
       this.catalogRevision = responseCatalogRevision
     }
@@ -1407,6 +1644,18 @@ export class ActivationSession {
       })
     }
 
+    if (!this.activeCallGuard()) {
+      return {
+        ok: false,
+        envelope: {
+          protocol: ACTIVATION_CONTRACT_PROTOCOL,
+          requestId,
+          server: this.serverId,
+          ok: false,
+          error: { code: 'TIMEOUT', message: 'Skill activation timed out before opening window' }
+        }
+      }
+    }
     const window: ActingWindow = {
       server: this.serverId,
       skillName: fullEntry.name,
@@ -1598,6 +1847,19 @@ export class ActivationSession {
       }
     }
 
+    if (!this.activeCallGuard()) {
+      return {
+        ok: false,
+        envelope: {
+          protocol: ACTIVATION_CONTRACT_PROTOCOL,
+          requestId,
+          server: this.serverId,
+          ok: false,
+          error: { code: 'TIMEOUT', message: 'Resource read timed out before cache commit' }
+        }
+      }
+    }
+
     this.verifiedResourceCache.set(expectedUri, {
       server: this.serverId,
       scope: this.getScopeKey(),
@@ -1669,6 +1931,17 @@ export class ActivationSession {
     offset: number,
     maxChars?: number
   ): ActivationEnvelopeResultPayload {
+    const toolError = extractMcpToolError(mcpResult)
+    if (toolError) {
+      return {
+        protocol: ACTIVATION_CONTRACT_PROTOCOL,
+        requestId,
+        server: this.serverId,
+        ok: false,
+        error: toolError
+      }
+    }
+
     const serialized = JSON.stringify(mcpResult)
     if (serialized.length <= this.maxResultChars && offset === 0 && !maxChars) {
       return {

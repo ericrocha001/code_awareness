@@ -49,6 +49,10 @@ export type NativeMessageSender = (payload: Record<string, unknown>) => Promise<
 export interface NativePortSenderOptions {
   idleTtlMs?: number
   requestTimeoutMs?: number
+  clock?: {
+    setTimeout(cb: () => void, ms: number): ReturnType<typeof setTimeout>
+    clearTimeout(timer: ReturnType<typeof setTimeout>): void
+  }
 }
 
 export interface NativePortSenderStats {
@@ -62,8 +66,8 @@ export interface ReusableNativePortSender extends NativeMessageSender {
   getPortStats: () => NativePortSenderStats
 }
 
-const DEFAULT_PORT_IDLE_TTL_MS = 30_000
-const DEFAULT_PORT_REQUEST_TIMEOUT_MS = 20_000
+export const DEFAULT_PORT_IDLE_TTL_MS = 30_000
+export const DEFAULT_PORT_REQUEST_TIMEOUT_MS = 20_000
 
 function parseOrigin(urlValue: string | undefined): string | null {
   if (!urlValue) return null
@@ -99,6 +103,10 @@ export function createChromeNativePortSender(
 ): ReusableNativePortSender {
   const idleTtlMs = options.idleTtlMs ?? DEFAULT_PORT_IDLE_TTL_MS
   const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_PORT_REQUEST_TIMEOUT_MS
+  const timerApi = options.clock ?? {
+    setTimeout: (cb: () => void, ms: number) => setTimeout(cb, ms),
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer)
+  }
 
   let activePort: ChromeNativePortLike | null = null
   let connectCount = 0
@@ -115,7 +123,7 @@ export function createChromeNativePortSender(
 
   const clearIdleTimer = (): void => {
     if (idleTimer !== null) {
-      clearTimeout(idleTimer)
+      timerApi.clearTimeout(idleTimer)
       idleTimer = null
     }
   }
@@ -137,11 +145,15 @@ export function createChromeNativePortSender(
     const entries = Array.from(pending.entries())
     pending.clear()
     for (const [id, entry] of entries) {
-      clearTimeout(entry.timer)
+      timerApi.clearTimeout(entry.timer)
       entry.resolve({
         id,
         ok: false,
-        error: { code, message }
+        error: {
+          code,
+          message,
+          details: { phase: 'native_port', executionStateUnknown: true }
+        }
       })
     }
   }
@@ -149,7 +161,7 @@ export function createChromeNativePortSender(
   const scheduleIdleClose = (): void => {
     clearIdleTimer()
     if (!activePort || pending.size > 0 || idleTtlMs <= 0) return
-    idleTimer = setTimeout(() => {
+    idleTimer = timerApi.setTimeout(() => {
       idleTimer = null
       if (pending.size === 0 && activePort) {
         closePort('IDLE_TIMEOUT')
@@ -159,15 +171,13 @@ export function createChromeNativePortSender(
   }
 
   const handlePortMessage = (response: unknown): void => {
-    const respId =
-      response && typeof response === 'object' && typeof (response as { id?: unknown }).id === 'string'
-        ? (response as { id: string }).id
-        : ''
+    if (!response || typeof response !== 'object') return
+    const respId = typeof (response as { id?: unknown }).id === 'string' ? (response as { id: string }).id : ''
     if (!respId) return
     const entry = pending.get(respId)
     if (!entry) return
     pending.delete(respId)
-    clearTimeout(entry.timer)
+    timerApi.clearTimeout(entry.timer)
     entry.resolve(response)
     if (pending.size === 0) {
       scheduleIdleClose()
@@ -215,24 +225,89 @@ export function createChromeNativePortSender(
         resolve({
           id,
           ok: false,
-          error: { code: 'APP_UNAVAILABLE', message: 'chrome.runtime.sendNativeMessage is unavailable' }
+          error: {
+            code: 'APP_UNAVAILABLE',
+            message: 'chrome.runtime.sendNativeMessage is unavailable',
+            details: { phase: 'native_port' }
+          }
         })
         return
       }
-      runtime.sendNativeMessage(NATIVE_HOST_APPLICATION, { ...payload, id }, (response) => {
-        if (runtime.lastError) {
+      let settled = false
+      const timer = timerApi.setTimeout(() => {
+        if (settled) return
+        settled = true
+        resolve({
+          id,
+          ok: false,
+          error: {
+            code: 'TIMEOUT',
+            message: `One-shot native messaging request "${id}" timed out after ${requestTimeoutMs}ms`,
+            details: { phase: 'native_port', timeoutMs: requestTimeoutMs, executionStateUnknown: true }
+          }
+        })
+      }, requestTimeoutMs)
+      maybeUnrefTimer(timer)
+
+      try {
+        runtime.sendNativeMessage(NATIVE_HOST_APPLICATION, { ...payload, id }, (response) => {
+          if (settled) return
+          settled = true
+          timerApi.clearTimeout(timer)
+          if (runtime.lastError) {
+            resolve({
+              id,
+              ok: false,
+              error: {
+                code: 'APP_UNAVAILABLE',
+                message: runtime.lastError.message ?? 'Native messaging host disconnected',
+                details: { phase: 'native_port', executionStateUnknown: true }
+              }
+            })
+            return
+          }
+          if (!response || typeof response !== 'object') {
+            resolve({
+              id,
+              ok: false,
+              error: {
+                code: 'INVALID_MCP_RESPONSE',
+                message: 'Native messaging host returned non-object response',
+                details: { phase: 'native_port' }
+              }
+            })
+            return
+          }
+          const respId = (response as { id?: unknown }).id
+          if (respId !== undefined && respId !== id) {
+            resolve({
+              id,
+              ok: false,
+              error: {
+                code: 'INVALID_MCP_RESPONSE',
+                message: 'One-shot native messaging response correlation id mismatch',
+                details: { phase: 'native_port' }
+              }
+            })
+            return
+          }
+          resolve(response)
+        })
+      } catch (err) {
+        if (!settled) {
+          settled = true
+          timerApi.clearTimeout(timer)
           resolve({
             id,
             ok: false,
             error: {
               code: 'APP_UNAVAILABLE',
-              message: runtime.lastError.message ?? 'Native messaging host disconnected'
+              message: err instanceof Error ? err.message : 'sendNativeMessage failed',
+              details: { phase: 'native_port' }
             }
           })
-          return
         }
-        resolve(response)
-      })
+      }
     })
 
   const sender = ((payload: Record<string, unknown>): Promise<unknown> => {
@@ -269,13 +344,17 @@ export function createChromeNativePortSender(
     }
 
     return new Promise((resolve) => {
-      const timer = setTimeout(() => {
+      const timer = timerApi.setTimeout(() => {
         if (!pending.has(id)) return
         pending.delete(id)
         resolve({
           id,
           ok: false,
-          error: { code: 'APP_UNAVAILABLE', message: `Native messaging request "${id}" timed out` }
+          error: {
+            code: 'TIMEOUT',
+            message: `Native messaging request "${id}" timed out after ${requestTimeoutMs}ms`,
+            details: { phase: 'native_port', timeoutMs: requestTimeoutMs, executionStateUnknown: true }
+          }
         })
         if (pending.size === 0) {
           scheduleIdleClose()
@@ -289,7 +368,7 @@ export function createChromeNativePortSender(
       } catch (err) {
         if (pending.has(id)) {
           pending.delete(id)
-          clearTimeout(timer)
+          timerApi.clearTimeout(timer)
         }
         detachAndClearPort(port)
         resolve({
@@ -297,7 +376,8 @@ export function createChromeNativePortSender(
           ok: false,
           error: {
             code: 'APP_UNAVAILABLE',
-            message: err instanceof Error ? err.message : 'Native messaging port postMessage failed'
+            message: err instanceof Error ? err.message : 'Native messaging port postMessage failed',
+            details: { phase: 'native_port' }
           }
         })
       }

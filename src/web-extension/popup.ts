@@ -54,7 +54,7 @@ function sendTab<T>(tabId: number, msg: Record<string, unknown>): Promise<T | nu
   })
 }
 
-async function initPopup(): Promise<void> {
+export async function initPopup(): Promise<void> {
   const doc = (globalThis as unknown as { document?: Document }).document
   const chromeApi = getChromeApi()
   if (!doc || !chromeApi?.tabs) return
@@ -118,15 +118,33 @@ async function initPopup(): Promise<void> {
     }
 
     if (tabId && detected) {
-      const tabState = await sendTab<{ state?: string; lastError?: string | null }>(tabId, {
+      const tabState = await sendTab<{
+        state?: string
+        lastError?: string | null
+        lastDelivery?: { status?: string; reason?: string; requestIds?: string[] } | null
+        lastDiagnostic?: { code?: string; phase?: string; requestId?: string; message?: string; recoverable?: boolean } | null
+      }>(tabId, {
         type: 'CONTENT_GET_STATE'
       })
       stateBadge.textContent = tabState?.state ?? 'INACTIVE'
       btnActivate.disabled = false
       btnNewChat.disabled = false
       btnRevoke.disabled = false
-      if (tabState?.lastError) {
+      if (tabState?.lastDiagnostic) {
+        const d = tabState.lastDiagnostic
+        const phase = d.phase ? `[${d.phase}] ` : ''
+        const req = d.requestId ? ` (${d.requestId})` : ''
+        const actionHint =
+          d.code === 'SESSION_INVALIDATED' || d.code === 'SESSION_REVOKED'
+            ? ' Re-activate when ready.'
+            : d.code === 'DELIVERY_UNKNOWN' || d.code === 'DELIVERY_RECOVERY_EXPIRED'
+              ? ' Verify the chat conversation before continuing.'
+              : ''
+        errorBox.textContent = `${phase}${d.code ?? 'DIAGNOSTIC'}${req}: ${d.message ?? tabState.lastError ?? ''}${actionHint}`
+      } else if (tabState?.lastError) {
         errorBox.textContent = tabState.lastError
+      } else if (tabState?.lastDelivery && !tabState.lastDelivery.reason && tabState.lastDelivery.status === 'AWAITING_DELIVERY_ACK') {
+        errorBox.textContent = 'Awaiting chat delivery confirmation...'
       }
     } else {
       stateBadge.textContent = 'INACTIVE'
@@ -208,4 +226,6 @@ async function initPopup(): Promise<void> {
   await refresh()
 }
 
-void initPopup()
+if (typeof (globalThis as { document?: unknown }).document !== 'undefined') {
+  void initPopup()
+}

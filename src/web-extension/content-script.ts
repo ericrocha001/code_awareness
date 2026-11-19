@@ -1,5 +1,10 @@
 import {
+  ACTIVATION_CONTRACT_PROTOCOL,
+  extractActivationResultEnvelopes
+} from '../shared/web-activation/activation-contract'
+import {
   ActivationSession,
+  type ActivationClock,
   type ActivationSessionState,
   type WebActivationTransport
 } from '../shared/web-activation/activation-session'
@@ -8,24 +13,86 @@ import type { ChatDomTurn, WebChatAdapter } from './adapters/adapter-interface'
 import { DeepSeekWebAdapter } from './adapters/deepseek-adapter'
 import { QwenWebAdapter } from './adapters/qwen-adapter'
 import { getBuiltWebExtensionBuildId } from './runtime-config'
+import {
+  createRuntimeMessageTransport as createRuntimeMessageTransportImpl,
+  DEFAULT_RUNTIME_MESSAGE_TIMEOUT_MS
+} from './runtime-transport'
 
 const GLOBAL_CONTENT_CONTROLLER_KEY = '__codeAwarenessContentController__'
 const ACTIVE_DRAFT_TYPING_GRACE_MS = 2500
 const MAINTENANCE_DRAIN_WINDOW_MS = 15_000
+export { DEFAULT_RUNTIME_MESSAGE_TIMEOUT_MS }
+export const DEFAULT_DELIVERY_ACK_TIMEOUT_MS = 10_000
+export const DEFAULT_DELIVERY_RECOVERY_TTL_MS = 60_000
+
+const LITERAL_EGRESS_METHODS = new Set([
+  'skills.load',
+  'skills/get',
+  'resources.read',
+  'resources/read'
+])
+const LITERAL_EGRESS_TOOLS = new Set([
+  'read_code',
+  'read_artifact_section',
+  'get_artifact',
+  'verify_academy_change_impact',
+  'analyze_academy_change_impact',
+  'get_academy_git_status'
+])
+
+export interface ControllerClock extends ActivationClock {
+  now(): number
+}
+
+export interface ContentControllerOptions {
+  deliveryAckTimeoutMs?: number
+  deliveryRecoveryTtlMs?: number
+  logicalCallTimeoutMs?: number
+  clock?: ControllerClock
+}
 
 export interface ControllerDiagnostic {
   code: string
+  phase?: 'parse' | 'execution' | 'delivery' | 'session' | 'observer'
+  requestId?: string
   message: string
   epoch: number
   conversationKey: string | null
   turnMessageId?: string
+  recoverable?: boolean
 }
 
 export interface LastDeliveryStatus {
   ok: boolean
+  status: 'DELIVERED' | 'AWAITING_DELIVERY_ACK' | 'PENDING_RECOVERY' | 'DELIVERY_UNKNOWN' | 'PRE_DISPATCH_BLOCKED' | 'FAILED'
   reason?: string
   requestIds: string[]
   epoch: number
+}
+
+interface PendingDeliveryRecord {
+  kind: 'tool_result' | 'bootstrap'
+  replyText: string
+  requestIds: string[]
+  expectedEnvelopes: Map<string, string>
+  needsLiteralConsent: boolean
+  epoch: number
+  conversationKey: string | null
+  turnMessageId?: string
+  bindingSnapshot: {
+    mode: 'PROJECT' | 'GLOBAL_ONLY'
+    projectId: string | null
+    instanceId: string | null
+    bindingId: string | null
+  }
+  baselineUserCount: number
+  baselineUserStrongKeys: Set<string>
+  baselineUserElements: WeakSet<Element>
+  firstAttemptAt: number
+  expiresAt: number
+  phase: 'PENDING_DISPATCH' | 'AWAITING_DELIVERY_ACK'
+  lastReason: string
+  inFlight: boolean
 }
 
 interface ObservedAnchor {
@@ -83,103 +150,13 @@ export function selectWebChatAdapter(locationHref: string): WebChatAdapter | nul
   return null
 }
 
-export function createRuntimeMessageTransport(
-  chromeApi: ChromeApi,
-  site: 'deepseek' | 'qwen',
-  webOrigin: string
-): WebActivationTransport {
-  const sendRuntimeMessage = <T>(payload: Record<string, unknown>): Promise<T> =>
-    new Promise((resolve) => {
-      if (!chromeApi.runtime?.sendMessage) {
-        resolve({
-          ok: false,
-          error: { code: 'APP_UNAVAILABLE', message: 'chrome.runtime.sendMessage unavailable' }
-        } as T)
-        return
-      }
-      chromeApi.runtime.sendMessage(payload, (response) => {
-        if (chromeApi.runtime?.lastError) {
-          resolve({
-            ok: false,
-            error: {
-              code: 'APP_UNAVAILABLE',
-              message: chromeApi.runtime.lastError.message ?? 'Extension background disconnected'
-            }
-          } as T)
-          return
-        }
-        resolve((response ?? { ok: false, error: { code: 'APP_UNAVAILABLE', message: 'Empty bridge response' } }) as T)
-      })
-    })
-
-  return {
-    async getStatus() {
-      const res = await sendRuntimeMessage<{
-        ok?: boolean
-        result?: {
-          available?: boolean
-          mode?: 'PROJECT' | 'GLOBAL_ONLY'
-          projectId?: string | null
-          instanceId?: string | null
-          bindingId?: string | null
-          catalogRevision?: string | null
-          errorCode?: string
-        }
-        error?: { code?: string }
-      }>({ type: 'GET_STATUS', site, webOrigin })
-
-      if (!res?.ok || !res.result?.available) {
-        return {
-          available: false,
-          errorCode: res?.error?.code ?? res?.result?.errorCode ?? 'APP_UNAVAILABLE'
-        }
-      }
-
-      return {
-        available: true,
-        mode: res.result.mode ?? (res.result.projectId ? 'PROJECT' : 'GLOBAL_ONLY'),
-        projectId: res.result.projectId ?? null,
-        instanceId: res.result.instanceId ?? null,
-        bindingId: res.result.bindingId ?? null,
-        ...(res.result.catalogRevision ? { catalogRevision: res.result.catalogRevision } : {})
-      }
-    },
-
-    async mcpRequest(input) {
-      const res = await sendRuntimeMessage<{
-        ok?: boolean
-        result?: {
-          mcp?: { result?: unknown; error?: { code?: number; message?: string } }
-        }
-        error?: { code: string; message: string; details?: Record<string, unknown> }
-      }>({
-        type: 'MCP_REQUEST',
-        site,
-        webOrigin,
-        method: input.method,
-        params: input.params ?? {},
-        expectedProjectId: input.expectedProjectId,
-        expectedBindingId: input.expectedBindingId,
-        expectedInstanceId: input.expectedInstanceId
-      })
-
-      if (!res?.ok) {
-        return {
-          ok: false,
-          error: res?.error ?? { code: 'APP_UNAVAILABLE', message: 'MCP request failed' }
-        }
-      }
-
-      return {
-        ok: true,
-        mcp: res.result?.mcp
-      }
-    }
-  }
-}
+export const createRuntimeMessageTransport = createRuntimeMessageTransportImpl
 
 export class ContentSessionController {
   readonly session: ActivationSession
+  private readonly clock: ControllerClock
+  private readonly deliveryAckTimeoutMs: number
+  private readonly deliveryRecoveryTtlMs: number
   private stopObserver: (() => void) | null = null
   private activationEpoch = 0
   private activeConversationKey: string | null = null
@@ -196,26 +173,48 @@ export class ContentSessionController {
   private lastErrorMessage: string | null = null
   private lastDiagnostic: ControllerDiagnostic | null = null
   private lastDelivery: LastDeliveryStatus | null = null
+  private pendingDelivery: PendingDeliveryRecord | null = null
+  private userTurnObservedAfterExecution = false
+  private deliveryAckTimer: unknown = null
+  private deliveryRecoveryExpiryTimer: unknown = null
+  private continuationTimer: unknown = null
   private processing = false
   private pendingMutationCheck = false
   private pillEl: HTMLElement | null = null
   private lastComposerInputAt = 0
+  private programmaticComposerWrite = false
   private maintenanceDrainUntil = 0
-  private readonly inputListener: () => void
+  private readonly inputListener: (ev?: Event) => void
   private onDisposeCallback?: () => void
 
   constructor(
     readonly adapter: WebChatAdapter,
     readonly rootDocument: Document,
-    transport: WebActivationTransport,
-    private readonly mountUi = true
+    private readonly transport: WebActivationTransport,
+    private readonly mountUi = true,
+    options: ContentControllerOptions = {}
   ) {
+    this.clock = options.clock ?? {
+      now: () => Date.now(),
+      setTimeout: (cb, ms) => globalThis.setTimeout(cb, ms),
+      clearTimeout: (timer) => globalThis.clearTimeout(timer as ReturnType<typeof setTimeout>)
+    }
+    this.deliveryAckTimeoutMs = options.deliveryAckTimeoutMs ?? DEFAULT_DELIVERY_ACK_TIMEOUT_MS
+    this.deliveryRecoveryTtlMs = options.deliveryRecoveryTtlMs ?? DEFAULT_DELIVERY_RECOVERY_TTL_MS
     this.session = new ActivationSession({
       site: adapter.site,
-      transport
+      transport,
+      ...(options.logicalCallTimeoutMs !== undefined ? { logicalCallTimeoutMs: options.logicalCallTimeoutMs } : {}),
+      clock: this.clock
     })
-    this.inputListener = () => {
-      this.lastComposerInputAt = Date.now()
+    this.inputListener = (ev?: Event) => {
+      if (this.programmaticComposerWrite && ev?.isTrusted === false) {
+        return
+      }
+      this.lastComposerInputAt = this.clock.now()
+      if (this.pendingDelivery?.phase === 'PENDING_DISPATCH' && !this.processing && this.canQuickDispatchFromDom()) {
+        void this.handleDomMutation()
+      }
     }
     this.rootDocument.addEventListener?.('input', this.inputListener, true)
     if (this.mountUi) {
@@ -296,6 +295,7 @@ export class ContentSessionController {
     }
 
     this.activationEpoch += 1
+    this.clearPendingDeliveryState()
     this.awaitingPostSwitchHydration = false
     this.pendingMutationCheck = false
     this.activeConversationKey = this.getConversationKey()
@@ -303,34 +303,22 @@ export class ContentSessionController {
     this.ensureObserving()
 
     if (sendBootstrap) {
-      const sent = await this.adapter.sendMessage(this.rootDocument, res.bootstrapPrompt)
-      if (!sent.ok) {
+      const sent = await this.dispatchMessageAndTrack({
+        kind: 'bootstrap',
+        replyText: res.bootstrapPrompt,
+        requestIds: [],
+        needsLiteralConsent: false,
+        runEpoch: this.activationEpoch,
+        runConversationKey: this.activeConversationKey
+      })
+      if (!sent.dispatched) {
         const reason = sent.reason ?? 'SEND_FAILED'
-        this.lastErrorMessage = reason
-        this.lastDelivery = {
-          ok: false,
-          reason,
-          requestIds: [],
-          epoch: this.activationEpoch
-        }
-        this.lastDiagnostic = {
-          code: reason,
-          message: `Failed to inject bootstrap prompt: ${reason}`,
-          epoch: this.activationEpoch,
-          conversationKey: this.activeConversationKey
-        }
-        this.renderPill()
         return {
           ok: false,
           state: this.session.getState(),
           bootstrapPrompt: res.bootstrapPrompt,
-          error: { code: reason, message: 'Failed to inject bootstrap prompt' }
+          error: { code: reason, message: `Failed to inject bootstrap prompt (${reason})` }
         }
-      }
-      this.lastDelivery = {
-        ok: true,
-        requestIds: [],
-        epoch: this.activationEpoch
       }
     }
 
@@ -344,6 +332,7 @@ export class ContentSessionController {
 
   startNewChat(): void {
     this.activationEpoch += 1
+    this.clearPendingDeliveryState()
     this.lastErrorMessage = null
     this.lastDiagnostic = null
     this.lastDelivery = null
@@ -358,8 +347,18 @@ export class ContentSessionController {
 
   revoke(): void {
     this.activationEpoch += 1
+    this.clearPendingDeliveryState()
     this.pendingMutationCheck = false
+    this.lastDelivery = null
     this.lastErrorMessage = 'Consent revoked for this chat session'
+    this.lastDiagnostic = {
+      code: 'SESSION_REVOKED',
+      phase: 'session',
+      message: 'Consent revoked for this chat session',
+      epoch: this.activationEpoch,
+      conversationKey: this.activeConversationKey,
+      recoverable: false
+    }
     this.session.revoke()
     this.stopObserving()
     this.renderPill()
@@ -374,14 +373,17 @@ export class ContentSessionController {
     if (this.processing) {
       return { ready: false, reason: 'ACTIVE_TOOL_OR_DELIVERY', buildId }
     }
+    if (this.pendingDelivery) {
+      return { ready: false, reason: 'ACTIVE_DELIVERY_RECOVERY', buildId }
+    }
     if (this.adapter.isGenerating(this.rootDocument)) {
       return { ready: false, reason: 'ASSISTANT_STREAMING', buildId }
     }
-    if (Date.now() - this.lastComposerInputAt < ACTIVE_DRAFT_TYPING_GRACE_MS) {
+    if (this.clock.now() - this.lastComposerInputAt < ACTIVE_DRAFT_TYPING_GRACE_MS) {
       return { ready: false, reason: 'ACTIVE_DRAFT_INPUT', buildId }
     }
     if (enterDrain) {
-      this.maintenanceDrainUntil = Date.now() + MAINTENANCE_DRAIN_WINDOW_MS
+      this.maintenanceDrainUntil = this.clock.now() + MAINTENANCE_DRAIN_WINDOW_MS
     }
     return { ready: true, buildId }
   }
@@ -392,6 +394,7 @@ export class ContentSessionController {
 
   dispose(): void {
     this.activationEpoch += 1
+    this.clearPendingDeliveryState()
     this.pendingMutationCheck = false
     this.maintenanceDrainUntil = 0
     this.stopObserving()
@@ -498,13 +501,16 @@ export class ContentSessionController {
         this.activeConversationKey = currentKey
       } else {
         this.activationEpoch += 1
+        this.clearPendingDeliveryState()
         this.activeConversationKey = currentKey
         this.session.startNewChat()
         this.recordBaseline(turns)
         this.awaitingPostSwitchHydration = turns.length === 0
         this.lastErrorMessage = null
+        this.lastDelivery = null
         this.lastDiagnostic = {
           code: 'CONVERSATION_SWITCHED',
+          phase: 'session',
           message: 'Switched conversation; established baseline for new conversation',
           epoch: this.activationEpoch,
           conversationKey: currentKey
@@ -555,7 +561,49 @@ export class ContentSessionController {
     if (newTrailingUserEntries.length > 0) {
       const newest = newTrailingUserEntries[newTrailingUserEntries.length - 1].turn
       if (!RESULT_FENCE_RE.test(newest.text)) {
+        this.userTurnObservedAfterExecution = true
         this.session.beginUserTurn()
+        if (this.pendingDelivery && this.pendingDelivery.phase === 'PENDING_DISPATCH') {
+          const cancelled = this.pendingDelivery
+          this.clearPendingDeliveryState()
+          this.lastDelivery = {
+            ok: false,
+            status: 'FAILED',
+            reason: 'SUPERSEDED_BY_USER_TURN',
+            requestIds: cancelled.requestIds,
+            epoch: this.activationEpoch
+          }
+          this.lastErrorMessage = 'SUPERSEDED_BY_USER_TURN'
+          this.lastDiagnostic = {
+            code: 'SUPERSEDED_BY_USER_TURN',
+            phase: 'delivery',
+            ...(cancelled.requestIds[0] ? { requestId: cancelled.requestIds[0] } : {}),
+            message: 'Pending tool result discarded because a newer user message was submitted.',
+            epoch: this.activationEpoch,
+            conversationKey: this.activeConversationKey,
+            recoverable: false
+          }
+        } else if (this.pendingDelivery && this.pendingDelivery.phase === 'AWAITING_DELIVERY_ACK') {
+          const unknown = this.pendingDelivery
+          this.clearPendingDeliveryState()
+          this.lastDelivery = {
+            ok: false,
+            status: 'DELIVERY_UNKNOWN',
+            reason: 'DELIVERY_UNKNOWN',
+            requestIds: unknown.requestIds,
+            epoch: this.activationEpoch
+          }
+          this.lastErrorMessage = 'DELIVERY_UNKNOWN'
+          this.lastDiagnostic = {
+            code: 'DELIVERY_UNKNOWN',
+            phase: 'delivery',
+            ...(unknown.requestIds[0] ? { requestId: unknown.requestIds[0] } : {}),
+            message: 'New user turn appeared before dispatched message could be confirmed in DOM.',
+            epoch: this.activationEpoch,
+            conversationKey: this.activeConversationKey,
+            recoverable: false
+          }
+        }
       }
     }
 
@@ -589,6 +637,9 @@ export class ContentSessionController {
       return
     }
 
+    const startEpoch = this.activationEpoch
+    const startConversationKey = this.getConversationKey()
+    let cappedWithPending = false
     this.processing = true
     try {
       let iterations = 0
@@ -601,14 +652,39 @@ export class ContentSessionController {
         }
         await this.processSingleDomPass()
       } while (this.pendingMutationCheck && iterations < MAX_DRAIN_ITERATIONS)
+      cappedWithPending = this.pendingMutationCheck && iterations >= MAX_DRAIN_ITERATIONS
+    } catch (err) {
+      this.lastErrorMessage = err instanceof Error ? err.message : 'OBSERVER_PASS_ERROR'
+      this.lastDiagnostic = {
+        code: 'OBSERVER_PASS_ERROR',
+        phase: 'observer',
+        message: 'Unexpected error while processing conversation update',
+        epoch: this.activationEpoch,
+        conversationKey: this.getConversationKey(),
+        recoverable: false
+      }
     } finally {
       this.processing = false
       this.renderPill()
+      if (
+        cappedWithPending &&
+        startEpoch === this.activationEpoch &&
+        this.getConversationKey() === startConversationKey &&
+        this.stopObserver !== null &&
+        this.continuationTimer === null
+      ) {
+        this.continuationTimer = this.clock.setTimeout(() => {
+          this.continuationTimer = null
+          if (startEpoch === this.activationEpoch && this.getConversationKey() === startConversationKey) {
+            void this.handleDomMutation()
+          }
+        }, 0)
+      }
     }
   }
 
   private async processSingleDomPass(): Promise<void> {
-    if (Date.now() < this.maintenanceDrainUntil) {
+    if (this.clock.now() < this.maintenanceDrainUntil) {
       return
     }
     if (!this.adapter.isAuthenticatedChatReady(this.rootDocument)) {
@@ -618,7 +694,12 @@ export class ContentSessionController {
     if (this.reconcileConversationSwitch(turns) === 'HANDLED') {
       return
     }
+    this.confirmDeliveryFromTurns(turns)
     this.syncUserTurnBoundary(turns)
+
+    if (this.pendingDelivery?.phase === 'PENDING_DISPATCH') {
+      await this.attemptPendingDeliveryRecovery()
+    }
 
     if (this.adapter.isGenerating(this.rootDocument)) {
       return
@@ -823,31 +904,510 @@ export class ContentSessionController {
     }
 
     if (processed.shouldSendReply && processed.emulatedResponses.length > 0) {
+      this.userTurnObservedAfterExecution = false
       const replyText = processed.emulatedResponses.join('\n\n')
       const requestIds = processed.executedCalls.map((c) => c.requestId)
-      const sent = await this.adapter.sendMessage(this.rootDocument, replyText)
-      if (runEpoch !== this.activationEpoch || this.getConversationKey() !== runConversationKey) {
+      const failedCall = processed.executedCalls.find((c) => !c.ok)
+      const binding = this.session.getBinding()
+      const needsLiteralConsent = processed.executedCalls.some(
+        (c) =>
+          c.ok &&
+          (LITERAL_EGRESS_METHODS.has(c.method) ||
+            ((c.method === 'tools.call' || c.method === 'tools/call') &&
+              (binding.mode === 'PROJECT' || Boolean(c.toolName && LITERAL_EGRESS_TOOLS.has(c.toolName)))))
+      )
+
+      const dispatchOutcome = await this.dispatchMessageAndTrack({
+        kind: 'tool_result',
+        replyText,
+        requestIds,
+        needsLiteralConsent,
+        runEpoch,
+        runConversationKey,
+        turnMessageId: candidate.messageId,
+        executionError: failedCall
+          ? { requestId: failedCall.requestId, code: failedCall.errorCode ?? 'EXECUTION_ERROR' }
+          : undefined
+      })
+      if (!dispatchOutcome.dispatched && runEpoch === this.activationEpoch && this.getConversationKey() === runConversationKey) {
         return
       }
-      this.lastDelivery = {
-        ok: sent.ok,
-        ...(sent.reason ? { reason: sent.reason } : {}),
-        requestIds,
-        epoch: runEpoch
+    }
+  }
+
+  private clearPendingDeliveryState(): void {
+    if (this.deliveryAckTimer !== null) {
+      this.clock.clearTimeout(this.deliveryAckTimer)
+      this.deliveryAckTimer = null
+    }
+    if (this.deliveryRecoveryExpiryTimer !== null) {
+      this.clock.clearTimeout(this.deliveryRecoveryExpiryTimer)
+      this.deliveryRecoveryExpiryTimer = null
+    }
+    if (this.continuationTimer !== null) {
+      this.clock.clearTimeout(this.continuationTimer)
+      this.continuationTimer = null
+    }
+    this.pendingDelivery = null
+  }
+
+  private canQuickDispatchFromDom(): boolean {
+    if (typeof this.adapter.canDispatchNow === 'function') {
+      return this.adapter.canDispatchNow(this.rootDocument)
+    }
+    return !this.adapter.isGenerating(this.rootDocument)
+  }
+
+  private captureBaselineUserTurns(turns: readonly ChatDomTurn[]) {
+    const strongKeys = new Set<string>()
+    const elements = new WeakSet<Element>()
+    let count = 0
+    for (const turn of turns) {
+      if (turn.role !== 'user') continue
+      count += 1
+      const sk = getStrongKey(turn)
+      if (sk) strongKeys.add(sk)
+      if (turn.element) elements.add(turn.element)
+    }
+    return { count, strongKeys, elements }
+  }
+
+  private confirmDeliveryFromTurns(turns: readonly ChatDomTurn[]): boolean {
+    const pending = this.pendingDelivery
+    if (!pending || pending.phase !== 'AWAITING_DELIVERY_ACK') return false
+    if (pending.epoch !== this.activationEpoch || pending.conversationKey !== this.getConversationKey()) {
+      return false
+    }
+
+    let userOrdinal = 0
+    for (const turn of turns) {
+      if (turn.role !== 'user') continue
+      const idx = userOrdinal
+      userOrdinal += 1
+      const sk = getStrongKey(turn)
+      const isBaseline =
+        (sk !== null && pending.baselineUserStrongKeys.has(sk)) ||
+        (turn.element !== undefined && pending.baselineUserElements.has(turn.element)) ||
+        idx < pending.baselineUserCount
+      if (isBaseline) continue
+
+      let matched = false
+      if (pending.kind === 'bootstrap') {
+        matched =
+          !RESULT_FENCE_RE.test(turn.text) &&
+          turn.text.includes('[Code Awareness Local Context')
+      } else {
+        const foundEnvelopes = extractActivationResultEnvelopes(turn.text)
+        matched =
+          pending.expectedEnvelopes.size > 0 &&
+          Array.from(pending.expectedEnvelopes.entries()).every(([reqId, expectedJson]) =>
+            foundEnvelopes.some((env) => env.requestId === reqId && env.normalizedJson === expectedJson)
+          )
       }
-      if (!sent.ok) {
-        const reason = sent.reason ?? 'SEND_FAILED'
+
+      if (matched) {
+        if (sk) this.observedStrongUserIds.add(sk)
+        if (turn.element) this.observedUserElements.add(turn.element)
+        this.seenUserCount = Math.max(this.seenUserCount, userOrdinal)
+
+        const { requestIds, epoch } = pending
+        this.clearPendingDeliveryState()
+        this.lastDelivery = {
+          ok: true,
+          status: 'DELIVERED',
+          requestIds,
+          epoch
+        }
+        this.lastErrorMessage = null
+        if (this.lastDiagnostic?.phase === 'delivery' || this.lastDiagnostic?.code === 'CONVERSATION_SWITCHED') {
+          this.lastDiagnostic = null
+        }
+        this.renderPill()
+        return true
+      }
+    }
+    return false
+  }
+
+  private async dispatchMessageAndTrack(params: {
+    kind: 'tool_result' | 'bootstrap'
+    replyText: string
+    requestIds: string[]
+    needsLiteralConsent: boolean
+    runEpoch: number
+    runConversationKey: string | null
+    turnMessageId?: string
+    executionError?: { requestId: string; code: string }
+    existingPending?: PendingDeliveryRecord
+  }): Promise<{ dispatched: boolean; reason?: string }> {
+    const baseline = this.captureBaselineUserTurns(this.adapter.readTurns(this.rootDocument))
+    let sent: Awaited<ReturnType<WebChatAdapter['sendMessage']>>
+    try {
+      this.programmaticComposerWrite = true
+      sent = await this.adapter.sendMessage(
+        this.rootDocument,
+        params.replyText,
+        () =>
+          params.runEpoch === this.activationEpoch &&
+          this.getConversationKey() === params.runConversationKey &&
+          !this.userTurnObservedAfterExecution &&
+          (!params.existingPending || ['READY', 'RESUMING', 'LOADING'].includes(this.session.getState()))
+      )
+    } catch (err) {
+      sent = {
+        ok: false,
+        status: 'DISPATCH_ABORTED',
+        reason: err instanceof Error ? err.message : 'SEND_THREW'
+      }
+    } finally {
+      this.programmaticComposerWrite = false
+    }
+
+    if (params.runEpoch !== this.activationEpoch || this.getConversationKey() !== params.runConversationKey) {
+      this.clearPendingDeliveryState()
+      return { dispatched: false, reason: 'CONTEXT_CHANGED_DURING_DISPATCH' }
+    }
+
+    const nowMs = this.clock.now()
+    const firstAttemptAt = params.existingPending?.firstAttemptAt ?? nowMs
+    const expiresAt = params.existingPending?.expiresAt ?? firstAttemptAt + this.deliveryRecoveryTtlMs
+
+    if (!sent.ok) {
+      const reason = sent.reason ?? 'SEND_FAILED'
+      if (sent.status === 'PRE_DISPATCH_BLOCKED' && nowMs < expiresAt) {
+        const expectedEnvelopes =
+          params.existingPending?.expectedEnvelopes ??
+          new Map(extractActivationResultEnvelopes(params.replyText).map((e) => [e.requestId, e.normalizedJson]))
+        const binding = this.session.getBinding()
+
+        const nextPending: PendingDeliveryRecord = {
+          kind: params.kind,
+          replyText: params.replyText,
+          requestIds: params.requestIds,
+          expectedEnvelopes,
+          needsLiteralConsent: params.needsLiteralConsent,
+          epoch: params.runEpoch,
+          conversationKey: params.runConversationKey,
+          turnMessageId: params.turnMessageId,
+          bindingSnapshot: params.existingPending?.bindingSnapshot ?? { ...binding },
+          baselineUserCount: baseline.count,
+          baselineUserStrongKeys: baseline.strongKeys,
+          baselineUserElements: baseline.elements,
+          firstAttemptAt,
+          expiresAt,
+          phase: 'PENDING_DISPATCH',
+          lastReason: reason,
+          inFlight: false
+        }
+        this.pendingDelivery = nextPending
+        if (this.deliveryRecoveryExpiryTimer === null) {
+          this.deliveryRecoveryExpiryTimer = this.clock.setTimeout(() => {
+            this.deliveryRecoveryExpiryTimer = null
+            const active = this.pendingDelivery
+            if (
+              !active ||
+              active.phase !== 'PENDING_DISPATCH' ||
+              active.epoch !== this.activationEpoch ||
+              active.conversationKey !== this.getConversationKey()
+            ) {
+              return
+            }
+            const reqIds = active.requestIds
+            this.clearPendingDeliveryState()
+            this.lastDelivery = {
+              ok: false,
+              status: 'FAILED',
+              reason: 'DELIVERY_RECOVERY_EXPIRED',
+              requestIds: reqIds,
+              epoch: this.activationEpoch
+            }
+            this.lastErrorMessage = 'DELIVERY_RECOVERY_EXPIRED'
+            this.lastDiagnostic = {
+              code: 'DELIVERY_RECOVERY_EXPIRED',
+              phase: 'delivery',
+              ...(reqIds[0] ? { requestId: reqIds[0] } : {}),
+              message: `Pre-dispatch send block (${active.lastReason}) did not clear within 60s; result was not sent.`,
+              epoch: this.activationEpoch,
+              conversationKey: this.getConversationKey(),
+              turnMessageId: active.turnMessageId,
+              recoverable: false
+            }
+            this.renderPill()
+          }, Math.max(1, expiresAt - nowMs))
+        }
+
+        this.lastDelivery = {
+          ok: false,
+          status: 'PENDING_RECOVERY',
+          reason,
+          requestIds: params.requestIds,
+          epoch: params.runEpoch
+        }
         this.lastErrorMessage = reason
         this.lastDiagnostic = {
           code: reason,
-          message: `Failed to send activation reply: ${reason}`,
-          epoch: runEpoch,
-          conversationKey: runConversationKey,
-          turnMessageId: candidate.messageId
+          phase: 'delivery',
+          ...(params.requestIds[0] ? { requestId: params.requestIds[0] } : {}),
+          message: `Waiting safely to send reply (${reason})`,
+          epoch: params.runEpoch,
+          conversationKey: params.runConversationKey,
+          turnMessageId: params.turnMessageId,
+          recoverable: true
         }
-      } else {
-        this.lastErrorMessage = null
+        this.renderPill()
+        return { dispatched: false, reason }
       }
+
+      this.clearPendingDeliveryState()
+      this.lastDelivery = {
+        ok: false,
+        status: 'FAILED',
+        reason,
+        requestIds: params.requestIds,
+        epoch: params.runEpoch
+      }
+      this.lastErrorMessage = reason
+      this.lastDiagnostic = {
+        code: reason,
+        phase: 'delivery',
+        ...(params.requestIds[0] ? { requestId: params.requestIds[0] } : {}),
+        message: `Failed to send activation reply: ${reason}`,
+        epoch: params.runEpoch,
+        conversationKey: params.runConversationKey,
+        turnMessageId: params.turnMessageId,
+        recoverable: false
+      }
+      this.renderPill()
+      return { dispatched: false, reason }
+    }
+
+    // Sent / clicked cleanly: switch to AWAITING_DELIVERY_ACK until DOM confirmation or 10s expiry
+    const expectedEnvelopes =
+      params.existingPending?.expectedEnvelopes ??
+      new Map(extractActivationResultEnvelopes(params.replyText).map((e) => [e.requestId, e.normalizedJson]))
+
+    if (this.deliveryRecoveryExpiryTimer !== null) {
+      this.clock.clearTimeout(this.deliveryRecoveryExpiryTimer)
+      this.deliveryRecoveryExpiryTimer = null
+    }
+    if (this.deliveryAckTimer !== null) {
+      this.clock.clearTimeout(this.deliveryAckTimer)
+      this.deliveryAckTimer = null
+    }
+
+    const ackRecord: PendingDeliveryRecord = {
+      kind: params.kind,
+      replyText: params.replyText,
+      requestIds: params.requestIds,
+      expectedEnvelopes,
+      needsLiteralConsent: params.needsLiteralConsent,
+      epoch: params.runEpoch,
+      conversationKey: params.runConversationKey,
+      turnMessageId: params.turnMessageId,
+      bindingSnapshot: params.existingPending?.bindingSnapshot ?? { ...this.session.getBinding() },
+      baselineUserCount: baseline.count,
+      baselineUserStrongKeys: baseline.strongKeys,
+      baselineUserElements: baseline.elements,
+      firstAttemptAt,
+      expiresAt,
+      phase: 'AWAITING_DELIVERY_ACK',
+      lastReason: 'DISPATCHED',
+      inFlight: false
+    }
+    this.pendingDelivery = ackRecord
+
+    if (params.executionError) {
+      this.lastDiagnostic = {
+        code: params.executionError.code,
+        phase: 'execution',
+        requestId: params.executionError.requestId,
+        message: `Execution reported ${params.executionError.code} for ${params.executionError.requestId}`,
+        epoch: params.runEpoch,
+        conversationKey: params.runConversationKey,
+        turnMessageId: params.turnMessageId,
+        recoverable: false
+      }
+    }
+
+    // Immediate DOM check (handles synchronous test DOM append on sendBtn.click)
+    if (this.confirmDeliveryFromTurns(this.adapter.readTurns(this.rootDocument))) {
+      return { dispatched: true }
+    }
+
+    this.lastDelivery = {
+      ok: false,
+      status: 'AWAITING_DELIVERY_ACK',
+      requestIds: params.requestIds,
+      epoch: params.runEpoch
+    }
+    this.deliveryAckTimer = this.clock.setTimeout(() => {
+      this.deliveryAckTimer = null
+      const active = this.pendingDelivery
+      if (
+        !active ||
+        active.phase !== 'AWAITING_DELIVERY_ACK' ||
+        active.epoch !== this.activationEpoch ||
+        active.conversationKey !== this.getConversationKey()
+      ) {
+        return
+      }
+      const reqIds = active.requestIds
+      this.clearPendingDeliveryState()
+      this.lastDelivery = {
+        ok: false,
+        status: 'DELIVERY_UNKNOWN',
+        reason: 'DELIVERY_UNKNOWN',
+        requestIds: reqIds,
+        epoch: this.activationEpoch
+      }
+      this.lastErrorMessage = 'DELIVERY_UNKNOWN'
+      this.lastDiagnostic = {
+        code: 'DELIVERY_UNKNOWN',
+        phase: 'delivery',
+        ...(reqIds[0] ? { requestId: reqIds[0] } : {}),
+        message: 'Message dispatched to chat, but DOM delivery confirmation timed out (do not auto-resend).',
+        epoch: this.activationEpoch,
+        conversationKey: this.getConversationKey(),
+        turnMessageId: active.turnMessageId,
+        recoverable: false
+      }
+      this.renderPill()
+    }, this.deliveryAckTimeoutMs)
+
+    this.renderPill()
+    return { dispatched: true }
+  }
+
+  private async attemptPendingDeliveryRecovery(): Promise<void> {
+    const pending = this.pendingDelivery
+    if (!pending || pending.phase !== 'PENDING_DISPATCH' || pending.inFlight) return
+
+    if (
+      pending.epoch !== this.activationEpoch ||
+      pending.conversationKey !== this.getConversationKey() ||
+      this.userTurnObservedAfterExecution ||
+      !['READY', 'RESUMING', 'LOADING'].includes(this.session.getState())
+    ) {
+      this.clearPendingDeliveryState()
+      return
+    }
+
+    if (this.clock.now() >= pending.expiresAt) {
+      const reqIds = pending.requestIds
+      this.clearPendingDeliveryState()
+      this.lastDelivery = {
+        ok: false,
+        status: 'FAILED',
+        reason: 'DELIVERY_RECOVERY_EXPIRED',
+        requestIds: reqIds,
+        epoch: this.activationEpoch
+      }
+      this.lastErrorMessage = 'DELIVERY_RECOVERY_EXPIRED'
+      this.lastDiagnostic = {
+        code: 'DELIVERY_RECOVERY_EXPIRED',
+        phase: 'delivery',
+        ...(reqIds[0] ? { requestId: reqIds[0] } : {}),
+        message: 'Pending send expired after 60s.',
+        epoch: this.activationEpoch,
+        conversationKey: this.getConversationKey(),
+        turnMessageId: pending.turnMessageId,
+        recoverable: false
+      }
+      this.renderPill()
+      return
+    }
+
+    if (!this.canQuickDispatchFromDom()) {
+      return
+    }
+
+    pending.inFlight = true
+    try {
+      const freshStatus = await this.transport.getStatus()
+      if (
+        this.pendingDelivery !== pending ||
+        pending.epoch !== this.activationEpoch ||
+        pending.conversationKey !== this.getConversationKey() ||
+        this.userTurnObservedAfterExecution ||
+        !['READY', 'RESUMING', 'LOADING'].includes(this.session.getState())
+      ) {
+        if (this.pendingDelivery === pending) this.clearPendingDeliveryState()
+        return
+      }
+
+      if (!freshStatus.available) {
+        this.clearPendingDeliveryState()
+        this.lastDelivery = {
+          ok: false,
+          status: 'FAILED',
+          reason: freshStatus.errorCode ?? 'APP_UNAVAILABLE',
+          requestIds: pending.requestIds,
+          epoch: pending.epoch
+        }
+        this.lastErrorMessage = freshStatus.errorCode ?? 'APP_UNAVAILABLE'
+        this.renderPill()
+        return
+      }
+
+      const bindingChanged =
+        (freshStatus.projectId ?? null) !== pending.bindingSnapshot.projectId ||
+        (freshStatus.bindingId ?? null) !== pending.bindingSnapshot.bindingId ||
+        (freshStatus.instanceId ?? null) !== pending.bindingSnapshot.instanceId
+
+      if (bindingChanged) {
+        this.clearPendingDeliveryState()
+        this.session.invalidate()
+        this.lastDelivery = {
+          ok: false,
+          status: 'FAILED',
+          reason: 'SESSION_INVALIDATED',
+          requestIds: pending.requestIds,
+          epoch: pending.epoch
+        }
+        this.lastErrorMessage = 'SESSION_INVALIDATED'
+        this.lastDiagnostic = {
+          code: 'SESSION_INVALIDATED',
+          phase: 'session',
+          ...(pending.requestIds[0] ? { requestId: pending.requestIds[0] } : {}),
+          message: 'Desktop project or session binding changed before pending delivery; discarded safely.',
+          epoch: pending.epoch,
+          conversationKey: pending.conversationKey,
+          recoverable: false
+        }
+        this.renderPill()
+        return
+      }
+
+      if (
+        freshStatus.consents &&
+        (!freshStatus.consents.metadata || (pending.needsLiteralConsent && !freshStatus.consents.literalSource))
+      ) {
+        this.clearPendingDeliveryState()
+        this.session.revoke()
+        this.lastDelivery = {
+          ok: false,
+          status: 'FAILED',
+          reason: 'CONSENT_REQUIRED',
+          requestIds: pending.requestIds,
+          epoch: pending.epoch
+        }
+        this.lastErrorMessage = 'CONSENT_REQUIRED'
+        this.renderPill()
+        return
+      }
+
+      await this.dispatchMessageAndTrack({
+        kind: pending.kind,
+        replyText: pending.replyText,
+        requestIds: pending.requestIds,
+        needsLiteralConsent: pending.needsLiteralConsent,
+        runEpoch: pending.epoch,
+        runConversationKey: pending.conversationKey,
+        turnMessageId: pending.turnMessageId,
+        existingPending: pending
+      })
+    } finally {
+      pending.inFlight = false
     }
   }
 
@@ -889,7 +1449,28 @@ export class ContentSessionController {
 
     const scopeTag = binding.mode === 'PROJECT' && binding.projectId ? `Project` : 'Global'
     const label = this.rootDocument.createElement('span')
-    label.textContent = `Code Awareness · ${state}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}`
+    let statusSuffix = ''
+    if (state === 'READY' || state === 'RESUMING' || state === 'WAITING_TOOL') {
+      if (this.lastDelivery?.status === 'PENDING_RECOVERY') {
+        statusSuffix = ' · Pending send'
+      } else if (this.lastDelivery?.status === 'AWAITING_DELIVERY_ACK') {
+        statusSuffix = ' · Confirming send'
+      } else if (this.lastDelivery?.status === 'DELIVERY_UNKNOWN') {
+        statusSuffix = ' · Delivery unconfirmed'
+      } else if (this.lastDelivery?.status === 'FAILED') {
+        statusSuffix = ` · Send failed`
+      } else if (this.lastDiagnostic?.phase === 'execution' || this.lastDiagnostic?.phase === 'parse') {
+        statusSuffix = ` · ${this.lastDiagnostic.code}`
+      }
+    }
+    label.textContent = `Code Awareness · ${state}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}${statusSuffix}`
+    if (this.lastDiagnostic) {
+      const reqInfo = this.lastDiagnostic.requestId ? ` [${this.lastDiagnostic.requestId}]` : ''
+      const phaseInfo = this.lastDiagnostic.phase ? `${this.lastDiagnostic.phase}: ` : ''
+      label.title = `${phaseInfo}${this.lastDiagnostic.code}${reqInfo} — ${this.lastDiagnostic.message}`
+    } else {
+      label.title = ''
+    }
 
     const btn = this.rootDocument.createElement('button')
     btn.type = 'button'

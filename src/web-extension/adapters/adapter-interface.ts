@@ -13,6 +13,7 @@ export interface ChatDomTurn {
 
 export interface SendMessageResult {
   ok: boolean
+  status?: 'DISPATCHED' | 'PRE_DISPATCH_BLOCKED' | 'DISPATCH_ABORTED'
   reason?: string
 }
 
@@ -22,8 +23,9 @@ export interface WebChatAdapter {
   matchesLocation(locationHref: string): boolean
   isAuthenticatedChatReady(root: ParentNode): boolean
   isGenerating(root: ParentNode): boolean
+  canDispatchNow?(root: ParentNode): boolean
   readTurns(root: ParentNode): ChatDomTurn[]
-  sendMessage(root: ParentNode, text: string): Promise<SendMessageResult>
+  sendMessage(root: ParentNode, text: string, shouldContinue?: () => boolean): Promise<SendMessageResult>
   observeConversation(root: ParentNode, onChange: () => void): () => void
 }
 
@@ -396,6 +398,25 @@ export class ConfiguredWebChatAdapter implements WebChatAdapter {
     return !isVisibleElement(passwordInput)
   }
 
+  private findSendButton(root: ParentNode): HTMLElement | null {
+    for (const selector of this.config.sendButtonSelectors) {
+      for (const el of Array.from(root.querySelectorAll(selector))) {
+        if (!isVisibleElement(el) || isElementDisabled(el)) continue
+        const label = (el.getAttribute('aria-label') ?? el.textContent ?? '').toLowerCase()
+        if (label.includes('stop') || label.includes('interromper')) continue
+        return el
+      }
+    }
+    return null
+  }
+
+  canDispatchNow(root: ParentNode): boolean {
+    if (this.isGenerating(root)) return false
+    const composer = this.findComposer(root)
+    if (!composer || readComposerText(composer).trim().length > 0) return false
+    return true
+  }
+
   isGenerating(root: ParentNode): boolean {
     if (this.findStopButton(root)) return true
     return Boolean(root.querySelector('[data-streaming="true"], [aria-busy="true"]'))
@@ -462,49 +483,66 @@ export class ConfiguredWebChatAdapter implements WebChatAdapter {
     return turns
   }
 
-  async sendMessage(root: ParentNode, text: string): Promise<SendMessageResult> {
+  async sendMessage(
+    root: ParentNode,
+    text: string,
+    shouldContinue?: () => boolean
+  ): Promise<SendMessageResult> {
     if (this.isGenerating(root)) {
-      return { ok: false, reason: 'STREAMING_IN_PROGRESS' }
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'STREAMING_IN_PROGRESS' }
     }
     const composer = this.findComposer(root)
     if (!composer) {
-      return { ok: false, reason: 'COMPOSER_NOT_FOUND' }
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'COMPOSER_NOT_FOUND' }
     }
     if (readComposerText(composer).trim().length > 0) {
-      return { ok: false, reason: 'USER_DRAFT_PRESENT' }
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'USER_DRAFT_PRESENT' }
     }
 
     setInputOrEditableText(composer, text)
-    await new Promise<void>((resolve) => setTimeout(resolve, 0))
+    await Promise.resolve()
+
+    if (shouldContinue && !shouldContinue()) {
+      if (readComposerText(composer) === text) {
+        setInputOrEditableText(composer, '')
+      }
+      return { ok: false, status: 'DISPATCH_ABORTED', reason: 'CONTEXT_CHANGED_BEFORE_DISPATCH' }
+    }
+
+    // Revalidate composer text strictly before clicking; preserve user edits if modified during await
+    if (readComposerText(composer) !== text) {
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'COMPOSER_MODIFIED_BY_USER' }
+    }
 
     if (this.isGenerating(root)) {
       if (readComposerText(composer) === text) {
         setInputOrEditableText(composer, '')
       }
-      return { ok: false, reason: 'STREAMING_IN_PROGRESS' }
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'STREAMING_IN_PROGRESS' }
     }
 
-    let sendBtn: HTMLElement | null = null
-    for (const selector of this.config.sendButtonSelectors) {
-      for (const el of Array.from(root.querySelectorAll(selector))) {
-        if (!isVisibleElement(el) || isElementDisabled(el)) continue
-        const label = (el.getAttribute('aria-label') ?? el.textContent ?? '').toLowerCase()
-        if (label.includes('stop') || label.includes('interromper')) continue
-        sendBtn = el
-        break
-      }
-      if (sendBtn) break
-    }
+    const sendBtn = this.findSendButton(root)
 
     if (!sendBtn) {
       if (readComposerText(composer) === text) {
         setInputOrEditableText(composer, '')
       }
-      return { ok: false, reason: 'SEND_BUTTON_UNAVAILABLE' }
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'SEND_BUTTON_UNAVAILABLE' }
     }
 
-    sendBtn.click()
-    return { ok: true }
+    if (readComposerText(composer) !== text) {
+      return { ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'COMPOSER_MODIFIED_BY_USER' }
+    }
+
+    try {
+      sendBtn.click()
+      return { ok: true, status: 'DISPATCHED' }
+    } catch {
+      if (readComposerText(composer) === text) {
+        setInputOrEditableText(composer, '')
+      }
+      return { ok: false, status: 'DISPATCH_ABORTED', reason: 'SEND_CLICK_THREW' }
+    }
   }
 
   observeConversation(root: ParentNode, onChange: () => void): () => void {

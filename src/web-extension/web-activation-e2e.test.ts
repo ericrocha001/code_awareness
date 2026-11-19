@@ -340,6 +340,63 @@ describe('End-to-End Web Activation Pipeline (MCP Server + Pipe + Native Stdio H
     expect(dsController.session.isPresentInActiveChat(listedUri)).toBe(true)
     const skillUri = listedUri
 
+    // Correlated rejection + controlled tool error + recovery continuity over real stdio host
+    const dsBadTurn = dsDom.doc.createElement('div')
+    dsBadTurn.className = 'ds-message'
+    dsBadTurn.setAttribute('data-message-id', 'ds-msg-bad-proto')
+    dsBadTurn.setAttribute('data-role', 'assistant')
+    dsBadTurn.innerHTML = `<div class="ds-markdown"><pre><code class="language-code-awareness-call">${JSON.stringify({
+      protocol: 'wrong/v0',
+      requestId: 'e2e-ds-bad-proto',
+      method: 'tools.call',
+      params: { name: 'discover_repository', arguments: {} }
+    })}</code></pre></div>`
+    dsChat.appendChild(dsBadTurn)
+    await dsController.handleDomMutation()
+    expect(dsDom.sent).toHaveLength(5)
+    const badProtoEnv = JSON.parse(dsDom.sent[4].split('\n')[1])
+    expect(badProtoEnv).toMatchObject({
+      requestId: 'e2e-ds-bad-proto',
+      ok: false,
+      error: { code: 'INVALID_PROTOCOL' }
+    })
+
+    const dsMissingArtifactTurn = dsDom.doc.createElement('div')
+    dsMissingArtifactTurn.className = 'ds-message'
+    dsMissingArtifactTurn.setAttribute('data-message-id', 'ds-msg-tool-err')
+    dsMissingArtifactTurn.setAttribute('data-role', 'assistant')
+    dsMissingArtifactTurn.innerHTML = `<div class="ds-markdown"><pre><code class="language-code-awareness-call">${JSON.stringify({
+      protocol: ACTIVATION_CONTRACT_PROTOCOL,
+      requestId: 'e2e-ds-tool-err',
+      method: 'tools.call',
+      params: { name: 'get_artifact', arguments: { artifactId: 'nonexistent-artifact-e2e' } }
+    })}</code></pre></div>`
+    dsChat.appendChild(dsMissingArtifactTurn)
+    await dsController.handleDomMutation()
+    expect(dsDom.sent).toHaveLength(6)
+    const toolErrEnv = JSON.parse(dsDom.sent[5].split('\n')[1])
+    expect(toolErrEnv).toMatchObject({
+      requestId: 'e2e-ds-tool-err',
+      ok: false
+    })
+    expect(['READY', 'RESUMING']).toContain(dsController.session.getState())
+
+    const dsRecoverTurn = dsDom.doc.createElement('div')
+    dsRecoverTurn.className = 'ds-message'
+    dsRecoverTurn.setAttribute('data-message-id', 'ds-msg-recover')
+    dsRecoverTurn.setAttribute('data-role', 'assistant')
+    dsRecoverTurn.innerHTML = `<div class="ds-markdown"><pre><code class="language-code-awareness-call">${JSON.stringify({
+      protocol: ACTIVATION_CONTRACT_PROTOCOL,
+      requestId: 'e2e-ds-recover',
+      method: 'tools.call',
+      params: { name: 'discover_repository', arguments: {} }
+    })}</code></pre></div>`
+    dsChat.appendChild(dsRecoverTurn)
+    await dsController.handleDomMutation()
+    expect(dsDom.sent).toHaveLength(7)
+    const recoverEnv = JSON.parse(dsDom.sent[6].split('\n')[1])
+    expect(recoverEnv).toMatchObject({ requestId: 'e2e-ds-recover', ok: true })
+
     const qwDom = createSiteDom('https://chat.qwen.ai/c/demo')
     const qwController = new ContentSessionController(
       new QwenWebAdapter(),
