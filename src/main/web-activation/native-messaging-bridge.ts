@@ -38,6 +38,11 @@ export type McpHttpTransport = (
   payload: unknown
 ) => Promise<McpHttpResponse>
 
+export type LocalWebActivationDispatcher = (
+  action: string,
+  args: Record<string, unknown>
+) => Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string }>
+
 export interface NativeMessagingBridgeOptions {
   consentStore: ConsentStore
   callerOrigin?: string
@@ -46,8 +51,11 @@ export interface NativeMessagingBridgeOptions {
   allowedWebOrigins?: readonly string[]
   userDataPath?: string
   resolveDesktopEndpoint?: () => Promise<DesktopSkillsEndpointInfo | null>
+  dispatchLocalAction?: LocalWebActivationDispatcher
   mcpTransport?: McpHttpTransport
   maxOutboundBytes?: number
+  hostBuildId?: string
+  hostApplication?: string
 }
 
 function normalizeExtensionOrigin(origin: string | undefined): string | null {
@@ -57,13 +65,24 @@ function normalizeExtensionOrigin(origin: string | undefined): string | null {
   return trimmed.endsWith('/') ? trimmed : `${trimmed}/`
 }
 
-export async function discoverDesktopWebActivationEndpoint(
+function extensionIdFromOrigin(origin: string | null): string | null {
+  if (!origin) return null
+  const match = /^chrome-extension:\/\/([a-z0-9]{16,64})\/?$/i.exec(origin)
+  return match ? match[1].toLowerCase() : null
+}
+
+/**
+ * Invokes a `web_activation` domain action over Desktop's Local Agent Channel socket.
+ */
+export async function invokeDesktopWebActivationAction(
   userDataPath: string,
+  action: string,
+  args: Record<string, unknown> = {},
   timeoutMs = DEFAULT_PIPE_TIMEOUT_MS
-): Promise<DesktopSkillsEndpointInfo | null> {
+): Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string }> {
   const descriptorPath = join(userDataPath, 'local-agent-channel', 'endpoint.json')
   if (!existsSync(descriptorPath)) {
-    return null
+    return { ok: false, code: 'APP_UNAVAILABLE', message: 'Local agent channel descriptor not found' }
   }
 
   let descriptor: LocalChannelDescriptor
@@ -75,7 +94,7 @@ export async function discoverDesktopWebActivationEndpoint(
       typeof raw.endpoint !== 'string' ||
       !raw.endpoint.trim()
     ) {
-      return null
+      return { ok: false, code: 'APP_UNAVAILABLE', message: 'Malformed local agent channel descriptor' }
     }
     descriptor = {
       protocol: raw.protocol,
@@ -83,33 +102,38 @@ export async function discoverDesktopWebActivationEndpoint(
       endpoint: raw.endpoint
     }
   } catch {
-    return null
+    return { ok: false, code: 'APP_UNAVAILABLE', message: 'Failed to read local agent channel descriptor' }
   }
 
-  return await new Promise<DesktopSkillsEndpointInfo | null>((resolve) => {
+  return await new Promise((resolve) => {
     let settled = false
     const socket = createConnection(descriptor.endpoint)
     let raw = ''
 
-    const finish = (result: DesktopSkillsEndpointInfo | null) => {
+    const finish = (outcome: { ok: true; result: unknown } | { ok: false; code: string; message: string }) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       socket.destroy()
-      resolve(result)
+      resolve(outcome)
     }
 
-    const timer = setTimeout(() => finish(null), timeoutMs)
+    const timer = setTimeout(
+      () => finish({ ok: false, code: 'APP_UNAVAILABLE', message: 'Local agent channel timed out' }),
+      timeoutMs
+    )
     socket.setEncoding('utf8')
-    socket.once('error', () => finish(null))
+    socket.once('error', (err) =>
+      finish({ ok: false, code: 'APP_UNAVAILABLE', message: err instanceof Error ? err.message : String(err) })
+    )
     socket.once('connect', () => {
       socket.write(
         JSON.stringify({
           protocol: descriptor.protocol,
           token: descriptor.token,
           domain: 'web_activation',
-          action: 'endpoint',
-          args: {}
+          action,
+          args
         }) + '\n'
       )
     })
@@ -119,17 +143,37 @@ export async function discoverDesktopWebActivationEndpoint(
       if (newlineIndex === -1) return
       const line = raw.slice(0, newlineIndex).trim()
       try {
-        const parsed = JSON.parse(line) as { result?: DesktopSkillsEndpointInfo; error?: unknown }
-        if (parsed && !parsed.error && parsed.result && parsed.result.status === 'RUNNING' && parsed.result.endpoint) {
-          finish(parsed.result)
+        const parsed = JSON.parse(line) as { result?: unknown; error?: { code?: string; message?: string } }
+        if (parsed?.error) {
+          finish({
+            ok: false,
+            code: parsed.error.code || 'INTERNAL_ERROR',
+            message: parsed.error.message || parsed.error.code || 'Local channel error'
+          })
+          return
+        }
+        if (parsed && 'result' in parsed) {
+          finish({ ok: true, result: parsed.result })
           return
         }
       } catch {
-        // Fall through to fail-closed null
+        // Fall through to unavailable
       }
-      finish(null)
+      finish({ ok: false, code: 'APP_UNAVAILABLE', message: 'Invalid response from local agent channel' })
     })
   })
+}
+
+export async function discoverDesktopWebActivationEndpoint(
+  userDataPath: string,
+  timeoutMs = DEFAULT_PIPE_TIMEOUT_MS
+): Promise<DesktopSkillsEndpointInfo | null> {
+  const response = await invokeDesktopWebActivationAction(userDataPath, 'endpoint', {}, timeoutMs)
+  if (!response.ok || !response.result || typeof response.result !== 'object') {
+    return null
+  }
+  const info = response.result as DesktopSkillsEndpointInfo
+  return info.status === 'RUNNING' && info.endpoint ? info : null
 }
 
 async function defaultMcpTransport(
@@ -159,8 +203,11 @@ export class NativeMessagingBridge {
   private readonly allowedExtensionOrigins: Set<string> | null
   private readonly allowedWebOrigins: Set<string>
   private readonly resolveDesktopEndpoint: () => Promise<DesktopSkillsEndpointInfo | null>
+  private readonly dispatchLocalAction: LocalWebActivationDispatcher
   private readonly mcpTransport: McpHttpTransport
   private readonly maxOutboundBytes: number
+  private readonly hostBuildId: string
+  private readonly hostApplication: string
   private rpcCounter = 0
 
   constructor(options: NativeMessagingBridgeOptions) {
@@ -184,8 +231,15 @@ export class NativeMessagingBridge {
       (options.userDataPath
         ? () => discoverDesktopWebActivationEndpoint(options.userDataPath!)
         : async () => null)
+    this.dispatchLocalAction =
+      options.dispatchLocalAction ??
+      (options.userDataPath
+        ? (action, args) => invokeDesktopWebActivationAction(options.userDataPath!, action, args)
+        : async () => ({ ok: false, code: 'APP_UNAVAILABLE', message: 'Local channel path not configured' }))
     this.mcpTransport = options.mcpTransport ?? defaultMcpTransport
     this.maxOutboundBytes = options.maxOutboundBytes ?? MAX_NATIVE_OUTBOUND_BYTES
+    this.hostBuildId = options.hostBuildId?.trim() || 'dev-unbuilt'
+    this.hostApplication = options.hostApplication?.trim() || 'com.ericrocha.codeawareness.web_activation'
   }
 
   private error(
@@ -270,8 +324,15 @@ export class NativeMessagingBridge {
         return this.ok(rawId, {
           available: true,
           callerOrigin: this.callerOrigin,
-          bridgeProtocol: WEB_ACTIVATION_BRIDGE_PROTOCOL
+          bridgeProtocol: WEB_ACTIVATION_BRIDGE_PROTOCOL,
+          hostBuildId: this.hostBuildId,
+          hostApplication: this.hostApplication
         })
+
+      case 'maintenance_check':
+      case 'maintenance_claim':
+      case 'maintenance_report':
+        return this.handleMaintenanceCommand(rawId, command)
 
       case 'get_status': {
         if (command.webOrigin !== undefined) {
@@ -495,5 +556,63 @@ export class NativeMessagingBridge {
       default:
         return this.error(rawId, 'INVALID_REQUEST', `Unknown bridge action "${String((command as { action?: unknown }).action)}"`)
     }
+  }
+
+  private async handleMaintenanceCommand(
+    rawId: string,
+    command: Extract<NativeBridgeCommand, { action: 'maintenance_check' | 'maintenance_claim' | 'maintenance_report' }>
+  ): Promise<NativeBridgeResponse> {
+    if ('webOrigin' in (command as unknown as Record<string, unknown>)) {
+      return this.error(rawId, 'MAINTENANCE_UNAUTHORIZED', 'Maintenance actions are forbidden for web origins')
+    }
+
+    const callerExtId = extensionIdFromOrigin(this.callerOrigin)
+    if (this.requireCallerOrigin && !callerExtId) {
+      return this.error(rawId, 'MAINTENANCE_UNAUTHORIZED', 'Caller extension origin is required for maintenance commands')
+    }
+
+    const declaredExtensionId =
+      command.action === 'maintenance_report'
+        ? command.report?.extensionId
+        : command.extensionId
+
+    if (callerExtId && typeof declaredExtensionId === 'string' && declaredExtensionId.trim().toLowerCase() !== callerExtId) {
+      return this.error(
+        rawId,
+        'MAINTENANCE_UNAUTHORIZED',
+        `Declared extensionId "${declaredExtensionId}" does not match authenticated caller "${callerExtId}"`
+      )
+    }
+
+    const args: Record<string, unknown> =
+      command.action === 'maintenance_report'
+        ? {
+            phase: command.phase,
+            report: {
+              ...command.report,
+              hostBuildId: this.hostBuildId,
+              hostCompatible: true,
+              hostApplication: this.hostApplication
+            }
+          }
+        : {
+            ...command,
+            hostBuildId: this.hostBuildId,
+            hostApplication: this.hostApplication
+          }
+    if ('id' in args) delete args.id
+    if ('action' in args) delete args.action
+
+    const dispatched = await this.dispatchLocalAction(command.action, args)
+    if (!dispatched.ok) {
+      const code = dispatched.code === 'APP_UNAVAILABLE' ? 'APP_UNAVAILABLE' : 'INVALID_REQUEST'
+      return this.error(rawId, code, dispatched.message)
+    }
+
+    return this.ok(rawId, {
+      ...(dispatched.result && typeof dispatched.result === 'object' ? dispatched.result : { result: dispatched.result }),
+      hostBuildId: this.hostBuildId,
+      hostApplication: this.hostApplication
+    })
   }
 }

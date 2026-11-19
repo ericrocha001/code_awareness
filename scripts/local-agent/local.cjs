@@ -5,9 +5,79 @@ const { main: continuum } = require('../continuum/local.cjs')
 const fail = code => { throw Object.assign(new Error(code), { code }) }
 const channel = { directory: 'local-agent-channel', protocol: 'code-awareness-local/v1' }
 
+const WEB_ACTIVATION_ALLOWED = {
+  status: ['--profile'],
+  revoke: ['--profile'],
+  enroll: [
+    '--profile',
+    '--file',
+    '--installation-id',
+    '--extension-id',
+    '--install-type',
+    '--profile-id',
+    '--profile-label',
+    '--unpacked-path',
+    '--host-install-dir',
+    '--host-script-path',
+    '--source-repo',
+    '--native-host',
+    '--replace'
+  ]
+}
+
+async function handleWebActivation(args) {
+  const action = args.shift()
+  const allowed = WEB_ACTIVATION_ALLOWED[action]
+  if (!allowed) fail('INVALID_ARGUMENT')
+  const options = {}
+  for (let index = 0; index < args.length; index += 2) {
+    if (!allowed.includes(args[index]) || !args[index + 1] || options[args[index]] !== undefined) fail('INVALID_ARGUMENT')
+    options[args[index]] = args[index + 1]
+  }
+  const descriptor = readDescriptor(options['--profile'], channel)
+  if (action === 'status' || action === 'revoke') {
+    return connect(descriptor, { domain: 'web_activation', action, args: {} })
+  }
+  let request = {}
+  if (options['--file']) {
+    try {
+      if (fs.statSync(options['--file']).size > 1024 * 1024) fail('REQUEST_TOO_LARGE')
+      request = JSON.parse(fs.readFileSync(options['--file'], 'utf8'))
+    } catch (error) {
+      fail(error.code === 'REQUEST_TOO_LARGE' ? error.code : 'INVALID_ARGUMENT')
+    }
+  } else {
+    if (
+      !options['--extension-id'] ||
+      !options['--profile-id'] ||
+      !options['--unpacked-path'] ||
+      !options['--host-install-dir'] ||
+      !options['--host-script-path'] ||
+      !options['--source-repo']
+    ) {
+      fail('INVALID_ARGUMENT')
+    }
+    request = {
+      ...(options['--installation-id'] ? { installationId: options['--installation-id'] } : {}),
+      extensionId: options['--extension-id'],
+      ...(options['--install-type'] ? { installType: options['--install-type'] } : {}),
+      profileId: options['--profile-id'],
+      ...(options['--profile-label'] ? { profileLabel: options['--profile-label'] } : {}),
+      unpackedPath: options['--unpacked-path'],
+      hostInstallDir: options['--host-install-dir'],
+      hostScriptPath: options['--host-script-path'],
+      sourceRepoPath: options['--source-repo'],
+      ...(options['--native-host'] ? { nativeHostApplication: options['--native-host'] } : {}),
+      ...(options['--replace'] ? { replace: options['--replace'] === 'true' } : {})
+    }
+  }
+  return connect(descriptor, { domain: 'web_activation', action: 'enroll', args: request })
+}
+
 async function main(args = process.argv.slice(2)) {
   const domain = args.shift()
   if (domain === 'continuum') return continuum(args, channel)
+  if (domain === 'web_activation') return handleWebActivation(args)
   if (domain !== 'academy' && domain !== 'status') fail('INVALID_ARGUMENT')
   const action = domain === 'status' ? 'status' : args.shift()
   const allowed = domain === 'status' ? ['--profile'] : { set_academy_skill_enabled: ['--profile', '--id', '--enabled', '--state-revision'], archive: ['--profile', '--id', '--version'], restore: ['--profile', '--id', '--version'], history: ['--profile', '--id', '--metadata-only', '--version'], change_impact: ['--profile', '--file'], verify_change_impact: ['--profile', '--file'], list: ['--profile', '--status'], get: ['--profile', '--id'], create: ['--profile', '--file', '--scope', '--projects'], update: ['--profile', '--file', '--id', '--version', '--scope', '--projects'], delivery_status: ['--profile', '--id', '--version'] }[action]

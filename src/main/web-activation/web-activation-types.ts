@@ -61,10 +61,17 @@ export interface NativeBridgeErrorPayload {
     | 'CONSENT_REQUIRED'
     | 'MCP_HTTP_ERROR'
     | 'RESPONSE_TOO_LARGE'
+    | 'MAINTENANCE_UNAUTHORIZED'
     | 'INTERNAL_ERROR'
   message: string
   details?: Record<string, unknown>
 }
+
+export const WEB_EXTENSION_MANAGER_TOOL_NAMES = Object.freeze([
+  'get_web_extension_status',
+  'start_web_extension_operation',
+  'get_web_extension_operation'
+] as const)
 
 export type NativeBridgeCommand =
   | { id: string; action: 'ping' }
@@ -100,6 +107,38 @@ export type NativeBridgeCommand =
       expectedProjectId?: string | null
       expectedBindingId?: string | null
       expectedInstanceId?: string | null
+    }
+  | {
+      id: string
+      action: 'maintenance_check'
+      installationId: string
+      extensionId: string
+      profileId: string
+      bootId: string
+      buildId: string
+      manifestVersion: string
+      installType: string
+    }
+  | {
+      id: string
+      action: 'maintenance_claim'
+      operationId: string
+      installationId: string
+      extensionId: string
+      profileId: string
+      bootId: string
+      buildId: string
+      targetBuildId: string
+      nonce: string
+      epoch: number
+      readyToReload: boolean
+      activeBusyReason?: string
+    }
+  | {
+      id: string
+      action: 'maintenance_report'
+      phase: 'BOOT_ATTESTATION' | 'REINJECT_RESULT' | 'QUIESCENCE_BLOCKED'
+      report: import('./extension-manager-types').ExtensionRuntimeAttestation
     }
 
 export interface NativeBridgeResponse {

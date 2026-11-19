@@ -3,7 +3,20 @@ const path = require('node:path')
 const { randomUUID } = require('node:crypto')
 const ts = require('typescript')
 
-const projects = ['node', 'web']
+const defaultProjects = ['node', 'web']
+const allowedProjects = new Set(['node', 'web', 'web-extension'])
+
+function resolveProjects(root) {
+  const rootConfigPath = path.join(root, 'tsconfig.json').replaceAll('\\', '/')
+  if (!fs.existsSync(rootConfigPath)) return defaultProjects
+  const loaded = ts.readConfigFile(rootConfigPath, ts.sys.readFile)
+  if (loaded.error) throw new Error(`INVALID_CONFIG root: ${normalizedMessage(loaded.error.messageText, root)}`)
+  const refs = Array.isArray(loaded.config?.references) ? loaded.config.references : []
+  const resolved = refs
+    .map(ref => typeof ref?.path === 'string' ? path.basename(ref.path).match(/^tsconfig\.(.+)\.json$/)?.[1] : null)
+    .filter(name => name && allowedProjects.has(name))
+  return resolved.length ? resolved : defaultProjects
+}
 const categories = new Set(['Warning', 'Error', 'Suggestion', 'Message'])
 const identity = ({ project, file, code, category, message }) => JSON.stringify([project, file, code, category, message])
 const sortDiagnostics = diagnostics => diagnostics.sort((a, b) => identity(a) < identity(b) ? -1 : identity(a) > identity(b) ? 1 : 0)
@@ -29,7 +42,7 @@ function compactDiagnostic(diagnostic, root) {
 function collectProjects(root) {
   root = path.resolve(root).replaceAll('\\', '/')
   const diagnostics = new Map(), checked = []
-  for (const project of projects) {
+  for (const project of resolveProjects(root)) {
     const configPath = path.join(root, `tsconfig.${project}.json`).replaceAll('\\', '/')
     const loaded = ts.readConfigFile(configPath, ts.sys.readFile)
     if (loaded.error) throw new Error(`INVALID_CONFIG ${project}: ${normalizedMessage(loaded.error.messageText, root)}`)
@@ -59,7 +72,7 @@ function validateBaseline(value) {
   if (!value || value.version !== 1 || !Array.isArray(value.diagnostics) || Object.keys(value).sort().join(',') !== 'diagnostics,version') throw new Error('INVALID_BASELINE: expected version 1 and diagnostics array')
   const seen = new Set()
   for (const entry of value.diagnostics) {
-    if (!entry || Object.keys(entry).sort().join(',') !== 'category,code,count,file,message,project' || !projects.includes(entry.project) || !Number.isSafeInteger(entry.code) || entry.code < 0 || !categories.has(entry.category) || typeof entry.message !== 'string' || !entry.message.trim() || !Number.isSafeInteger(entry.count) || entry.count <= 0) throw new Error('INVALID_BASELINE: malformed diagnostic')
+    if (!entry || Object.keys(entry).sort().join(',') !== 'category,code,count,file,message,project' || !allowedProjects.has(entry.project) || !Number.isSafeInteger(entry.code) || entry.code < 0 || !categories.has(entry.category) || typeof entry.message !== 'string' || !entry.message.trim() || !Number.isSafeInteger(entry.count) || entry.count <= 0) throw new Error('INVALID_BASELINE: malformed diagnostic')
     if (entry.file !== null && (typeof entry.file !== 'string' || !entry.file || entry.file.includes('\\') || path.isAbsolute(entry.file) || /^[A-Za-z]:/.test(entry.file) || entry.file.split('/').includes('..'))) throw new Error('INVALID_BASELINE: expected repository-relative path')
     const key = identity(entry)
     if (seen.has(key)) throw new Error('INVALID_BASELINE: duplicate diagnostic identity')

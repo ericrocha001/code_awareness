@@ -1,6 +1,20 @@
 import { getChromeApi, type ChromeApi, type ChromeMessageSender, type ChromeNativePortLike } from './chrome-api'
+import {
+  ExtensionMaintenanceCoordinator,
+  registerGlobalMaintenanceDebugHandle
+} from './extension-maintenance'
+import { getConfiguredNativeHostApplication } from './runtime-config'
 
-export const NATIVE_HOST_APPLICATION = 'com.ericrocha.codeawareness.web_activation'
+export const NATIVE_HOST_APPLICATION = getConfiguredNativeHostApplication()
+
+function maybeUnrefTimer(timer: unknown): void {
+  if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+    const candidate = (timer as { unref?: unknown }).unref
+    if (typeof candidate === 'function') {
+      candidate.call(timer)
+    }
+  }
+}
 
 const ALLOWED_PAGE_ORIGINS: Readonly<Record<string, 'deepseek' | 'qwen'>> = {
   'https://chat.deepseek.com': 'deepseek',
@@ -141,9 +155,7 @@ export function createChromeNativePortSender(
         closePort('IDLE_TIMEOUT')
       }
     }, idleTtlMs)
-    if (typeof (idleTimer as { unref?: () => void }).unref === 'function') {
-      ;(idleTimer as { unref: () => void }).unref()
-    }
+    maybeUnrefTimer(idleTimer)
   }
 
   const handlePortMessage = (response: unknown): void => {
@@ -269,9 +281,7 @@ export function createChromeNativePortSender(
           scheduleIdleClose()
         }
       }, requestTimeoutMs)
-      if (typeof (timer as { unref?: () => void }).unref === 'function') {
-        ;(timer as { unref: () => void }).unref()
-      }
+      maybeUnrefTimer(timer)
 
       pending.set(id, { resolve, timer })
       try {
@@ -327,6 +337,12 @@ export class ExtensionBackgroundRouter {
     }
 
     const msg = rawMessage as ExtensionBackgroundMessage
+    if ((msg as { type: string }).type.startsWith('MAINTENANCE_')) {
+      return {
+        ok: false,
+        error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Maintenance actions cannot be triggered via runtime messages' }
+      }
+    }
     const isPopup = isTrustedExtensionUiSender(sender, this.runtimeId)
     const webSender = resolveSenderWebSite(sender)
 
@@ -435,16 +451,33 @@ export class ExtensionBackgroundRouter {
   }
 }
 
-export function registerBackgroundServiceWorker(chromeApi: ChromeApi | undefined = getChromeApi()): void {
-  if (!chromeApi?.runtime?.onMessage) return
-  const router = new ExtensionBackgroundRouter(
-    createChromeNativePortSender(chromeApi),
-    chromeApi.runtime.id
-  )
+export function registerBackgroundServiceWorker(
+  chromeApi: ChromeApi | undefined = getChromeApi()
+): ExtensionMaintenanceCoordinator | null {
+  if (!chromeApi?.runtime?.onMessage) return null
+  const nativeSender = createChromeNativePortSender(chromeApi)
+  const router = new ExtensionBackgroundRouter(nativeSender, chromeApi.runtime.id)
+  const maintenance = new ExtensionMaintenanceCoordinator({
+    chromeApi,
+    sendNative: nativeSender,
+    closeNativePort: (reason) => nativeSender.closePort(reason),
+    getActiveRequestCount: () => nativeSender.getPortStats().pendingCount
+  })
+  maintenance.registerAlarmAndLifecycleListeners()
+  registerGlobalMaintenanceDebugHandle(maintenance)
+
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    void router.handleMessage(message, sender).then(sendResponse)
+    void router.handleMessage(message, sender).then((res) => {
+      if (res && typeof res === 'object' && (res as { ok?: unknown }).ok === true) {
+        maintenance.resetBackoff()
+      }
+      sendResponse(res)
+    })
     return true
   })
+
+  void maintenance.runTick('boot')
+  return maintenance
 }
 
 registerBackgroundServiceWorker()
