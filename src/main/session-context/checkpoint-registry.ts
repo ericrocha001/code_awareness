@@ -92,8 +92,9 @@ export class CheckpointRegistry {
     const discoveryPending = discovery.phase === 'FULL' || discovery.phase === 'PREFIX'
     const remote = discoveryPending || this.pendingReconciliation('PR', 1).length > 0 || this.source('GITHUB_REFRESH')?.status === 'PARTIAL'
     const blocked = remote && ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(github ?? 'UNAVAILABLE')
+    const nativePartialScan = !!this.db.prepare("SELECT 1 FROM registry_sources WHERE (source LIKE 'NATIVE_ARTIFACT_SCAN:%' OR source LIKE 'NATIVE_GIT_SCAN:%') AND status='PARTIAL' LIMIT 1").get()
     const labels = this.pendingArtifactLabels(1).length > 0
-    return { pending: local || remote || labels || unavailable.length > 0, drainable: local || remote && !blocked || labels && !unavailable.includes('CONTINUUM'), blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
+    return { pending: local || remote || labels || nativePartialScan || unavailable.length > 0, drainable: local || remote && !blocked || labels && !unavailable.includes('CONTINUUM') || nativePartialScan, blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
       sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source),
       details: this.source('GITHUB_DISCOVERY') ? [{ source: 'GITHUB_DISCOVERY', scope: 'UPDATED_PR_CATALOG',
         ...(typeof discovery.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(discovery.reasonCode) ? { reasonCode: discovery.reasonCode } : {}),

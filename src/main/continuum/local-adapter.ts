@@ -21,7 +21,8 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
   private registry?: { session: object; value: GitWorktreeRegistry }
   readonly operations: LocalChannelAdapter['operations']
   constructor(private readonly session: RepositoryContinuumSession,
-    private readonly handoffCoverage?: (artifact: Artifact, target: { worktreeId: string; generation: string }) => Promise<object>) {
+    private readonly handoffCoverage?: (artifact: Artifact, target: { worktreeId: string; generation: string }) => Promise<object>,
+    private readonly executionPreflight?: (target: { worktreeId: string; generation: string; executionId: string }) => Promise<object | undefined>) {
     const selection = (input: unknown, keys: string[]) => {
       const value = object(input, ['repositoryId', 'worktreeId', ...keys])
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
@@ -54,10 +55,17 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         const active = this.session.getActiveSession()!
         const git = new GitService(), identity = { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active && context.connected() }
         const reader = new GitBranchInventory(active.repositoryPath, git, this.getRegistry(active), identity)
-        return service.bindExecutionBranch(request.executionId, request.sourceArtifactId, async () => {
+        const bound = await service.bindExecutionBranch(request.executionId, request.sourceArtifactId, async () => {
           if (await this.service(request, context, false) !== service) throw new Error('REPOSITORY_MISMATCH')
           return reader.executionSnapshot(String(request.worktreeId), request.generation)
         })
+        if (!this.executionPreflight) return bound
+        const sessionPreflight = await this.executionPreflight({
+          worktreeId: String(request.worktreeId),
+          generation: request.generation,
+          executionId: request.executionId
+        }).catch(() => undefined)
+        return sessionPreflight ? { ...bound, sessionPreflight } : bound
       }),
       suggestions: operation(input => {
         const request = selection(input, ['query'])

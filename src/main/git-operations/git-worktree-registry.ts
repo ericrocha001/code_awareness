@@ -41,10 +41,14 @@ export class GitWorktreeRegistry {
     return common
   }
 
-  async discover(options?: { reuseValidatedDirectories: true }): Promise<{ repositoryId: string; worktrees: WorktreeRecord[] }> {
+  async discover(options?: { reuseValidatedDirectories?: true; filterPath?: (worktreePath: string) => boolean }): Promise<{ repositoryId: string; worktrees: WorktreeRecord[] }> {
     const common = await this.commonDirectory()
     const raw = await this.git.listWorktreeRecords(this.root)
-    const groups = raw.split('\0\0').filter(Boolean)
+    const groups = raw.split('\0\0').filter(Boolean).filter(group => {
+      if (!options?.filterPath) return true
+      const path = group.split('\0').find(field => field.startsWith('worktree '))?.slice(9)
+      return path !== undefined && options.filterPath(path)
+    })
     const worktrees: WorktreeRecord[] = []
     for (let offset = 0; offset < groups.length; offset += 8) {
       const batch = await Promise.all(groups.slice(offset, offset + 8).map(group => this.readRecord(group, common, options?.reuseValidatedDirectories)))

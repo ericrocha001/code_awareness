@@ -63,6 +63,7 @@ export class SessionStore {
       if (process.platform !== 'win32') chmodSync(path, 0o600)
       this.db.pragma('auto_vacuum = INCREMENTAL')
       this.db.pragma('journal_mode = WAL')
+      this.db.pragma('synchronous = NORMAL')
       this.db.pragma('foreign_keys = ON')
       this.db.pragma('busy_timeout = 3000')
       if (Number(this.db.pragma('user_version', { simple: true })) > 8) throw new Error('SCHEMA_UNSUPPORTED')

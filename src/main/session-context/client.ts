@@ -7,14 +7,23 @@ import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
 import { normalizeScopedReadArgs, parseSessionRefresh, parseSessionList, parseCaptureHealth, nativeLiteralTarget } from './mcp'
 import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
-import type { SessionTargetResolver, SessionTargetSelection } from './target'
+import type { LiveSessionTarget, SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
 import { readExecutionSessionAssociations, sessionStorePath } from './store'
 import type { SessionAssociation } from './associations'
 import { nativeCaptureAgent } from './capture-health'
-import { nativeBindingPath } from './native-hooks'
+import { hasNativeBindingFile, nativeBindingPath, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
+interface NativeIngestionTargetReport {
+  worktreeId: string
+  generation: string
+  remainingSpool: boolean
+  remainingScan?: boolean
+  progressed: boolean
+  errorCode?: string
+  settledSpools?: { spool: string; filesKey: string }[]
+}
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
 interface Request {
   abort?: AbortController
@@ -23,7 +32,9 @@ interface Request {
   deadline: number
   generation?: Generation
   validate?: () => Promise<void>
+  selectionValidators: Map<string, () => Promise<void>>
   verifyNativeTrust?: () => boolean
+  isMaintenance?: boolean
   phase: string
 }
 export class SessionContextClient implements SessionContextPort {
@@ -32,6 +43,11 @@ export class SessionContextClient implements SessionContextPort {
   private retiring: Promise<void> = Promise.resolve()
   private serial = 0
   private nativeOffset = 0
+  private prioritizedTarget?: SessionTargetSelection
+  private readonly targetBackoff = new Map<string, { failures: number; untilMs: number }>()
+  private readonly cleanMaintenanceTargets = new Set<string>()
+  private readonly settledSpools = new Map<string, string>()
+  private onMaintenanceNeeded?: () => void
   private pending = new Map<number, Request>()
   private refresh?: { key: string; task: Promise<McpToolResult> }
   constructor(private readonly storageBase: string, private readonly repositoryId: string, private readonly root: string, private readonly isCurrent: () => boolean,
@@ -40,6 +56,9 @@ export class SessionContextClient implements SessionContextPort {
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
     private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort,
     private readonly nativeHookClient?: NativeHookClient, private readonly readOnlyStore = false) {}
+  setMaintenanceTrigger(trigger: () => void): void {
+    this.onMaintenanceNeeded = trigger
+  }
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -83,7 +102,7 @@ export class SessionContextClient implements SessionContextPort {
     const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer, readOnlyStore: this.readOnlyStore }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
     const generation = { worker, cancellation, closing: false }
     this.generation = generation
-    worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] }; publication?: { token: number; action: 'read' | 'associate' | 'invalidate'; receiptId?: string; association?: PublicationAssociation; invocationId?: string; state?: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS' } }) => {
+    worker.on('message', async (message: { id: number; result?: McpToolResult; nativeReports?: NativeIngestionTargetReport[]; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] }; publication?: { token: number; action: 'read' | 'associate' | 'invalidate'; receiptId?: string; association?: PublicationAssociation; invocationId?: string; state?: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS' } }) => {
       if (generation !== this.generation || generation.closing) return
       const request = this.pending.get(message.id)
       if (!request || request.generation !== generation) return
@@ -118,11 +137,14 @@ export class SessionContextClient implements SessionContextPort {
           if (message.sourceSelection) {
             if (!this.resolveTarget) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
             const resolved = await this.resolveTarget(message.sourceSelection)
-            request.validate = resolved.validate
+            const key = `${message.sourceSelection.worktreeId}:${message.sourceSelection.generation}`
+            request.selectionValidators.set(key, resolved.validate)
+            request.validate ??= resolved.validate
             target = { root: resolved.root, fingerprint: resolved.fingerprint, selection: message.sourceSelection }
+          } else {
+            if (!request.validate) throw new Error('WORKTREE_STALE')
+            await request.validate()
           }
-          if (!request.validate) throw new Error('WORKTREE_STALE')
-          await request.validate()
         } catch (error) { code = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'WORKTREE_STALE' }
         if (generation !== this.generation || generation.closing || !this.pending.has(message.id) || !this.active()) return
         if (Date.now() >= request.deadline) { this.expire(message.id); return }
@@ -130,6 +152,29 @@ export class SessionContextClient implements SessionContextPort {
         return
       }
       if (message.result) {
+        if (message.nativeReports?.length) {
+          let needsMaintenance = false
+          for (const report of message.nativeReports) {
+            const key = `${report.worktreeId}:${report.generation}`
+            if (report.settledSpools?.length) {
+              for (const settled of report.settledSpools) this.settledSpools.set(settled.spool, settled.filesKey)
+            }
+            if (report.errorCode && !report.progressed) {
+              const prior = this.targetBackoff.get(key)?.failures ?? 0
+              const failures = prior + 1
+              this.targetBackoff.set(key, { failures, untilMs: Date.now() + Math.min(30_000, 1000 * 2 ** Math.min(failures, 5)) })
+            } else if (report.progressed || !report.remainingSpool) {
+              this.targetBackoff.delete(key)
+            }
+            if (report.errorCode || report.remainingSpool || report.remainingScan) {
+              this.cleanMaintenanceTargets.delete(key)
+            } else if (request.isMaintenance) {
+              this.cleanMaintenanceTargets.add(key)
+            }
+            if (report.remainingSpool || report.remainingScan) needsMaintenance = true
+          }
+          if (needsMaintenance && !request.isMaintenance) this.onMaintenanceNeeded?.()
+        }
         try {
           if (request.verifyNativeTrust) {
             await request.validate?.()
@@ -150,8 +195,15 @@ export class SessionContextClient implements SessionContextPort {
   private expire(id: number): void {
     const request = this.pending.get(id)
     if (!request) return
-    if (request.generation) void this.retire(request.generation, 'SESSION_CONTEXT_TIMEOUT')
-    else this.finish(id, failure('SESSION_CONTEXT_TIMEOUT', request.phase))
+    if (request.generation) {
+      try { request.generation.worker.postMessage({ cancel: id }) } catch {}
+      const hasOtherInteractive = [...this.pending.entries()].some(([otherId, other]) => otherId !== id && !other.isMaintenance)
+      if (request.isMaintenance || hasOtherInteractive) {
+        this.finish(id, failure('SESSION_CONTEXT_TIMEOUT', request.phase))
+        return
+      }
+      void this.retire(request.generation, 'SESSION_CONTEXT_TIMEOUT')
+    } else this.finish(id, failure('SESSION_CONTEXT_TIMEOUT', request.phase))
   }
   private retire(generation: Generation, code: string, exited = false): Promise<void> {
     if (generation.closing) return this.retiring
@@ -170,15 +222,48 @@ export class SessionContextClient implements SessionContextPort {
     return this.retiring
   }
   reconcileProjection(): Promise<McpToolResult> {
-    return this.active() ? this.dispatch('reconcile_checkpoint_registry', {}, { captureNative: false }) : Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
+    return this.active()
+      ? this.dispatch('reconcile_checkpoint_registry', {}, { captureNative: true, nativeMode: 'MAINTENANCE', isMaintenance: true })
+      : Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
   }
-  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean; allowArtifactMetadata?: boolean } = {}): Promise<McpToolResult> {
+  private async resolveSelectionOnce(selection: SessionTargetSelection) {
+    if (!this.resolveTarget) return undefined
+    try {
+      return await this.resolveTarget(selection)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'WORKTREE_NOT_DISCOVERED' && this.resolveTarget.discover) {
+        try {
+          await this.resolveTarget.discover()
+          return await this.resolveTarget(selection)
+        } catch { return undefined }
+      }
+      return undefined
+    }
+  }
+  private hasSpoolBacklog(root: string, agent?: NativeHookProvider): boolean {
+    const providers = agent ? [agent] : nativeHookProviders
+    for (const provider of providers) {
+      const bindingPath = nativeBindingPath(root, provider)
+      if (!existsSync(bindingPath)) continue
+      try {
+        const binding = readNativeBinding(bindingPath)
+        if (!binding.enabled) continue
+        const files = spoolEventFiles(binding.spool)
+        if (!files.length) { this.settledSpools.delete(binding.spool); continue }
+        if (this.settledSpools.get(binding.spool) !== files.join('\0')) return true
+      } catch {
+        return true
+      }
+    }
+    return false
+  }
+  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean; allowArtifactMetadata?: boolean; nativeMode?: 'FOCAL' | 'MAINTENANCE' | 'FULL'; isMaintenance?: boolean } = {}): Promise<McpToolResult> {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
       const timeoutMs = this.timeoutMs ?? (name === 'reconcile_checkpoint_registry' || name === 'list_agent_sessions' || name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'read_agent_session_event' ? 14_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
       const deadline = Date.now() + timeoutMs
-      const request: Request = { resolve, deadline, phase: 'worker-recovery', timer: setTimeout(() => this.expire(id), timeoutMs) }
+      const request: Request = { resolve, deadline, phase: 'worker-recovery', selectionValidators: new Map(), isMaintenance: options.isMaintenance, timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
       void (async () => {
         try {
@@ -188,35 +273,84 @@ export class SessionContextClient implements SessionContextPort {
           args = normalizedArgs
           let target
           let liveTargets
-          let nativeTargets
+          let nativeTargets: LiveSessionTarget[] | undefined
+          let nativeMode: 'FOCAL' | 'MAINTENANCE' | 'FULL' = options.nativeMode ?? 'FULL'
+          let nativeAgent: NativeHookProvider | undefined
+          let nativeBudgetMs: number | undefined
+          let hasMoreNativeTargets = false
           let nativeTrust: NativeTrustSnapshot | undefined
-          let indexOnlyNativeDelivery = false
+          const paginated = !!(normalizedArgs && typeof normalizedArgs === 'object' && 'cursor' in normalizedArgs && normalizedArgs.cursor)
           if (name === 'list_agent_sessions') {
             try {
               const query = parseSessionList(normalizedArgs)
-              indexOnlyNativeDelivery = query.source === 'NATIVE_HOOK' && !!(query.commitSha || query.pullRequest)
-              if (query.worktreeId && this.resolveTarget?.discover) {
-                liveTargets = await this.resolveTarget.discover().catch(() => undefined)
-                const matched = liveTargets?.find(t => t.worktreeId === query.worktreeId && t.generation === query.generation)
-                if (matched && this.resolveTarget) {
-                  const resolved = await this.resolveTarget({ worktreeId: matched.worktreeId, generation: matched.generation }).catch(() => undefined)
-                  if (resolved) {
-                    target = { ...resolved, selection: { worktreeId: matched.worktreeId, generation: matched.generation } }
-                    request.validate = resolved.validate
+              const hasWorktree = !!(query.worktreeId && query.generation)
+              const hasSelector = !!(query.commitSha || query.pullRequest || query.artifactId || query.executionId)
+              if (query.agent === 'codex' || query.agent === 'antigravity') nativeAgent = query.agent
+              if (hasWorktree) {
+                request.phase = 'target-resolution'
+                const selection = { worktreeId: query.worktreeId!, generation: query.generation! }
+                const resolved = await this.resolveSelectionOnce(selection)
+                if (resolved) {
+                  target = { ...resolved, selection }
+                  request.validate = resolved.validate
+                  liveTargets = [{ ...selection, root: resolved.root, fingerprint: resolved.fingerprint }]
+                  if (!paginated && !hasSelector && options.captureNative !== false && hasNativeBindingFile(resolved.root, nativeAgent)) {
+                    this.prioritizedTarget = selection
+                    if (this.hasSpoolBacklog(resolved.root, nativeAgent)) {
+                      nativeMode = 'FOCAL'
+                      nativeTargets = liveTargets
+                      nativeBudgetMs = Math.max(400, Math.min(2000, timeoutMs - 2500))
+                    }
                   }
                 }
+              } else if (!paginated && options.captureNative !== false) {
+                this.onMaintenanceNeeded?.()
               }
             } catch { throw new Error('INVALID_ARGUMENT') }
           }
           const health = name === 'inspect_capture_health' ? parseCaptureHealth(normalizedArgs) : undefined
-          if (!indexOnlyNativeDelivery && !health?.source && options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(normalizedArgs && typeof normalizedArgs === 'object' && 'cursor' in normalizedArgs && normalizedArgs.cursor)) {
-            request.phase = 'native-target-resolution'
-            const available = (await this.resolveTarget.discover()).filter(target =>
-              existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')) ||
-              existsSync(join(target.root, '.code-awareness/native-hooks/antigravity/binding.json')))
-            const start = this.nativeOffset % Math.max(1, available.length)
-            nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)
-            this.nativeOffset = (start + nativeTargets.length) % Math.max(1, available.length)
+          const hasReconcileSelector = name === 'reconcile_checkpoint_registry' && !!(normalizedArgs && typeof normalizedArgs === 'object' &&
+            ['artifactId', 'executionId', 'commitSha', 'pullRequest', 'checkpointId'].some(key => Boolean((normalizedArgs as Record<string, unknown>)[key])))
+          if (name === 'reconcile_checkpoint_registry' && !hasReconcileSelector && !paginated && options.captureNative !== false && this.resolveTarget) {
+            const maintenance = options.nativeMode === 'MAINTENANCE'
+            const candidates = this.resolveTarget.discoverMatching
+              ? await this.resolveTarget.discoverMatching(root => hasNativeBindingFile(root))
+              : (!maintenance && this.resolveTarget.discover ? (await this.resolveTarget.discover()).filter(t => hasNativeBindingFile(t.root)) : [])
+            if (candidates.length) {
+              request.phase = 'native-target-resolution'
+              const now = Date.now()
+              const eligible = candidates.filter(candidate => {
+                const key = `${candidate.worktreeId}:${candidate.generation}`
+                const backoff = this.targetBackoff.get(key)
+                return !backoff || backoff.untilMs <= now
+              })
+              const start = this.nativeOffset % Math.max(1, eligible.length)
+              const rotated = [...eligible.slice(start), ...eligible.slice(0, start)]
+              const prioritizedIndex = this.prioritizedTarget
+                ? rotated.findIndex(item => item.worktreeId === this.prioritizedTarget!.worktreeId && item.generation === this.prioritizedTarget!.generation)
+                : -1
+              if (prioritizedIndex > 0) {
+                const [prioritized] = rotated.splice(prioritizedIndex, 1)
+                rotated.unshift(prioritized)
+              }
+              if (maintenance) {
+                const dirty = rotated.filter(candidate => this.hasSpoolBacklog(candidate.root))
+                const needsScan = rotated.filter(candidate => !this.hasSpoolBacklog(candidate.root) && !this.cleanMaintenanceTargets.has(`${candidate.worktreeId}:${candidate.generation}`))
+                const selected = dirty.length ? dirty.slice(0, 2) : needsScan.slice(0, 2)
+                const transientBackoffPending = candidates.some(candidate => {
+                  const key = `${candidate.worktreeId}:${candidate.generation}`
+                  const backoff = this.targetBackoff.get(key)
+                  return !!backoff && backoff.untilMs > now && backoff.failures < 3 && (this.hasSpoolBacklog(candidate.root) || !this.cleanMaintenanceTargets.has(key))
+                })
+                nativeTargets = selected.length ? selected : undefined
+                hasMoreNativeTargets = dirty.length + needsScan.length > selected.length || transientBackoffPending
+                nativeBudgetMs = Math.max(500, Math.min(2500, timeoutMs - 2500))
+                this.nativeOffset = eligible.length ? (start + selected.length) % eligible.length : 0
+              } else {
+                nativeTargets = rotated.slice(0, 8)
+                this.nativeOffset = eligible.length ? (start + nativeTargets.length) % eligible.length : 0
+              }
+            }
           }
           if (health) {
             const query = health
@@ -226,12 +360,15 @@ export class SessionContextClient implements SessionContextPort {
             } else if (this.resolveTarget?.current) target = await this.resolveTarget.current()
             if (!target) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
             request.validate = target.validate
-            const nativeAgent = query.source === 'native' ? nativeCaptureAgent(query) : undefined
-            if (nativeAgent && existsSync(nativeBindingPath(target.root, nativeAgent))) {
+            const requestedAgent = query.source === 'native' ? nativeCaptureAgent(query) : (query.agent === 'codex' || query.agent === 'antigravity' ? query.agent : undefined)
+            nativeAgent = requestedAgent
+            if (options.captureNative !== false && hasNativeBindingFile(target.root, requestedAgent) && (query.trigger === 'RECHECK' || this.hasSpoolBacklog(target.root, requestedAgent))) {
+              nativeMode = 'FOCAL'
               nativeTargets = [{ ...target.selection, root: target.root, fingerprint: target.fingerprint }]
+              nativeBudgetMs = Math.max(400, Math.min(2000, timeoutMs - 2500))
             }
             const client = this.nativeHookClient
-            if (query.inspectNativeTrust && client && query.source !== 'entire' && nativeAgent !== 'antigravity') {
+            if (query.inspectNativeTrust && client && query.source !== 'entire' && requestedAgent !== 'antigravity') {
               request.phase = 'native-trust-inspection'
               const root = target.root
               const scope = { repositoryId: this.repositoryId, ...target.selection }
@@ -313,7 +450,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, allowArtifactMetadata: options.allowArtifactMetadata, ...(nativeTrust ? { nativeTrust } : {}), ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, allowArtifactMetadata: options.allowArtifactMetadata, nativeMode, ...(nativeAgent ? { nativeAgent } : {}), ...(nativeBudgetMs !== undefined ? { nativeBudgetMs } : {}), ...(hasMoreNativeTargets ? { hasMoreNativeTargets } : {}), ...(nativeTrust ? { nativeTrust } : {}), ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

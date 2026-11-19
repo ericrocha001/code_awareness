@@ -18,6 +18,8 @@ export const captureHealthQuery = z.object({ worktreeId: z.string().regex(/^[a-f
   inspectNativeTrust: z.boolean().default(false),
   cycleId: z.string().min(1).max(200).default('worktree'), trigger: z.enum(['INSPECT', 'RECHECK', 'BEGIN', 'LOCAL_COMMIT']).default('INSPECT'),
   agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(),
+  sessionId: z.string().min(1).max(200).optional(),
+  executionId: z.string().min(1).max(200).optional(),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/).optional() }).strict().refine(q => !q.worktreeId === !q.generation)
   .refine(q => q.source !== 'native' || (!q.commitSha && (q.trigger === 'INSPECT' || q.trigger === 'RECHECK') &&
     (!q.agent || nativeHookProviders.some(provider => provider === q.agent))))
