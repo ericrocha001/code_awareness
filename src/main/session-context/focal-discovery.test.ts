@@ -1,14 +1,15 @@
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
 import { fixture, markdown } from '../continuum/continuum-test-fixtures'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
+import { inspectExecutionOriginAlignment } from './execution-origin'
 import { startCaptureFixture } from './fixtures/native-capture-fixture'
 import { correlateNativeArtifact } from './native-artifact-correlation'
 import { nativeObservationBatch } from './native-hook-ingestion'
-import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { nativeBindingPath, nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { executeSessionTool, SESSION_CONTEXT_TOOLS } from './mcp'
 import { registrySources } from './registry-sources'
 import { SessionStore, sessionStorePath } from './store'
@@ -202,3 +203,124 @@ it('U2 returns linked sessions with compact witness on Plan/Execution, never mer
   const foreignRes = await f.call({ worktreeId: f.wt1.worktreeId, generation: f.wt1.generation }, f.wt1, [f.wt1], nativeDigest('account-2'))
   expect(foreignRes.data.sessions.some((s: any) => s.providerSessionId === 'codex-acc')).toBe(false)
 }, 20000)
+
+it('selects and pages native sessions in SQL before record projection, keeps target past 12-worktree bound, and returns Pure Signal FOCAL', async () => {
+  const f = setup()
+  const sOld = f.observeHook('ag-old', f.wt1, { provider: 'antigravity', observedAt: '2026-11-17T08:00:00.000Z' })
+  const sMid = f.observeHook('ag-mid', f.wt1, { provider: 'antigravity', observedAt: '2026-11-17T09:00:00.000Z' })
+  const sNew = f.observeHook('ag-new', f.wt1, { provider: 'antigravity', observedAt: '2026-11-17T10:00:00.000Z' })
+  const sOtherWt = f.observeHook('ag-other', f.wt2, { provider: 'antigravity', observedAt: '2026-11-17T11:00:00.000Z' })
+  f.observeHook('codex-other', f.wt1, { provider: 'codex', observedAt: '2026-11-17T12:00:00.000Z' })
+
+  // Unproven/stale edge must never be selected for wt1
+  const sStale = nativeDigest(JSON.stringify(['repo', 'antigravity', 'ag-stale']))
+  f.store.registry.apply({
+    repositoryId: 'repo',
+    source: 'NATIVE_HOOK:stale-only',
+    revision: 'stale-rev',
+    status: 'REPLACED',
+    edges: [
+      { from: { kind: 'EXECUTION', id: 'native-observation:' + nativeDigest('stale-obs') }, relation: 'SessionStart', to: { kind: 'SESSION', id: 'antigravity-native:' + sStale }, evidenceKind: 'NATIVE_HOOK_OBSERVED', evidenceRef: 'stale', digest: nativeDigest('stale'), freshness: 'OBSERVED_SNAPSHOT' },
+      { from: { kind: 'EXECUTION', id: 'native-observation:' + nativeDigest('stale-obs') }, relation: 'observed-in', to: { kind: 'WORKTREE', id: `${f.wt1.worktreeId}:${f.wt1.generation}` }, evidenceKind: 'NATIVE_HOOK_OBSERVED', evidenceRef: 'stale', digest: nativeDigest('stale'), freshness: 'OBSERVED_SNAPSHOT' }
+    ]
+  }, undefined)
+
+  // Session observed in 13 worktrees where the 13th (oldest) is queried: truncation to 12 must not drop it
+  const wtOldest = { worktreeId: '7'.repeat(64), generation: '7'.repeat(64) }
+  f.observeHook('ag-multi', wtOldest, { provider: 'antigravity', observedAt: '2026-11-17T07:00:00.000Z' })
+  for (let i = 1; i <= 12; i++) {
+    const gen = i.toString(16).padStart(64, 'c')
+    f.observeHook('ag-multi', { worktreeId: '8'.repeat(64), generation: gen }, { provider: 'antigravity', observedAt: `2026-11-17T07:${String(i).padStart(2, '0')}:00.000Z` })
+  }
+
+  const recordSpy = vi.spyOn(f.store.registry as any, 'nativeSessionRecord')
+
+  const focalPage1 = await f.call({
+    source: 'NATIVE_HOOK',
+    view: 'FOCAL',
+    worktreeId: f.wt1.worktreeId,
+    generation: f.wt1.generation,
+    agent: 'antigravity',
+    after: '2026-11-17T07:30:00.000Z',
+    before: '2026-11-17T10:30:00.000Z',
+    limit: 1
+  })
+  expect(focalPage1.isError).toBe(false)
+  expect(focalPage1.data.sessions).toHaveLength(1)
+  expect(focalPage1.data.sessions[0].providerSessionId).toBe(sNew)
+  expect(focalPage1.data.sessions[0].deepen).toEqual({
+    tool: 'inspect_agent_session',
+    arguments: { repositoryId: 'repo', nativeSession: { provider: 'antigravity-native', id: sNew } }
+  })
+  expect(focalPage1.data.contextMap).toBeUndefined()
+  expect(focalPage1.data.windows).toBeUndefined()
+  expect(focalPage1.data.pipeline).toBeUndefined()
+  // Only limit + 1 = 2 page rows projected, never all 7 sessions in the repository
+  expect(recordSpy).toHaveBeenCalledTimes(2)
+
+  recordSpy.mockClear()
+  const focalPage2 = await f.call({
+    source: 'NATIVE_HOOK',
+    view: 'FOCAL',
+    worktreeId: f.wt1.worktreeId,
+    generation: f.wt1.generation,
+    agent: 'antigravity',
+    after: '2026-11-17T07:30:00.000Z',
+    before: '2026-11-17T10:30:00.000Z',
+    limit: 1,
+    cursor: focalPage1.data.nextCursor
+  })
+  expect(focalPage2.data.sessions.map((s: any) => s.providerSessionId)).toEqual([sMid])
+  expect(recordSpy).toHaveBeenCalledTimes(2)
+
+  // Global FOCAL query excludes windows/pipeline diagnostics and still orders accurately
+  recordSpy.mockClear()
+  const globalFocal = await f.call({ source: 'NATIVE_HOOK', view: 'FOCAL', agent: 'antigravity', limit: 1 })
+  expect(globalFocal.data.sessions[0].providerSessionId).toBe(sOtherWt)
+  expect(globalFocal.data.windows).toBeUndefined()
+  expect(globalFocal.data.pipeline).toBeUndefined()
+  expect(recordSpy).toHaveBeenCalledTimes(2)
+
+  // Proven 13th worktree is found even when projection bounds worktrees to 12
+  recordSpy.mockClear()
+  const boundedRes = await f.call({ source: 'NATIVE_HOOK', view: 'FOCAL', worktreeId: wtOldest.worktreeId, generation: wtOldest.generation }, wtOldest, [wtOldest])
+  expect(boundedRes.data.sessions).toHaveLength(1)
+  expect(boundedRes.data.sessions[0].worktrees).toHaveLength(12)
+  expect(boundedRes.data.sessions[0].worktrees).toContainEqual(wtOldest)
+  expect(boundedRes.data.sessions.some((s: any) => s.providerSessionId === sOld)).toBe(false)
+})
+
+it('uses focal existence check in inspectExecutionOriginAlignment without calling queryNativeSessions or projecting records', () => {
+  const f = setup()
+  const agBindingPath = nativeBindingPath(f.continuum.dir, 'antigravity')
+  mkdirSync(dirname(agBindingPath), { recursive: true })
+  writeFileSync(agBindingPath, JSON.stringify({ ...f.binding, provider: 'antigravity' }))
+  f.observeHook('ag-target', f.wt1, { provider: 'antigravity', observedAt: '2026-11-17T10:00:00.000Z' })
+  f.observeHook('codex-other', f.wt2, { provider: 'codex', observedAt: '2026-11-17T11:00:00.000Z' })
+
+  const querySpy = vi.spyOn(f.store.registry, 'queryNativeSessions')
+  const existsSpy = vi.spyOn(f.store.registry, 'hasNativeSession')
+  const recordSpy = vi.spyOn(f.store.registry as any, 'nativeSessionRecord')
+
+  const observed = inspectExecutionOriginAlignment(f.store, f.continuum.dir, f.wt1)
+  expect(observed.captureStatus).toBe('CAPTURE_OBSERVED')
+  expect(observed.ready).toBe(true)
+  expect(observed.origin.state).toBe('TARGET_SESSION_OBSERVED')
+  expect(existsSpy).toHaveBeenCalled()
+  expect(querySpy).not.toHaveBeenCalled()
+  expect(recordSpy).not.toHaveBeenCalled()
+
+  existsSpy.mockClear()
+  const wt2Dir = join(f.dir, 'wt2-pending')
+  mkdirSync(join(wt2Dir, '.git'), { recursive: true })
+  const wt2BindingPath = nativeBindingPath(wt2Dir, 'antigravity')
+  mkdirSync(dirname(wt2BindingPath), { recursive: true })
+  writeFileSync(wt2BindingPath, JSON.stringify({ ...f.binding, provider: 'antigravity', ...f.wt2, ...nativeGitIdentity(wt2Dir), spool: join(wt2Dir, 'spool') }))
+  const pending = inspectExecutionOriginAlignment(f.store, wt2Dir, f.wt2, { agent: 'antigravity' })
+  expect(pending.captureStatus).toBe('PENDING_FIRST_SESSION')
+  expect(pending.ready).toBe(false)
+  expect(pending.origin).toMatchObject({ state: 'UNKNOWN', reason: 'PENDING_FIRST_SESSION', observedOnTarget: false })
+  expect(existsSpy).toHaveBeenCalled()
+  expect(querySpy).not.toHaveBeenCalled()
+  expect(recordSpy).not.toHaveBeenCalled()
+})

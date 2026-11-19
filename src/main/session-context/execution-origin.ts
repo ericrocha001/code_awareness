@@ -156,8 +156,7 @@ function resolveTargetAgent(
   if (options.sessionId?.startsWith('codex-native:')) return 'codex'
   if (hasNativeBindingFile(root, 'antigravity') && !hasNativeBindingFile(root, 'codex')) return 'antigravity'
   if (hasNativeBindingFile(root, 'codex') && !hasNativeBindingFile(root, 'antigravity')) return 'codex'
-  const agSessions = store.registry.queryNativeSessions({ worktreeId: target.worktreeId, generation: target.generation, agent: 'antigravity' }, options.accountHash).rows
-  if (agSessions.length > 0) return 'antigravity'
+  if (store.registry.hasNativeSession({ worktreeId: target.worktreeId, generation: target.generation, agent: 'antigravity' }, options.accountHash)) return 'antigravity'
   const agReadiness = nativeHookReadiness(store.registry, root, target, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity', options.profile ? { profile: options.profile } : undefined)
   if (agReadiness.installation.state === 'CONFIGURED') return 'antigravity'
   return 'codex'
@@ -181,7 +180,7 @@ export function inspectExecutionOriginAlignment(
     : binding.state === 'INVALID' ? 'INVALID_BINDING'
     : undefined
 
-  const targetSessions = store.registry.queryNativeSessions(
+  const hasTargetSessions = store.registry.hasNativeSession(
     { worktreeId: target.worktreeId, generation: target.generation, ...(options.agent ? { agent: options.agent } : {}) },
     options.accountHash
   )
@@ -190,7 +189,7 @@ export function inspectExecutionOriginAlignment(
     : binding.state === 'STALE_GENERATION' ? 'STALE_GENERATION'
     : installBroken || binding.state === 'INVALID' ? 'UNAVAILABLE'
     : binding.pendingSpoolCount > 0 ? 'INGESTION_PENDING'
-    : targetSessions.rows.length > 0 ? 'CAPTURE_OBSERVED'
+    : hasTargetSessions ? 'CAPTURE_OBSERVED'
     : binding.state === 'MISSING' ? 'BINDING_MISSING'
     : 'PENDING_FIRST_SESSION'
 
@@ -223,14 +222,14 @@ export function inspectExecutionOriginAlignment(
       origin: {
         state: 'UNAVAILABLE',
         reason: unavailableReason,
-        observedOnTarget: targetSessions.rows.length > 0,
-        observedWorktrees: targetSessions.rows.length > 0 ? [{ worktreeId: target.worktreeId, generation: target.generation }] : [],
+        observedOnTarget: hasTargetSessions,
+        observedWorktrees: hasTargetSessions ? [{ worktreeId: target.worktreeId, generation: target.generation }] : [],
         recommendedAction: 'REPAIR_NATIVE_CAPTURE_BEFORE_EXECUTION'
       }
     }
   }
 
-  if (targetSessions.rows.length > 0) {
+  if (hasTargetSessions) {
     return {
       worktreeId: target.worktreeId,
       generation: target.generation,

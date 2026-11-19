@@ -609,13 +609,17 @@ export async function executeSessionTool(
           const registry = actualStore.registry
           const source = registry.source('NATIVE_HOOK')
           const selector = registrySelector(query)
-          const nativeResult = registry.queryNativeSessions(query, archiveAccountHash)
-          const scope = { name, source: 'NATIVE_HOOK', repositoryId: actualStore.repositoryId, accountHash: archiveAccountHash ?? null,
-            filter: { worktreeId: query.worktreeId ?? null, generation: query.generation ?? null, agent: query.agent ?? null, after: query.after ?? null, before: query.before ?? null,
-              artifactId: query.artifactId ?? null, executionId: query.executionId ?? null, commitSha: query.commitSha ?? null, pullRequest: query.pullRequest ?? null },
-            revision: nativeResult.revision, limit: query.limit }
-          const offset = actualStore.offset(query.cursor, scope)
-          const rows = nativeResult.rows.slice(offset, offset + query.limit + 1)
+          let offset = 0
+          let scope: object = {}
+          const nativeResult = registry.queryNativeSessions(query, archiveAccountHash, revision => {
+            scope = { name, source: 'NATIVE_HOOK', repositoryId: actualStore.repositoryId, accountHash: archiveAccountHash ?? null,
+              filter: { worktreeId: query.worktreeId ?? null, generation: query.generation ?? null, agent: query.agent ?? null, after: query.after ?? null, before: query.before ?? null,
+                artifactId: query.artifactId ?? null, executionId: query.executionId ?? null, commitSha: query.commitSha ?? null, pullRequest: query.pullRequest ?? null },
+              revision, limit: query.limit }
+            offset = actualStore.offset(query.cursor, scope)
+            return { offset, limit: query.limit + 1 }
+          })
+          const rows = nativeResult.rows
           const emptyReason = !nativeResult.rows.length
             ? (spoolPending ? (nativeCatchUp?.reason ?? 'INGESTION_PENDING')
               : nativeResult.isDelivery ? 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED'
@@ -659,9 +663,8 @@ export async function executeSessionTool(
       }
       const mergeRegistry = query.source !== 'IMPORTED' && (!!selector || !!(filter.worktreeId && filter.generation))
       const importedLimit = mergeRegistry ? 200 : filter.limit + 1
-      const registryLinked = mergeRegistry
-        ? (selector ? actualStore.registry.linkedSessions(selector, filter, archiveAccountHash).rows : actualStore.registry.queryNativeSessions(filter, archiveAccountHash).rows)
-        : []
+      const linkedSelectorResult = mergeRegistry && selector ? actualStore.registry.linkedSessions(selector, filter, archiveAccountHash) : undefined
+      const nativeMergeRevision = mergeRegistry && !selector ? actualStore.registry.nativeSessionsRevision(filter) : undefined
       const activeRoot = filter.worktreeId && filter.generation
         ? (selectedTarget?.worktreeId === filter.worktreeId && selectedTarget?.generation === filter.generation
           ? root
@@ -702,11 +705,14 @@ export async function executeSessionTool(
         return true
       })
       const scopeRevision = digest(JSON.stringify([actualStore.catalogRevision(), mergeRegistry ? actualStore.registry.source('NATIVE_HOOK')?.revision ?? 'empty' : null,
-        registryLinked.map(r => [r.provider, r.providerSessionId, r.agent, r.witness]),
+        linkedSelectorResult ? linkedSelectorResult.rows.map(r => [r.provider, r.providerSessionId, r.agent, r.witness]) : nativeMergeRevision ?? [],
         localGranted.map(g => [g.provider, g.providerSessionId, g.lastObserved ?? null]),
         Object.entries(discoveryReasons)]))
       const scope = { name, repositoryId: actualStore.repositoryId, revision: scopeRevision, accountHash: archiveAccountHash ?? null, filter, view: focal ? 'FOCAL' : 'LEGACY' }
       const offset = actualStore.offset(cursor, scope)
+      const registryLinked = mergeRegistry
+        ? (linkedSelectorResult ? linkedSelectorResult.rows : actualStore.registry.queryNativeSessions(filter, archiveAccountHash, { offset: 0, limit: offset + filter.limit + 1 }).rows)
+        : []
       const importedRows = actualStore.sessions(filter, mergeRegistry ? 0 : offset, importedLimit, archiveAccountHash)
       for (const row of importedRows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       const availability: 'NOT_RECHECKED' | 'ACTIVE' | 'HISTORICAL_ONLY' = wtState === 'ACTIVE' || wtState === 'HISTORICAL_ONLY' ? wtState : 'NOT_RECHECKED'
