@@ -272,7 +272,7 @@ it('investigates native hook observations by provider and generation without inf
   const listed = await call('list_agent_sessions', { source: 'NATIVE_HOOK' })
   const selected = listed.sessions[0].deepen.arguments
   expect(selected.repositoryId).toBe(f.target.repositoryId)
-  expect(selected.nativeSession).toEqual({ provider: 'codex-native', id: first.sessionId })
+  expect(selected.nativeSession).toEqual({ provider: 'codex-native', id: first.sessionId, worktreeId: f.target.worktreeId, generation: f.target.generation })
   const map = await call('inspect_agent_session', selected)
   expect(map).toMatchObject({ observedEventCount: 2, transcriptImported: false, identityEvidence: 'NATIVE_HASH_OBSERVED', contentAvailability: 'SOURCE_UNAVAILABLE' })
   expect(JSON.stringify(map)).not.toContain('selected-private-id')

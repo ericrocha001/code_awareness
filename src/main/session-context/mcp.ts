@@ -47,7 +47,7 @@ const legacySessionEvents = z.object({ sessionId: id, expectedRevision: revision
   file: fileQuery, query: textQuery, turnId: z.string().regex(/^T[1-9]\d{0,14}$/).optional(), segmentId: z.string().max(30).regex(/^S[1-9]\d*$/).optional(), limit: z.number().int().min(1).max(15).default(15), cursor }).strict()
 const legacyEventRead = z.object({ sessionId: id, eventId: id, expectedRevision: revision, cursor }).strict()
 const nativeSessionTarget = { nativeSession: nativeSessionSelector, sourceSessionId: id.optional() }
-const nativeSessionDetail = z.object({ ...nativeSessionTarget, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: z.enum(['SEGMENTS', 'TURNS']).optional(), view: z.enum(['FOCAL', 'LEGACY']).optional() }).strict()
+const nativeSessionDetail = z.object({ ...nativeSessionTarget, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: z.enum(['SEGMENTS', 'TURNS', 'ORIGINS']).optional(), view: z.enum(['FOCAL', 'LEGACY']).optional() }).strict()
 const nativeSessionEvents = nativeSessionDetail.extend({ hookEvents: z.array(z.enum(nativeHookEvents)).min(1).max(nativeHookEvents.length).optional(),
   types: z.array(z.enum(EVENT_TYPES)).min(1).max(9).optional(), tool: z.string().min(1).max(80).optional(),
   file: fileQuery, query: textQuery, turnId: z.string().regex(/^(?:[a-f0-9]{64}|[A-Za-z0-9][A-Za-z0-9_-]{0,127})$/).optional(), after: date, before: date, limit: z.number().int().min(1).max(15).default(15) })
@@ -270,15 +270,15 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       throw new Error('SESSION_UNAVAILABLE')
     }
   }
-  const observations = hookObserved ? store.registry.nativeSessionObservations({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
+  const observations = hookObserved ? store.registry.nativeObservationScope({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
   const knownWorktrees = store.registry.sessionWorktrees(nativeSession.provider, nativeSession.id)
-  if ((observations && (observations.bounded || observations.events.length === 0 || observations.events.some(event =>
-    event.worktreeId !== target.worktreeId || event.generation !== target.generation))) ||
+  if ((observations && (observations.total === 0 || observations.originCount !== 1 || observations.origins.some(wt =>
+    wt.worktreeId !== target.worktreeId || wt.generation !== target.generation))) ||
     (knownWorktrees.length > 0 && !knownWorktrees.some(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))) {
     throw new Error('ORIGIN_UNVERIFIED')
   }
-  const locators = app ? [...new Set(observations?.events.flatMap(event => event.appTranscriptDigest ? [event.appTranscriptDigest] : []) ?? [])] : []
-  const registryVerifiedOrigin = (observations !== undefined && observations.events.length > 0) ||
+  const locators = app ? (observations?.locators ?? []) : []
+  const registryVerifiedOrigin = (observations !== undefined && observations.total > 0) ||
     (knownWorktrees.length > 0 && knownWorktrees.every(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))
   if ('hookEvents' in query && query.hookEvents) throw new Error('INVALID_ARGUMENT')
   const source = { storePath: store.path, repositoryId: store.repositoryId, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!, assertCurrent }
