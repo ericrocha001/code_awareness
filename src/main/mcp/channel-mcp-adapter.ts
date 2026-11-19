@@ -589,7 +589,7 @@ export class ChannelMcpAdapter {
         const { feature: _feature, refresh, ...query } = args as Record<string, unknown>
         if (refresh !== undefined && typeof refresh !== 'boolean' ||
           query.source !== undefined && query.source !== 'native' && query.source !== 'entire' ||
-          Object.keys(query).some(key => !['source', 'worktreeId', 'generation', 'cycleId', 'commitSha', 'agent', 'inspectNativeTrust'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
+          Object.keys(query).some(key => !['source', 'worktreeId', 'generation', 'cycleId', 'commitSha', 'agent', 'inspectNativeTrust', 'sessionId', 'executionId'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
         return this.sessionContext ? this.sessionContext.call('inspect_capture_health', { source: 'native', ...query, trigger: refresh ? 'RECHECK' : 'INSPECT' }) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
       }
       const core = this.systemHealth ?? new SystemHealthCore()

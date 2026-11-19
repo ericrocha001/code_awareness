@@ -180,7 +180,18 @@ const academyService = new AcademyService(desktopProfilePaths(app.getPath('userD
 const sessionMemoryCentral = new SessionMemoryCentralService(app.getPath('userData'))
 const localAgentChannel = new LocalChannelHost(
   [
-    new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)),
+    new ContinuumLocalAdapter(
+      continuumSession,
+      (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target),
+      async target => {
+        if (!activeSessionContext) return undefined
+        const result = await activeSessionContext.call('inspect_capture_health', { ...target, source: 'native' })
+        const first = result.content[0]
+        if (result.isError || !first || first.type !== 'text') return undefined
+        const parsed = JSON.parse(first.text) as { executionPreflight?: object }
+        return parsed.executionPreflight ?? parsed
+      }
+    ),
     new AcademyLocalAdapter(academyService),
     new TestOutputLocalAdapter(continuumSession, validationLedger),
     new WebActivationLocalAdapter(() => mcpLifecycle.ensureGlobalSkillsEndpoint())
@@ -697,6 +708,7 @@ app.whenReady().then(async () => {
       })
       void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
       const projection = new SessionProjectionCoordinator(() => sessionContext.reconcileProjection(), sessionIsCurrent)
+      sessionContext.setMaintenanceTrigger(projection.request)
       requestDeliveryProjection = repositoryId => { if (repositoryId === gitRepositoryId) projection.request() }
       sessionProjectionSubscriptions = [projection.stop, continuumSession.onChanged(projection.request), validationLedger.onRecorded(projection.request), settingsService.onChanged(projection.request)]
       projection.request()

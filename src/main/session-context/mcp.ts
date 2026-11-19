@@ -14,6 +14,7 @@ import { declaredAssociation, historicalSelectors } from './associations'
 import { sourceTimestamp } from './source-time'
 import type { SessionFilter } from './associations'
 import { captureHealthQuery, inspectCaptureHealth, inspectNativeCaptureHealth, nativeCaptureAgent } from './capture-health'
+import { inspectExecutionOriginAlignment } from './execution-origin'
 import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
 import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
@@ -22,7 +23,7 @@ import type { RegistryReader, RegistrySessionRecord, SessionWitness, WorktreeRef
 import { provenanceClass } from './provenance-evidence'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { nativeSessionProjection, nativeSessionSelector } from './native-session-query'
-import { nativeHookEvents } from './native-hooks'
+import { nativeBindingPath, nativeHookEvents, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
 import { codexSourceSnapshot, discoverCodexSources } from './native-codex-source'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
 import { antigravityAppSourceSnapshot, discoverAntigravityAppSources } from './native-antigravity-app-source'
@@ -439,6 +440,25 @@ export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvid
     return { ...wrap({ code, ...(phase ? { phase } : {}), ...(stage ? { stage } : {}), ...(reason ? { reason } : {}), ...(action ? { action } : {}) }), isError: true }
   }
 }
+export interface NativeCatchUpStatus {
+  state: 'OBSERVED' | 'PARTIAL' | 'PENDING'
+  pending: boolean
+  deferred?: boolean
+  reason?: string
+}
+
+function inspectFocalSpoolPending(targetRoot: string | undefined, agent?: string): boolean {
+  if (!targetRoot) return false
+  const providers: readonly NativeHookProvider[] = agent === 'codex' || agent === 'antigravity' ? [agent] : nativeHookProviders
+  for (const provider of providers) {
+    try {
+      const binding = readNativeBinding(nativeBindingPath(targetRoot, provider))
+      if (binding.enabled && spoolEventFiles(binding.spool).length > 0) return true
+    } catch {}
+  }
+  return false
+}
+
 export async function executeSessionTool(
   store: SessionStore | Pick<SessionStore, 'path' | 'repositoryId'>,
   provider: Partial<Pick<EntireProvider, 'refresh' | 'queryLive' | 'inspectCapture' | 'readEvent'>>,
@@ -455,7 +475,8 @@ export async function executeSessionTool(
   nativeClient?: NativeHookClient,
   nativeTrustSnapshot?: NativeTrustSnapshot,
   allowArtifactMetadata = false,
-  onDiscovery?: (report: { provider: 'codex' | 'antigravity'; truncated: boolean; coverageReason?: string; bytesRead: number; filesOpened: number; usedIndex: boolean }) => void
+  onDiscovery?: (report: { provider: 'codex' | 'antigravity'; truncated: boolean; coverageReason?: string; bytesRead: number; filesOpened: number; usedIndex: boolean }) => void,
+  nativeCatchUp?: NativeCatchUpStatus
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -485,11 +506,18 @@ export async function executeSessionTool(
           ? nativeTrustSnapshot.observation : unknownNativeTrust('SESSION_SCOPE_CHANGED')
         return inspectNativeTrust(root!, { repositoryId: store.repositoryId, ...selectedTarget! }, requested, nativeClient, assertActive, nativeProfile)
       }
+      const executionPreflight = inspectExecutionOriginAlignment(sessionStore, root, selectedTarget, {
+        agent: request.agent === 'codex' || request.agent === 'antigravity' ? request.agent : undefined,
+        sessionId: request.sessionId,
+        executionId: request.executionId,
+        profile: nativeProfile,
+        accountHash: archiveAccountHash
+      })
       if (request.source === 'native') {
         const agent = nativeCaptureAgent(request)
         const trust = agent === 'codex' ? await codexTrust() :
           { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' as const }
-        data = inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust, nativeProfile)
+        data = { ...inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust, nativeProfile), executionPreflight }
       } else {
         if (!provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
         data = await inspectCaptureHealth(sessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, request, assertActive)
@@ -503,6 +531,7 @@ export async function executeSessionTool(
             agReadiness.installation.state !== 'MISSING'
           data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: sessionStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true,
             ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex', nativeProfile ? { profile: nativeProfile } : undefined),
+            executionPreflight,
             ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: agReadiness } } } : {}) } }
         }
       }
@@ -567,6 +596,15 @@ export async function executeSessionTool(
       const wtState = query.worktreeId && query.generation ? worktreeStatus(actualStore, query.worktreeId, query.generation, selectedTarget, liveTargets) : undefined
       const focal = query.view === 'FOCAL' || !!(query.worktreeId && query.generation)
       if (query.source === 'NATIVE_HOOK') {
+        const focalRoot = query.worktreeId && query.generation
+          ? (selectedTarget?.worktreeId === query.worktreeId && selectedTarget?.generation === query.generation
+            ? root
+            : liveTargets.find(t => t.worktreeId === query.worktreeId && t.generation === query.generation)?.root)
+          : undefined
+        const spoolPending = nativeCatchUp ? nativeCatchUp.pending : inspectFocalSpoolPending(focalRoot, query.agent)
+        const catchUpCoverage = spoolPending
+          ? { state: 'PARTIAL' as const, pending: true, ...(nativeCatchUp?.deferred ? { deferred: true } : {}), reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING' }
+          : nativeCatchUp
         const result = actualStore.registry.readSnapshot(() => {
           const registry = actualStore.registry
           const source = registry.source('NATIVE_HOOK')
@@ -579,19 +617,29 @@ export async function executeSessionTool(
           const offset = actualStore.offset(query.cursor, scope)
           const rows = nativeResult.rows.slice(offset, offset + query.limit + 1)
           const emptyReason = !nativeResult.rows.length
-            ? (nativeResult.isDelivery ? 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED'
+            ? (spoolPending ? (nativeCatchUp?.reason ?? 'INGESTION_PENDING')
+              : nativeResult.isDelivery ? 'NO_VERIFIED_NATIVE_ASSOCIATION_OBSERVED'
               : wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED'
                 : query.worktreeId ? 'NO_SESSION_OBSERVED_FOR_WORKTREE' : 'NO_ASSOCIATION_OBSERVED')
             : undefined
-          const nextDiscovery = !nativeResult.rows.length ? nextDiscoveryFor(query, selectedTarget, liveTargets) : undefined
+          const nextDiscovery = !nativeResult.rows.length
+            ? (spoolPending && query.worktreeId && query.generation
+              ? { reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING', tool: 'list_agent_sessions', arguments: { source: 'NATIVE_HOOK', worktreeId: query.worktreeId, generation: query.generation, ...(query.agent ? { agent: query.agent } : {}) } }
+              : nextDiscoveryFor(query, selectedTarget, liveTargets))
+            : undefined
+          const coverage = spoolPending ? 'PARTIAL' : nativeResult.coverage
+          const coverageReasons = spoolPending
+            ? [...new Set([...nativeResult.reasons, nativeCatchUp?.reason ?? 'INGESTION_PENDING'])]
+            : nativeResult.reasons
           const base = { repositoryId: actualStore.repositoryId, source: 'NATIVE_HOOK', captureState: source?.status ?? 'UNOBSERVED',
             transcriptImported: false, authorship: 'NOT_INFERRED',
-            ...(wtState ? { worktreeState: wtState } : {}) }
+            ...(wtState ? { worktreeState: wtState } : {}),
+            ...(catchUpCoverage ? { nativeCatchUp: catchUpCoverage } : {}) }
           const meta = nativeResult.isDelivery
-            ? { ...base, selector, revision: nativeResult.revision, coverage: nativeResult.coverage, coverageReasons: nativeResult.reasons,
+            ? { ...base, selector, revision: nativeResult.revision, coverage, coverageReasons,
               ...(emptyReason ? { reason: emptyReason } : {}) }
             : (focal || query.artifactId || query.executionId)
-              ? { ...base, ...(selector ? { selector } : {}), revision: nativeResult.revision, coverage: nativeResult.coverage, coverageReasons: nativeResult.reasons,
+              ? { ...base, ...(selector ? { selector } : {}), revision: nativeResult.revision, coverage, coverageReasons,
                 ...(emptyReason ? { reason: emptyReason } : {}), ...(nextDiscovery ? { nextDiscovery } : {}) }
               : { ...base, ...nativeCaptureDiagnostics(registry, root), ...(emptyReason ? { reason: emptyReason } : {}) }
           return page(actualStore, scope, offset, rows, query.limit, budget, meta, row => ({
@@ -773,17 +821,23 @@ export async function executeSessionTool(
       const discoveryPartialReason = Object.keys(discoveryReasons).length
         ? (agDiscovery?.coverageReason ?? codexDiscovery?.coverageReason ?? 'SOURCE_DISCOVERY_LIMIT_REACHED')
         : undefined
+      const focalSpoolPending = !!(filter.worktreeId && filter.generation && (nativeCatchUp ? nativeCatchUp.pending : inspectFocalSpoolPending(activeRoot, filter.agent)))
       const nextDiscovery = !pageRows.length
-        ? (nextDiscoveryFor(query, selectedTarget, liveTargets) ?? (discoveryPartialReason === 'NO_METADATA_INDEX'
-          ? { reason: 'NO_METADATA_INDEX', tool: 'inspect_agent_session', requires: ['sourceSessionId', 'verifiedOrigin'] }
-          : undefined))
+        ? (focalSpoolPending && filter.worktreeId && filter.generation
+          ? { reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING', tool: 'list_agent_sessions', arguments: { worktreeId: filter.worktreeId, generation: filter.generation, ...(filter.agent ? { agent: filter.agent } : {}) } }
+          : (nextDiscoveryFor(query, selectedTarget, liveTargets) ?? (discoveryPartialReason === 'NO_METADATA_INDEX'
+            ? { reason: 'NO_METADATA_INDEX', tool: 'inspect_agent_session', requires: ['sourceSessionId', 'verifiedOrigin'] }
+            : undefined)))
         : undefined
-      const emptyReason = wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED' : discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')
+      const emptyReason = wtState === 'ORIGIN_UNVERIFIED' ? 'ORIGIN_UNVERIFIED'
+        : focalSpoolPending ? (nativeCatchUp?.reason ?? 'INGESTION_PENDING')
+        : discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')
       data = page(actualStore, scope, offset, pageRows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL',
           ...(wtState ? { worktreeState: wtState } : {}),
+          ...(focalSpoolPending ? { nativeCatchUp: { state: 'PARTIAL', pending: true, ...(nativeCatchUp?.deferred ? { deferred: true } : {}), reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING' } } : nativeCatchUp ? { nativeCatchUp } : {}),
           ...(Object.keys(discoveryReasons).length ? { sourceDiscoveryCoverage: 'PARTIAL', coverageReasons: discoveryReasons } : {}),
-          reason: pageRows.length ? (discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')) : emptyReason,
+          reason: pageRows.length ? (focalSpoolPending ? (nativeCatchUp?.reason ?? 'INGESTION_PENDING') : discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')) : emptyReason,
           ...(nextDiscovery ? { nextDiscovery } : {}),
           ...(contextMap ? { contextMap } : {}),
           ...(!focal ? {

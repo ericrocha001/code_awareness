@@ -9,6 +9,7 @@ export interface LiveSessionTarget extends SessionTargetSelection { root: string
 export interface SessionTargetResolver {
   (selection: SessionTargetSelection): Promise<SessionTarget>
   discover?: () => Promise<LiveSessionTarget[]>
+  discoverMatching?: (predicate: (worktreePath: string) => boolean) => Promise<LiveSessionTarget[]>
   current?: () => Promise<SessionTarget & { selection: SessionTargetSelection }>
 }
 
@@ -45,9 +46,7 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     }
     return { root, fingerprint, validate }
   }
-  resolveTarget.discover = async () => {
-    assertActive()
-    const { worktrees } = await registry.discover({ reuseValidatedDirectories: true })
+  const toLiveTargets = (worktrees: Awaited<ReturnType<GitWorktreeRegistry['discover']>>['worktrees']) => {
     const targets: LiveSessionTarget[] = []
     for (const record of worktrees) {
       if (record.missing || record.prunable || !record.head || (!record.detached && !record.branch)) continue
@@ -57,6 +56,16 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     }
     assertActive()
     return targets
+  }
+  resolveTarget.discover = async () => {
+    assertActive()
+    const { worktrees } = await registry.discover({ reuseValidatedDirectories: true })
+    return toLiveTargets(worktrees)
+  }
+  resolveTarget.discoverMatching = async predicate => {
+    assertActive()
+    const { worktrees } = await registry.discover({ reuseValidatedDirectories: true, filterPath: predicate })
+    return toLiveTargets(worktrees)
   }
   resolveTarget.current = async () => {
     assertActive()

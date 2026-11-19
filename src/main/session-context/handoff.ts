@@ -53,7 +53,20 @@ export async function handoffSessionCoverage(port: SessionContextPort | undefine
         executionId: metadata.executionId, commitSha: metadata.commitSha, pullRequest: metadata.pullRequest }
       const result = await port.call('refresh_agent_sessions', { ...target, sessionId: link.sessionId, association })
       const block = result.content[0]
-      receipts.push(block.type === 'text' ? JSON.parse(block.text) : { code: 'SESSION_CONTEXT_UNAVAILABLE' })
+      const receipt = block.type === 'text' ? JSON.parse(block.text) as Record<string, unknown> : { code: 'SESSION_CONTEXT_UNAVAILABLE' }
+      if (!('state' in receipt && receipt.state === 'PERSISTED')) {
+        try {
+          const health = await port.call('inspect_capture_health', { ...target, source: 'native', sessionId: link.sessionId })
+          const first = health.content[0]
+          if (!health.isError && first?.type === 'text') {
+            const parsed = JSON.parse(first.text) as { executionPreflight?: { origin?: { state?: string } } }
+            if (parsed.executionPreflight?.origin?.state === 'ORIGIN_MISMATCH') {
+              receipt.originPreflight = parsed.executionPreflight
+            }
+          }
+        } catch {}
+      }
+      receipts.push(receipt)
     }
   }
   return { coverage: receipts.every(row => 'state' in row && row.state === 'PERSISTED') ? 'LINKED' : 'PARTIAL', evidence: 'HANDOFF_DECLARED', transcriptImported: false, receipts }

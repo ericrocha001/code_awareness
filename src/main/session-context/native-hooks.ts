@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
+import { closeSync, constants, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { nativeArtifactFact, validNativeArtifactFact, type NativeArtifactFact } from './native-artifact-facts'
@@ -173,6 +173,17 @@ export function readNativeBinding(path: string): NativeHookBinding {
 
 export const nativeBindingPath = (root: string, provider: NativeHookProvider = 'codex') =>
   join(root, '.code-awareness/native-hooks', ...(provider === 'antigravity' ? ['antigravity', 'binding.json'] : ['binding.json']))
+export function hasNativeBindingFile(root: string, provider?: NativeHookProvider): boolean {
+  const providers = provider ? [provider] : nativeHookProviders
+  return providers.some(candidate => existsSync(nativeBindingPath(root, candidate)))
+}
+export function spoolEventFiles(spool: string): string[] {
+  try {
+    return readdirSync(spool).filter(name => /^(?:[0-9]{1,3}|10[01][0-9]|102[0-3])\.json$/.test(name)).sort()
+  } catch {
+    return []
+  }
+}
 export const nativeDispatchMismatch = 'NATIVE_DISPATCH_SCOPE_MISMATCH'
 
 export function readScopedNativeBinding(root: string, provider: NativeHookProvider = 'codex'): NativeHookBinding {

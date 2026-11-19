@@ -31,6 +31,8 @@ const nativeTestFiles = Object.freeze([
   'src/main/session-context/agent-behavior-investigation.test.ts',
   'src/main/session-context/context-economy.test.ts',
   'src/main/session-context/target.test.ts',
+  'src/main/session-context/selective-ingestion.test.ts',
+  'src/main/session-context/cooperative-draining-and-origin.test.ts',
   'src/main/continuum/bundle-builder.test.ts',
   'src/main/continuum/bundle-result-history.test.ts',
   'src/main/ipc/continuum-builder-handler.test.ts',
