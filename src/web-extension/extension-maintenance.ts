@@ -338,7 +338,7 @@ export class ExtensionMaintenanceCoordinator {
     } | null
 
     if (!response?.ok) {
-      if (response?.error?.code === 'APP_UNAVAILABLE') {
+      if (response?.error?.code === 'APP_UNAVAILABLE' || response?.error?.code === 'TIMEOUT') {
         this.consecutiveUnavailable += 1
         const delayMinutes = Math.min(MAX_BACKOFF_MINUTES, 2 ** Math.max(0, this.consecutiveUnavailable - 1))
         this.nextAllowedCheckAt = this.now() + delayMinutes * 60_000

@@ -78,6 +78,7 @@ export interface ParsedActivationCall {
 
 export interface RejectedActivationEnvelope {
   code:
+    | 'INCOMPLETE_CALL_ENVELOPE'
     | 'MALFORMED_JSON'
     | 'INVALID_PROTOCOL'
     | 'INVALID_REQUEST_ID'
@@ -87,6 +88,7 @@ export interface RejectedActivationEnvelope {
     | 'INVALID_PARAMS'
   message: string
   raw: string
+  requestId?: string
 }
 
 export interface ParseActivationTurnResult {
@@ -136,6 +138,7 @@ export function buildActivationBootstrapMessage(input: ActivationBootstrapInput)
     'Rules:',
     '- Use a fresh, unique `requestId` for every call in this session (never reuse a `requestId` across different calls).',
     '- One request per envelope (`requests[]` batching is not supported); when calling a tool, emit only the call envelope at the end of your reply and wait for `code-awareness-result`.',
+    '- If a call returns a terminal error (`ok: false`) or timeout, decide consciously whether a new call with a fresh unique `requestId` is warranted; never assume an unconfirmed call executed or request a blind retry.',
     '- `skills.load` delivers verified `SKILL.md` and a short inventory of read-only tools.',
     '- Request tool schemas on demand via `tools.schema` before `tools.call`.',
     '- Never invent or cite unverified rules, files, or tool results.',
@@ -150,6 +153,7 @@ export function buildActivationBootstrapMessage(input: ActivationBootstrapInput)
 interface ExtractedFenceBlock {
   info: string
   body: string
+  closed: boolean
 }
 
 function extractTopLevelCallBlocks(markdown: string): ExtractedFenceBlock[] {
@@ -163,7 +167,7 @@ function extractTopLevelCallBlocks(markdown: string): ExtractedFenceBlock[] {
     if (activeCallFence) {
       const closeMatch = new RegExp(`^ {0,3}${activeCallFence.char}{${activeCallFence.length},}[ \\t]*$`).exec(rawLine)
       if (closeMatch) {
-        blocks.push({ info: activeCallFence.info, body: activeCallFence.lines.join('\n') })
+        blocks.push({ info: activeCallFence.info, body: activeCallFence.lines.join('\n'), closed: true })
         activeCallFence = null
       } else {
         activeCallFence.lines.push(rawLine)
@@ -198,6 +202,10 @@ function extractTopLevelCallBlocks(markdown: string): ExtractedFenceBlock[] {
     } else {
       activeOuterFence = { char: fenceChar, length: fenceToken.length }
     }
+  }
+
+  if (activeCallFence) {
+    blocks.push({ info: activeCallFence.info, body: activeCallFence.lines.join('\n'), closed: false })
   }
 
   return blocks
@@ -241,6 +249,13 @@ function validateMethodParams(
   }
 }
 
+function extractValidRequestId(obj: Record<string, unknown>): string | undefined {
+  if (typeof obj.requestId !== 'string') return undefined
+  const trimmed = obj.requestId.trim()
+  if (!trimmed || trimmed.length > 128 || trimmed.toLowerCase() === 'invalid') return undefined
+  return trimmed
+}
+
 export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseActivationTurnResult {
   if (turn.role !== 'assistant') {
     return { ignoredReason: 'NON_ASSISTANT_ROLE', calls: [], rejected: [] }
@@ -260,10 +275,34 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
     try {
       parsed = JSON.parse(raw)
     } catch {
+      if (!block.closed) {
+        rejected.push({
+          code: 'INCOMPLETE_CALL_ENVELOPE',
+          message: 'Unclosed code-awareness-call fence without valid correlation ID; emit one closed JSON envelope with a unique requestId.',
+          raw
+        })
+      } else {
+        rejected.push({
+          code: 'MALFORMED_JSON',
+          message: 'Failed to parse JSON inside code-awareness-call block (no recoverable requestId); emit one valid JSON envelope with a unique requestId.',
+          raw
+        })
+      }
+      continue
+    }
+
+    if (!block.closed) {
+      const unclosedId =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed) && !Array.isArray((parsed as Record<string, unknown>).requests)
+          ? extractValidRequestId(parsed as Record<string, unknown>)
+          : undefined
       rejected.push({
-        code: 'MALFORMED_JSON',
-        message: 'Failed to parse JSON inside code-awareness-call block',
-        raw
+        code: 'INCOMPLETE_CALL_ENVELOPE',
+        message: unclosedId
+          ? 'Unclosed code-awareness-call fence reached end of turn; call was not executed.'
+          : 'Unclosed code-awareness-call fence without valid correlation ID; emit one closed envelope with a unique requestId.',
+        raw,
+        ...(unclosedId ? { requestId: unclosedId } : {})
       })
       continue
     }
@@ -271,7 +310,7 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
     if (Array.isArray(parsed)) {
       rejected.push({
         code: 'BATCHING_NOT_SUPPORTED',
-        message: 'Only one request per envelope is allowed; array batching is not supported',
+        message: 'Only one request per envelope is allowed (no correlation ID retained for array batching); emit one request with a unique requestId.',
         raw
       })
       continue
@@ -280,7 +319,7 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
     if (!parsed || typeof parsed !== 'object') {
       rejected.push({
         code: 'INVALID_PARAMS',
-        message: 'Envelope payload must be a JSON object',
+        message: 'Envelope payload must be a JSON object with a valid unique requestId.',
         raw
       })
       continue
@@ -290,26 +329,29 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
     if (Array.isArray(obj.requests)) {
       rejected.push({
         code: 'BATCHING_NOT_SUPPORTED',
-        message: 'Only one request per envelope is allowed; requests[] batching is not supported',
+        message: 'Only one request per envelope is allowed; requests[] batching is not supported (emit separate calls with unique requestIds).',
         raw
       })
       continue
     }
+
+    const recoveredRequestId = extractValidRequestId(obj)
 
     if (obj.protocol !== ACTIVATION_CONTRACT_PROTOCOL) {
       rejected.push({
         code: 'INVALID_PROTOCOL',
         message: `Expected protocol "${ACTIVATION_CONTRACT_PROTOCOL}"`,
-        raw
+        raw,
+        ...(recoveredRequestId ? { requestId: recoveredRequestId } : {})
       })
       continue
     }
 
-    const requestId = typeof obj.requestId === 'string' ? obj.requestId.trim() : ''
-    if (!requestId || requestId.length > 128) {
+    const requestId = recoveredRequestId ?? ''
+    if (!requestId) {
       rejected.push({
         code: 'INVALID_REQUEST_ID',
-        message: 'Envelope requestId must be a non-empty string (<= 128 chars)',
+        message: 'Envelope requestId is missing or invalid; emit a single call with a non-empty unique requestId (<= 128 chars).',
         raw
       })
       continue
@@ -319,7 +361,8 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
       rejected.push({
         code: 'DUPLICATE_REQUEST_ID',
         message: `Duplicate or replayed requestId "${requestId}"`,
-        raw
+        raw,
+        requestId
       })
       continue
     }
@@ -330,7 +373,8 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
       rejected.push({
         code: 'UNSUPPORTED_METHOD',
         message: `Method "${method}" is not supported by ${ACTIVATION_CONTRACT_PROTOCOL}`,
-        raw
+        raw,
+        requestId
       })
       continue
     }
@@ -340,7 +384,8 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
       rejected.push({
         code: 'INVALID_PARAMS',
         message: 'Envelope params must be a JSON object when provided',
-        raw
+        raw,
+        requestId
       })
       continue
     }
@@ -350,7 +395,8 @@ export function parseActivationCallEnvelopes(turn: AssistantTurnInput): ParseAct
       rejected.push({
         code: 'INVALID_PARAMS',
         message: paramError,
-        raw
+        raw,
+        requestId
       })
       continue
     }
@@ -408,4 +454,70 @@ export function formatActivationResultEnvelope(payload: ActivationEnvelopeResult
     serialized,
     fence
   ].join('\n')
+}
+
+export interface ParsedResultEnvelopeSummary {
+  requestId: string
+  normalizedJson: string
+}
+
+/**
+ * Extracts valid `code-awareness-result` envelopes from serialized or rendered chat turn text
+ * for exact DOM delivery correlation without matching arbitrary prose.
+ */
+export function extractActivationResultEnvelopes(markdown: string): ParsedResultEnvelopeSummary[] {
+  const blocks = extractFencedBlocks(markdown, RESULT_FENCE_LANGUAGE)
+  const out: ParsedResultEnvelopeSummary[] = []
+  for (const block of blocks) {
+    if (!block.closed) continue
+    try {
+      const unescaped = block.body.trim().replace(/<\\\//g, '</')
+      const parsed = JSON.parse(unescaped) as Partial<ActivationEnvelopeResultPayload>
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        parsed.protocol === ACTIVATION_CONTRACT_PROTOCOL &&
+        typeof parsed.requestId === 'string'
+      ) {
+        out.push({
+          requestId: parsed.requestId,
+          normalizedJson: JSON.stringify(parsed)
+        })
+      }
+    } catch {
+      // Ignore malformed result blocks when scanning DOM turns
+    }
+  }
+  return out
+}
+
+function extractFencedBlocks(markdown: string, targetLanguage: string): ExtractedFenceBlock[] {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  const blocks: ExtractedFenceBlock[] = []
+  let activeFence: { char: '`' | '~'; length: number; info: string; lines: string[] } | null = null
+
+  for (const rawLine of lines) {
+    if (activeFence) {
+      const closeMatch = new RegExp(`^ {0,3}${activeFence.char}{${activeFence.length},}[ \\t]*$`).exec(rawLine)
+      if (closeMatch) {
+        if (activeFence.info === targetLanguage) {
+          blocks.push({ info: activeFence.info, body: activeFence.lines.join('\n'), closed: true })
+        }
+        activeFence = null
+      } else {
+        activeFence.lines.push(rawLine)
+      }
+      continue
+    }
+    const openMatch = /^ {0,3}(`{3,}|~{3,})([^\n]*)$/.exec(rawLine)
+    if (!openMatch) continue
+    const fenceToken = openMatch[1]
+    activeFence = {
+      char: fenceToken[0] as '`' | '~',
+      length: fenceToken.length,
+      info: openMatch[2].trim(),
+      lines: []
+    }
+  }
+  return blocks
 }

@@ -639,4 +639,226 @@ describe('Activation Contract (code-awareness-activation/v1) & ActivationSession
     expect(p1Json.result.nextOffset).toBeGreaterThan(0)
     skillAOverrideText = null
   })
+
+  it('retains requestId across recoverable rejections, detects unclosed top-level fences, maps isError/count:0 cleanly, and enforces logical call deadlines without stale mutations', async () => {
+    // 1. Parser: valid requestId preserved on INVALID_PROTOCOL/UNSUPPORTED_METHOD/INVALID_PARAMS/DUPLICATE_REQUEST_ID/INCOMPLETE_CALL_ENVELOPE
+    const turnWithRejections = {
+      role: 'assistant' as const,
+      isComplete: true,
+      seenRequestIds: new Set(['req-dup']),
+      text: [
+        '```code-awareness-call\n{"protocol":"wrong/v0","requestId":"req-proto","method":"skills/list","params":{}}\n```',
+        '```code-awareness-call\n{"protocol":"code-awareness-activation/v1","requestId":"req-dup","method":"skills/list","params":{}}\n```',
+        '```code-awareness-call\n{"protocol":"code-awareness-activation/v1","requestId":"req-method","method":"unknown/op","params":{}}\n```',
+        '```code-awareness-call\n{"protocol":"code-awareness-activation/v1","requestId":"req-params","method":"tools.call","params":{}}\n```',
+        '```code-awareness-call\n{"protocol":"code-awareness-activation/v1","requestId":"req-unclosed","method":"tools.call","params":{"name":"list_artifacts"}}',
+      ].join('\n\n')
+    }
+    const parsed = parseActivationCallEnvelopes(turnWithRejections)
+    expect(parsed.calls).toEqual([])
+    expect(parsed.rejected.map((r) => ({ code: r.code, requestId: r.requestId }))).toEqual([
+      { code: 'INVALID_PROTOCOL', requestId: 'req-proto' },
+      { code: 'DUPLICATE_REQUEST_ID', requestId: 'req-dup' },
+      { code: 'UNSUPPORTED_METHOD', requestId: 'req-method' },
+      { code: 'INVALID_PARAMS', requestId: 'req-params' },
+      { code: 'INCOMPLETE_CALL_ENVELOPE', requestId: 'req-unclosed' }
+    ])
+
+    // Unclosed or malformed without recoverable JSON object uses undefined (mapped to 'invalid'), never regex
+    const brokenUnclosed = parseActivationCallEnvelopes({
+      role: 'assistant',
+      isComplete: true,
+      text: '```code-awareness-call\n{"requestId":"regex-bait"'
+    })
+    expect(brokenUnclosed.rejected[0]?.code).toBe('INCOMPLETE_CALL_ENVELOPE')
+    expect(brokenUnclosed.rejected[0]?.requestId).toBeUndefined()
+
+    // Unclosed inside incomplete streaming turn is still IGNORED (never rejected prematurely)
+    expect(
+      parseActivationCallEnvelopes({
+        role: 'assistant',
+        isComplete: false,
+        text: '```code-awareness-call\n{"requestId":"stream-1"'
+      }).ignoredReason
+    ).toBe('INCOMPLETE_TURN')
+
+    // 2. Session: rejected correlation, tool isError redaction vs count:0, missing shape, sync/async exception, cycle overflow non-silencing, and fake-clock deadline
+    let resolveHangingCall: ((v: unknown) => void) | null = null
+    let nextResponse: (() => Promise<unknown>) | null = null
+    const timers = new Map<number, () => void>()
+    let nextTimerId = 0
+    const clock = {
+      setTimeout: (cb: () => void) => {
+        const id = ++nextTimerId
+        timers.set(id, cb)
+        return id
+      },
+      clearTimeout: (id: unknown) => {
+        timers.delete(id as number)
+      }
+    }
+
+    const transport: WebActivationTransport = {
+      async getStatus() {
+        return { available: true, mode: 'PROJECT', projectId: 'proj-u1', instanceId: 'i-u1', bindingId: 'b-u1' }
+      },
+      async mcpRequest(req) {
+        if (req.method === 'skills/list') {
+          return {
+            ok: true,
+            mcp: {
+              result: {
+                skills: [
+                  { uri: 'skill://global/s1/a/SKILL.md', name: 'a', description: 'Skill A', resources: [] }
+                ]
+              }
+            }
+          }
+        }
+        if (req.method === 'tools/list') {
+          return {
+            ok: true,
+            mcp: {
+              result: {
+                tools: [
+                  { name: 'discover_repository', inputSchema: {} },
+                  { name: 'list_artifacts', inputSchema: {} }
+                ]
+              }
+            }
+          }
+        }
+        if (nextResponse) {
+          const fn = nextResponse
+          nextResponse = null
+          return (await fn()) as never
+        }
+        return { ok: true, mcp: { result: { count: 0, artifacts: [] } } }
+      }
+    }
+
+    const session = new ActivationSession({
+      site: 'deepseek',
+      transport,
+      maxCyclesPerUserTurn: 2,
+      logicalCallTimeoutMs: 5000,
+      clock
+    })
+    await session.activate()
+
+    // Rejected ID retention + tool isError redaction vs valid count:0 + malformed response
+    nextResponse = async () => ({
+      ok: true,
+      mcp: {
+        result: {
+          isError: true,
+          content: [{ type: 'text', text: 'ARTIFACT_NOT_FOUND: Missing secret Bearer tok_12345\n    at internal.ts:42' }]
+        }
+      }
+    })
+    const errAndCountTurn = await session.processAssistantTurn({
+      role: 'assistant',
+      isComplete: true,
+      text: [
+        `\`\`\`code-awareness-call\n{"protocol":"wrong/v0","requestId":"bad-proto-1","method":"tools.call","params":{"name":"discover_repository"}}\n\`\`\``,
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'tool-err-1', method: 'tools.call', params: { name: 'discover_repository', arguments: {} } })}\n\`\`\``,
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'zero-ok-1', method: 'tools.call', params: { name: 'list_artifacts', arguments: {} } })}\n\`\`\``
+      ].join('\n\n')
+    })
+
+    const envBadProto = JSON.parse(errAndCountTurn.emulatedResponses[0]!.split('\n')[1])
+    expect(envBadProto).toMatchObject({ requestId: 'bad-proto-1', ok: false, error: { code: 'INVALID_PROTOCOL' } })
+
+    const envToolErr = JSON.parse(errAndCountTurn.emulatedResponses[1]!.split('\n')[1])
+    expect(envToolErr.ok).toBe(false)
+    expect(envToolErr.requestId).toBe('tool-err-1')
+    expect(envToolErr.error.code).toBe('ARTIFACT_NOT_FOUND')
+    expect(envToolErr.error.message).toContain('[redacted]')
+    expect(envToolErr.error.message).not.toContain('tok_12345')
+    expect(envToolErr.error.message).not.toContain('at internal.ts')
+
+    const envZeroOk = JSON.parse(errAndCountTurn.emulatedResponses[2]!.split('\n')[1])
+    expect(envZeroOk).toMatchObject({ requestId: 'zero-ok-1', ok: true, result: { count: 0 } })
+    expect(session.getState()).toBe('RESUMING')
+
+    // Multi-call cycle overflow MUST signal CYCLE_LIMIT_EXCEEDED for every overflowed call
+    session.beginUserTurn()
+    const overflowTurn = await session.processAssistantTurn({
+      role: 'assistant',
+      isComplete: true,
+      text: [
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'ov-1', method: 'tools.call', params: { name: 'list_artifacts', arguments: {} } })}\n\`\`\``,
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'ov-2', method: 'tools.call', params: { name: 'list_artifacts', arguments: {} } })}\n\`\`\``,
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'ov-3', method: 'tools.call', params: { name: 'list_artifacts', arguments: {} } })}\n\`\`\``,
+        `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'ov-4', method: 'tools.call', params: { name: 'list_artifacts', arguments: {} } })}\n\`\`\``
+      ].join('\n\n')
+    })
+    expect(overflowTurn.executedCalls.map((c) => [c.requestId, c.ok, c.errorCode])).toEqual([
+      ['ov-1', true, undefined],
+      ['ov-2', true, undefined],
+      ['ov-3', false, 'CYCLE_LIMIT_EXCEEDED'],
+      ['ov-4', false, 'CYCLE_LIMIT_EXCEEDED']
+    ])
+
+    // Sync/async exception in transport releases WAITING_TOOL and preserves next turn continuity
+    session.beginUserTurn()
+    nextResponse = async () => {
+      throw new Error('Transient socket throw')
+    }
+    const thrownTurn = await session.processAssistantTurn({
+      role: 'assistant',
+      isComplete: true,
+      text: `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'throw-1', method: 'tools.call', params: { name: 'discover_repository', arguments: {} } })}\n\`\`\``
+    })
+    expect(thrownTurn.executedCalls[0]).toMatchObject({ requestId: 'throw-1', ok: false, errorCode: 'EXECUTION_ERROR' })
+    expect(session.getState()).toBe('RESUMING')
+
+    // Missing result and error in MCP payload fails with INVALID_MCP_RESPONSE
+    nextResponse = async () => ({ ok: true, mcp: { jsonrpc: '2.0', id: 9 } })
+    const malformedTurn = await session.processAssistantTurn({
+      role: 'assistant',
+      isComplete: true,
+      text: `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'bad-shape-1', method: 'tools.call', params: { name: 'discover_repository', arguments: {} } })}\n\`\`\``
+    })
+    expect(malformedTurn.executedCalls[0]).toMatchObject({
+      requestId: 'bad-shape-1',
+      ok: false,
+      errorCode: 'INVALID_MCP_RESPONSE'
+    })
+
+    // Fake-clock logical deadline fires TIMEOUT and discards late skills/get completion (no late actingWindow mutation)
+    session.beginUserTurn()
+    nextResponse = () =>
+      new Promise((resolve) => {
+        resolveHangingCall = resolve
+      })
+    const hangingPromise = session.processAssistantTurn({
+      role: 'assistant',
+      isComplete: true,
+      text: `\`\`\`code-awareness-call\n${JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'hang-1', method: 'skills.load', params: { uri: 'skill://global/s1/a/SKILL.md' } })}\n\`\`\``
+    })
+    // Trigger deadline timer fired
+    await new Promise((r) => setTimeout(r, 0))
+    for (const cb of timers.values()) cb()
+    const timedOutTurn = await hangingPromise
+    expect(timedOutTurn.executedCalls[0]).toMatchObject({ requestId: 'hang-1', ok: false, errorCode: 'TIMEOUT' })
+    expect(session.getState()).toBe('RESUMING')
+
+    // Resolve hanging call AFTER timeout -> must NOT open acting window!
+    resolveHangingCall!({
+      ok: true,
+      mcp: {
+        result: {
+          skill: {
+            uri: 'skill://global/s1/a/SKILL.md',
+            name: 'a',
+            description: 'Skill A',
+            resources: [{ uri: 'skill://global/s1/a/SKILL.md' }]
+          }
+        }
+      }
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(session.getActingWindow()).toBeNull()
+  })
 })

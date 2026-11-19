@@ -47,7 +47,7 @@ describe('DeepSeekWebAdapter & MV3 Background Router', () => {
 
     // Sending during streaming is rejected
     const blockedSend = await adapter.sendMessage(doc, 'hello')
-    expect(blockedSend).toEqual({ ok: false, reason: 'STREAMING_IN_PROGRESS' })
+    expect(blockedSend).toEqual({ ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'STREAMING_IN_PROGRESS' })
 
     // Transition to complete (stop button hidden/removed, streaming flag removed, send button enabled)
     doc.querySelector('[data-testid="stop-button"]')?.remove()
@@ -77,7 +77,7 @@ describe('DeepSeekWebAdapter & MV3 Background Router', () => {
     sendBtn.addEventListener('click', clicked)
 
     const sendRes = await adapter.sendMessage(doc, '```code-awareness-result\n{"ok":true}\n```')
-    expect(sendRes).toEqual({ ok: true })
+    expect(sendRes).toEqual({ ok: true, status: 'DISPATCHED' })
     expect(clicked).toHaveBeenCalledTimes(1)
     expect(textarea.value).toContain('code-awareness-result')
   })
@@ -176,7 +176,25 @@ describe('DeepSeekWebAdapter & MV3 Background Router', () => {
     sendBtn.addEventListener('click', () => { clicked += 1 })
 
     const res = await adapter.sendMessage(doc, '```code-awareness-result\n{"ok":true}\n```')
-    expect(res).toEqual({ ok: true })
+    expect(res).toEqual({ ok: true, status: 'DISPATCHED' })
     expect(clicked).toBe(1)
+
+    // Composer modified by user during await preserves user text and never clicks
+    textarea.value = ''
+    let clickedGuard = 0
+    sendBtn.addEventListener('click', () => { clickedGuard += 1 })
+    const pModified = adapter.sendMessage(doc, 'ext-payload')
+    textarea.value = 'User edited mid-dispatch'
+    const modifiedRes = await pModified
+    expect(modifiedRes).toEqual({ ok: false, status: 'PRE_DISPATCH_BLOCKED', reason: 'COMPOSER_MODIFIED_BY_USER' })
+    expect(textarea.value).toBe('User edited mid-dispatch')
+    expect(clickedGuard).toBe(0)
+
+    // Context change abort during await clears untouched composer text and never clicks
+    textarea.value = ''
+    const abortedRes = await adapter.sendMessage(doc, 'ext-payload-2', () => false)
+    expect(abortedRes).toEqual({ ok: false, status: 'DISPATCH_ABORTED', reason: 'CONTEXT_CHANGED_BEFORE_DISPATCH' })
+    expect(textarea.value).toBe('')
+    expect(clickedGuard).toBe(0)
   })
 })

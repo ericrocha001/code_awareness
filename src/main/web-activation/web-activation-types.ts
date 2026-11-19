@@ -54,6 +54,8 @@ export interface NativeBridgeErrorPayload {
     | 'ORIGIN_NOT_ALLOWED'
     | 'INVALID_REQUEST'
     | 'APP_UNAVAILABLE'
+    | 'TIMEOUT'
+    | 'INVALID_MCP_RESPONSE'
     | 'SESSION_INVALIDATED'
     | 'METHOD_NOT_ALLOWED'
     | 'TOOL_NOT_ALLOWED'

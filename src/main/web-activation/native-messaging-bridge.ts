@@ -19,7 +19,8 @@ import {
 } from './web-activation-types'
 
 const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/[a-z0-9]{16,64}\/?$/i
-const DEFAULT_PIPE_TIMEOUT_MS = 2500
+export const DEFAULT_PIPE_TIMEOUT_MS = 2500
+export const DEFAULT_MCP_HTTP_TIMEOUT_MS = 15_000
 
 export interface LocalChannelDescriptor {
   protocol: string
@@ -30,18 +31,25 @@ export interface LocalChannelDescriptor {
 export interface McpHttpResponse {
   status: number
   body: unknown
+  timedOut?: boolean
+  timeoutMs?: number
 }
 
 export type McpHttpTransport = (
   endpoint: string,
   headers: Record<string, string>,
-  payload: unknown
+  payload: unknown,
+  timeoutMs?: number
 ) => Promise<McpHttpResponse>
 
 export type LocalWebActivationDispatcher = (
   action: string,
   args: Record<string, unknown>
-) => Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string }>
+) => Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string; details?: Record<string, unknown> }>
+
+export type DesktopEndpointLookupResult =
+  | { ok: true; info: DesktopSkillsEndpointInfo }
+  | { ok: false; code: 'APP_UNAVAILABLE' | 'TIMEOUT'; message: string; details?: Record<string, unknown> }
 
 export interface NativeMessagingBridgeOptions {
   consentStore: ConsentStore
@@ -50,7 +58,10 @@ export interface NativeMessagingBridgeOptions {
   allowedExtensionOrigins?: readonly string[]
   allowedWebOrigins?: readonly string[]
   userDataPath?: string
+  pipeTimeoutMs?: number
+  mcpTimeoutMs?: number
   resolveDesktopEndpoint?: () => Promise<DesktopSkillsEndpointInfo | null>
+  resolveDesktopEndpointDetailed?: () => Promise<DesktopEndpointLookupResult>
   dispatchLocalAction?: LocalWebActivationDispatcher
   mcpTransport?: McpHttpTransport
   maxOutboundBytes?: number
@@ -79,7 +90,10 @@ export async function invokeDesktopWebActivationAction(
   action: string,
   args: Record<string, unknown> = {},
   timeoutMs = DEFAULT_PIPE_TIMEOUT_MS
-): Promise<{ ok: true; result: unknown } | { ok: false; code: string; message: string }> {
+): Promise<
+  | { ok: true; result: unknown }
+  | { ok: false; code: string; message: string; details?: Record<string, unknown> }
+> {
   const descriptorPath = join(userDataPath, 'local-agent-channel', 'endpoint.json')
   if (!existsSync(descriptorPath)) {
     return { ok: false, code: 'APP_UNAVAILABLE', message: 'Local agent channel descriptor not found' }
@@ -110,7 +124,11 @@ export async function invokeDesktopWebActivationAction(
     const socket = createConnection(descriptor.endpoint)
     let raw = ''
 
-    const finish = (outcome: { ok: true; result: unknown } | { ok: false; code: string; message: string }) => {
+    const finish = (
+      outcome:
+        | { ok: true; result: unknown }
+        | { ok: false; code: string; message: string; details?: Record<string, unknown> }
+    ) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -119,7 +137,13 @@ export async function invokeDesktopWebActivationAction(
     }
 
     const timer = setTimeout(
-      () => finish({ ok: false, code: 'APP_UNAVAILABLE', message: 'Local agent channel timed out' }),
+      () =>
+        finish({
+          ok: false,
+          code: 'TIMEOUT',
+          message: `Local agent channel discovery timed out after ${timeoutMs}ms`,
+          details: { phase: 'desktop_discovery', timeoutMs, executionStateUnknown: false }
+        }),
       timeoutMs
     )
     socket.setEncoding('utf8')
@@ -164,36 +188,71 @@ export async function invokeDesktopWebActivationAction(
   })
 }
 
+export async function discoverDesktopWebActivationEndpointDetailed(
+  userDataPath: string,
+  timeoutMs = DEFAULT_PIPE_TIMEOUT_MS
+): Promise<DesktopEndpointLookupResult> {
+  const response = await invokeDesktopWebActivationAction(userDataPath, 'endpoint', {}, timeoutMs)
+  if (!response.ok) {
+    return {
+      ok: false,
+      code: response.code === 'TIMEOUT' ? 'TIMEOUT' : 'APP_UNAVAILABLE',
+      message: response.message,
+      ...(response.details ? { details: response.details } : {})
+    }
+  }
+  if (!response.result || typeof response.result !== 'object') {
+    return { ok: false, code: 'APP_UNAVAILABLE', message: 'Desktop endpoint discovery returned invalid payload' }
+  }
+  const info = response.result as DesktopSkillsEndpointInfo
+  if (info.status !== 'RUNNING' || !info.endpoint) {
+    return { ok: false, code: 'APP_UNAVAILABLE', message: info.reason ?? 'DESKTOP_UNREACHABLE' }
+  }
+  return { ok: true, info }
+}
+
 export async function discoverDesktopWebActivationEndpoint(
   userDataPath: string,
   timeoutMs = DEFAULT_PIPE_TIMEOUT_MS
 ): Promise<DesktopSkillsEndpointInfo | null> {
-  const response = await invokeDesktopWebActivationAction(userDataPath, 'endpoint', {}, timeoutMs)
-  if (!response.ok || !response.result || typeof response.result !== 'object') {
-    return null
-  }
-  const info = response.result as DesktopSkillsEndpointInfo
-  return info.status === 'RUNNING' && info.endpoint ? info : null
+  const detailed = await discoverDesktopWebActivationEndpointDetailed(userDataPath, timeoutMs)
+  return detailed.ok ? detailed.info : null
 }
 
 async function defaultMcpTransport(
   endpoint: string,
   headers: Record<string, string>,
-  payload: unknown
+  payload: unknown,
+  timeoutMs = DEFAULT_MCP_HTTP_TIMEOUT_MS
 ): Promise<McpHttpResponse> {
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify(payload)
-  })
-  const text = await response.text()
-  let body: unknown = null
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    body = text ? JSON.parse(text) : null
-  } catch {
-    body = { raw: text }
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    })
+    const text = await response.text()
+    let body: unknown = null
+    try {
+      body = text ? JSON.parse(text) : null
+    } catch {
+      body = { raw: text }
+    }
+    return { status: response.status, body }
+  } catch (err) {
+    if (
+      controller.signal.aborted ||
+      (err && typeof err === 'object' && 'name' in err && (err as { name?: unknown }).name === 'AbortError')
+    ) {
+      return { status: 0, body: null, timedOut: true, timeoutMs }
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
   }
-  return { status: response.status, body }
 }
 
 export class NativeMessagingBridge {
@@ -202,9 +261,10 @@ export class NativeMessagingBridge {
   private readonly requireCallerOrigin: boolean
   private readonly allowedExtensionOrigins: Set<string> | null
   private readonly allowedWebOrigins: Set<string>
-  private readonly resolveDesktopEndpoint: () => Promise<DesktopSkillsEndpointInfo | null>
+  private readonly resolveDesktopEndpointDetailed: () => Promise<DesktopEndpointLookupResult>
   private readonly dispatchLocalAction: LocalWebActivationDispatcher
   private readonly mcpTransport: McpHttpTransport
+  private readonly mcpTimeoutMs: number
   private readonly maxOutboundBytes: number
   private readonly hostBuildId: string
   private readonly hostApplication: string
@@ -226,15 +286,32 @@ export class NativeMessagingBridge {
     this.allowedWebOrigins = new Set(
       webOrigins.map((entry) => normalizeWebOrigin(entry)).filter((entry): entry is string => entry !== null)
     )
-    this.resolveDesktopEndpoint =
-      options.resolveDesktopEndpoint ??
-      (options.userDataPath
-        ? () => discoverDesktopWebActivationEndpoint(options.userDataPath!)
-        : async () => null)
+    const pipeTimeout = options.pipeTimeoutMs ?? DEFAULT_PIPE_TIMEOUT_MS
+    this.mcpTimeoutMs = options.mcpTimeoutMs ?? DEFAULT_MCP_HTTP_TIMEOUT_MS
+    if (options.resolveDesktopEndpointDetailed) {
+      this.resolveDesktopEndpointDetailed = options.resolveDesktopEndpointDetailed
+    } else if (options.resolveDesktopEndpoint) {
+      const legacyResolve = options.resolveDesktopEndpoint
+      this.resolveDesktopEndpointDetailed = async () => {
+        const info = await legacyResolve()
+        return info && info.status === 'RUNNING' && info.endpoint
+          ? { ok: true, info }
+          : { ok: false, code: 'APP_UNAVAILABLE', message: info?.reason ?? 'DESKTOP_UNREACHABLE' }
+      }
+    } else if (options.userDataPath) {
+      const userDataPath = options.userDataPath
+      this.resolveDesktopEndpointDetailed = () => discoverDesktopWebActivationEndpointDetailed(userDataPath, pipeTimeout)
+    } else {
+      this.resolveDesktopEndpointDetailed = async () => ({
+        ok: false,
+        code: 'APP_UNAVAILABLE',
+        message: 'Desktop endpoint resolver unavailable'
+      })
+    }
     this.dispatchLocalAction =
       options.dispatchLocalAction ??
       (options.userDataPath
-        ? (action, args) => invokeDesktopWebActivationAction(options.userDataPath!, action, args)
+        ? (action, args) => invokeDesktopWebActivationAction(options.userDataPath!, action, args, pipeTimeout)
         : async () => ({ ok: false, code: 'APP_UNAVAILABLE', message: 'Local channel path not configured' }))
     this.mcpTransport = options.mcpTransport ?? defaultMcpTransport
     this.maxOutboundBytes = options.maxOutboundBytes ?? MAX_NATIVE_OUTBOUND_BYTES
@@ -339,15 +416,17 @@ export class NativeMessagingBridge {
           const checked = this.validateWebOrigin(rawId, command.webOrigin, command.site)
           if ('err' in checked) return checked.err
         }
-        const endpointInfo = await this.resolveDesktopEndpoint()
-        if (!endpointInfo || endpointInfo.status !== 'RUNNING' || !endpointInfo.endpoint) {
+        const lookup = await this.resolveDesktopEndpointDetailed()
+        if (!lookup.ok) {
           return this.ok(rawId, {
             available: false,
-            errorCode: 'APP_UNAVAILABLE',
-            reason: endpointInfo?.reason ?? 'DESKTOP_UNREACHABLE',
+            errorCode: lookup.code,
+            reason: lookup.message,
+            ...(lookup.details ? { details: lookup.details } : {}),
             observedAt: new Date().toISOString()
           })
         }
+        const endpointInfo = lookup.info
         const projectKey = normalizeConsentProjectId(endpointInfo.projectId)
         const site = typeof command.site === 'string' ? command.site.trim().toLowerCase() : ''
         const consents = site
@@ -430,15 +509,20 @@ export class NativeMessagingBridge {
           return this.error(rawId, allowCheck.code, allowCheck.message)
         }
 
-        const endpointInfo = await this.resolveDesktopEndpoint()
-        if (!endpointInfo || endpointInfo.status !== 'RUNNING' || !endpointInfo.endpoint) {
+        const lookup = await this.resolveDesktopEndpointDetailed()
+        if (!lookup.ok) {
           return this.error(
             rawId,
-            'APP_UNAVAILABLE',
-            'Code Awareness Desktop is unavailable; fail-closed',
-            { reason: endpointInfo?.reason ?? 'DESKTOP_UNREACHABLE' }
+            lookup.code,
+            lookup.code === 'TIMEOUT'
+              ? lookup.message
+              : 'Code Awareness Desktop is unavailable; fail-closed',
+            lookup.code === 'TIMEOUT'
+              ? { phase: 'desktop_discovery', executionStateUnknown: false, ...lookup.details }
+              : { reason: lookup.message }
           )
         }
+        const endpointInfo = lookup.info
 
         const activeProjectId = endpointInfo.projectId ?? null
         const activeBindingId = endpointInfo.bindingId ?? null
@@ -487,27 +571,52 @@ export class NativeMessagingBridge {
         if (activeInstanceId) headers['x-code-awareness-instance'] = activeInstanceId
         if (activeProjectId) headers['x-code-awareness-project'] = activeProjectId
 
+        const endpointUrl = endpointInfo.endpoint
+        if (!endpointUrl) {
+          return this.error(rawId, 'APP_UNAVAILABLE', 'Desktop MCP endpoint is missing')
+        }
         this.rpcCounter += 1
+        const expectedRpcId = this.rpcCounter
         let httpRes: McpHttpResponse
         try {
-          httpRes = await this.mcpTransport(endpointInfo.endpoint, headers, {
-            jsonrpc: '2.0',
-            id: this.rpcCounter,
-            method: command.method,
-            params: command.params ?? {}
-          })
+          httpRes = await this.mcpTransport(
+            endpointUrl,
+            headers,
+            {
+              jsonrpc: '2.0',
+              id: expectedRpcId,
+              method: command.method,
+              params: command.params ?? {}
+            },
+            this.mcpTimeoutMs
+          )
         } catch (err) {
           return this.error(
             rawId,
             'APP_UNAVAILABLE',
-            `Failed to reach Desktop MCP endpoint: ${err instanceof Error ? err.message : String(err)}`
+            `Failed to reach Desktop MCP endpoint: ${err instanceof Error ? err.message : String(err)}`,
+            { phase: 'mcp_http' }
           )
         }
 
-        const rpcError =
-          httpRes.body && typeof httpRes.body === 'object'
-            ? (httpRes.body as { error?: { code?: number; message?: string; data?: Record<string, unknown> } }).error
-            : undefined
+        if (httpRes.timedOut) {
+          const timeoutMs = httpRes.timeoutMs ?? this.mcpTimeoutMs
+          return this.error(
+            rawId,
+            'TIMEOUT',
+            `Desktop MCP HTTP request timed out after ${timeoutMs}ms`,
+            { phase: 'mcp_http', timeoutMs, executionStateUnknown: true }
+          )
+        }
+
+        const bodyObj =
+          httpRes.body && typeof httpRes.body === 'object' && !Array.isArray(httpRes.body)
+            ? (httpRes.body as Record<string, unknown>)
+            : null
+
+        const rpcError = bodyObj && bodyObj.error && typeof bodyObj.error === 'object'
+          ? (bodyObj.error as { code?: number; message?: string; data?: Record<string, unknown> })
+          : undefined
 
         if (httpRes.status === 409 || rpcError?.code === -32001) {
           return this.error(
@@ -518,8 +627,23 @@ export class NativeMessagingBridge {
           )
         }
 
-        if (httpRes.status >= 400 && !httpRes.body) {
-          return this.error(rawId, 'MCP_HTTP_ERROR', `Desktop MCP returned HTTP ${httpRes.status}`)
+        if (!bodyObj) {
+          if (httpRes.status >= 400) {
+            return this.error(rawId, 'MCP_HTTP_ERROR', `Desktop MCP returned HTTP ${httpRes.status}`, { phase: 'mcp_http', httpStatus: httpRes.status })
+          }
+          return this.error(rawId, 'INVALID_MCP_RESPONSE', 'Desktop MCP returned non-object payload', { phase: 'mcp_http' })
+        }
+
+        if ('id' in bodyObj && bodyObj.id !== undefined && bodyObj.id !== expectedRpcId) {
+          return this.error(rawId, 'INVALID_MCP_RESPONSE', 'Desktop MCP JSON-RPC correlation id mismatch', { phase: 'mcp_http' })
+        }
+
+        if (httpRes.status >= 400 && !rpcError) {
+          return this.error(rawId, 'MCP_HTTP_ERROR', `Desktop MCP returned HTTP ${httpRes.status}`, { phase: 'mcp_http', httpStatus: httpRes.status })
+        }
+
+        if (!rpcError && !('result' in bodyObj)) {
+          return this.error(rawId, 'INVALID_MCP_RESPONSE', 'Desktop MCP JSON-RPC payload omitted result and error', { phase: 'mcp_http' })
         }
 
         let sanitizedMcpBody = httpRes.body
@@ -605,8 +729,8 @@ export class NativeMessagingBridge {
 
     const dispatched = await this.dispatchLocalAction(command.action, args)
     if (!dispatched.ok) {
-      const code = dispatched.code === 'APP_UNAVAILABLE' ? 'APP_UNAVAILABLE' : 'INVALID_REQUEST'
-      return this.error(rawId, code, dispatched.message)
+      const code = dispatched.code === 'TIMEOUT' ? 'TIMEOUT' : dispatched.code === 'APP_UNAVAILABLE' ? 'APP_UNAVAILABLE' : 'INVALID_REQUEST'
+      return this.error(rawId, code, dispatched.message, dispatched.details)
     }
 
     return this.ok(rawId, {

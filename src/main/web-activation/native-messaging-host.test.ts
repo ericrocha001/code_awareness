@@ -1,3 +1,5 @@
+import { createServer as createHttpServer } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,8 +15,10 @@ import {
 } from './native-messaging-protocol'
 import {
   discoverDesktopWebActivationEndpoint,
+  discoverDesktopWebActivationEndpointDetailed,
   NativeMessagingBridge
 } from './native-messaging-bridge'
+import { createRuntimeMessageTransport } from '../../web-extension/runtime-transport'
 import {
   getBrowserNativeMessagingRegistryKey,
   installNativeMessagingHost,
@@ -42,6 +46,7 @@ function makeTempDir(prefix: string): string {
 const VALID_EXT_ORIGIN = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/'
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(cleanups.splice(0).reverse().map((fn) => fn()))
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true })
@@ -632,5 +637,257 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
     ports[2].emitMessage({ id: 'req-4', ok: true, result: { reconnected: true } })
     expect(await req4).toEqual({ id: 'req-4', ok: true, result: { reconnected: true } })
     sender.closePort('test-cleanup')
+  })
+
+  it('classifies pipe, HTTP abort, Port, one-shot, and runtime-message timeouts as TIMEOUT, validates JSON-RPC correlation, and unblocks serial stdio', async () => {
+    // 1. Pipe timeout -> TIMEOUT (phase: desktop_discovery), distinct from APP_UNAVAILABLE
+    const pipeDir = makeTempDir('ca-pipe-timeout-')
+    mkdirWait: {
+      const { mkdirSync } = await import('node:fs')
+      mkdirSync(join(pipeDir, 'local-agent-channel'), { recursive: true })
+      break mkdirWait
+    }
+    const silentSockets = new Set<import('node:net').Socket>()
+    const silentSocketServer = createNetServer((conn) => {
+      silentSockets.add(conn)
+      conn.once('close', () => silentSockets.delete(conn))
+    })
+    const pipePath =
+      process.platform === 'win32'
+        ? `\\\\.\\pipe\\ca-silent-${Date.now()}-${Math.random().toString(16).slice(2)}`
+        : join(pipeDir, 'silent.sock')
+    await new Promise<void>((resolve) => silentSocketServer.listen(pipePath, resolve))
+    writeFileSync(
+      join(pipeDir, 'local-agent-channel', 'endpoint.json'),
+      JSON.stringify({ protocol: 'code-awareness-local/v1', token: 'tok', endpoint: pipePath }),
+      'utf8'
+    )
+    const pipeLookup = await discoverDesktopWebActivationEndpointDetailed(pipeDir, 80)
+    for (const conn of silentSockets) conn.destroy()
+    await new Promise<void>((resolve) => silentSocketServer.close(() => resolve()))
+    expect(pipeLookup.ok).toBe(false)
+    if (!pipeLookup.ok) {
+      expect(pipeLookup.code).toBe('TIMEOUT')
+      expect(pipeLookup.details?.phase).toBe('desktop_discovery')
+    }
+
+    // 2. Real hung HTTP server aborted by NativeMessagingBridge unblocks subsequent serial stdio message
+    let hangFirst = true
+    const stalledHttp = createHttpServer((_req, res) => {
+      if (hangFirst) {
+        hangFirst = false
+        return // Hang first request until client AbortController aborts
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: 2, result: { ok: true } }))
+    })
+    await new Promise<void>((resolve) => stalledHttp.listen(0, '127.0.0.1', resolve))
+    const httpPort = (stalledHttp.address() as { port: number }).port
+
+    const bridgeDir = makeTempDir('ca-http-abort-')
+    const consentStore = new ConsentStore(bridgeDir)
+    consentStore.grantConsent({ site: 'deepseek', projectId: 'proj-t', dataClass: 'METADATA' })
+
+    const bridge = new NativeMessagingBridge({
+      consentStore,
+      callerOrigin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/',
+      mcpTimeoutMs: 100,
+      resolveDesktopEndpointDetailed: async () => ({
+        ok: true,
+        info: {
+          status: 'RUNNING',
+          mode: 'PROJECT',
+          projectId: 'proj-t',
+          instanceId: 'inst-t',
+          bindingId: 'bind-t',
+          endpoint: `http://127.0.0.1:${httpPort}/mcp`,
+          observedAt: new Date().toISOString()
+        }
+      })
+    })
+
+    const stdin = new PassThrough()
+    const stdout = new PassThrough()
+    const decoder = new NativeMessageFrameDecoder()
+    const outMessages: Array<Record<string, unknown>> = []
+    stdout.on('data', (chunk: Buffer) => {
+      for (const msg of decoder.push(chunk)) {
+        outMessages.push(msg as Record<string, unknown>)
+      }
+    })
+    const loopDone = runNativeStdioLoop(stdin, stdout, (msg) => bridge.handle(msg))
+
+    stdin.write(
+      encodeNativeMessage({
+        id: 'serial-1',
+        action: 'mcp_request',
+        site: 'deepseek',
+        webOrigin: 'https://chat.deepseek.com',
+        method: 'tools/list',
+        expectedProjectId: 'proj-t',
+        expectedBindingId: 'bind-t',
+        expectedInstanceId: 'inst-t'
+      })
+    )
+    stdin.write(
+      encodeNativeMessage({
+        id: 'serial-2',
+        action: 'mcp_request',
+        site: 'deepseek',
+        webOrigin: 'https://chat.deepseek.com',
+        method: 'tools/list',
+        expectedProjectId: 'proj-t',
+        expectedBindingId: 'bind-t',
+        expectedInstanceId: 'inst-t'
+      })
+    )
+
+    await vi.waitFor(() => expect(outMessages.length).toBe(2), { timeout: 3000 })
+    stdin.end()
+    await loopDone
+    stalledHttp.closeAllConnections?.()
+    await new Promise<void>((resolve) => stalledHttp.close(() => resolve()))
+
+    expect(outMessages[0]).toMatchObject({
+      id: 'serial-1',
+      ok: false,
+      error: {
+        code: 'TIMEOUT',
+        details: { phase: 'mcp_http', executionStateUnknown: true }
+      }
+    })
+    expect(outMessages[1]).toMatchObject({ id: 'serial-2', ok: true })
+
+    // 3. JSON-RPC correlation id mismatch and missing result/error rejected explicitly
+    const mismatchBridge = new NativeMessagingBridge({
+      consentStore,
+      callerOrigin: 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/',
+      resolveDesktopEndpointDetailed: async () => ({
+        ok: true,
+        info: {
+          status: 'RUNNING',
+          mode: 'PROJECT',
+          projectId: 'proj-t',
+          endpoint: 'http://127.0.0.1:1/mcp',
+          observedAt: new Date().toISOString()
+        }
+      }),
+      mcpTransport: async () => ({ status: 200, body: { jsonrpc: '2.0', id: 999, result: {} } })
+    })
+    const mismatchRes = await mismatchBridge.handle({
+      id: 'm-1',
+      action: 'mcp_request',
+      site: 'deepseek',
+      webOrigin: 'https://chat.deepseek.com',
+      method: 'tools/list'
+    })
+    expect(mismatchRes.ok).toBe(false)
+    expect(mismatchRes.error?.code).toBe('INVALID_MCP_RESPONSE')
+
+    // 4. Fake timers on Port sender, one-shot fallback, and runtime-message transport
+    vi.useFakeTimers()
+    let messageListeners: Array<(msg: unknown) => void> = []
+    const portMock: ChromeNativePortLike = {
+      postMessage: vi.fn(),
+      disconnect: vi.fn(),
+      onMessage: { addListener: (l) => messageListeners.push(l), removeListener: vi.fn() },
+      onDisconnect: { addListener: vi.fn(), removeListener: vi.fn() }
+    }
+    const portSender = createChromeNativePortSender(
+      { runtime: { connectNative: () => portMock } },
+      { requestTimeoutMs: 20_000, idleTtlMs: 30_000 }
+    )
+    const pendingPortCall = portSender({ id: 'p-timeout', action: 'mcp_request' })
+    // Unrelated ID & malformed payload must NOT hijack pendingPortCall
+    for (const l of messageListeners) {
+      l({ id: 'wrong-id', ok: true })
+      l(null)
+    }
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(await pendingPortCall).toMatchObject({
+      id: 'p-timeout',
+      ok: false,
+      error: { code: 'TIMEOUT', details: { phase: 'native_port', timeoutMs: 20_000, executionStateUnknown: true } }
+    })
+    // Late response after timeout is ignored safely
+    const pFollowup = portSender({ id: 'p-ok', action: 'ping' })
+    for (const l of messageListeners) {
+      l({ id: 'p-timeout', ok: true, result: { late: true } })
+      l({ id: 'p-ok', ok: true, result: { ok: true } })
+    }
+    expect(await pFollowup).toEqual({ id: 'p-ok', ok: true, result: { ok: true } })
+
+    // Fallback one-shot timeout + ignore late callback
+    let capturedOneShotCb: ((r: unknown) => void) | undefined
+    const oneShotSender = createChromeNativePortSender(
+      {
+        runtime: {
+          sendNativeMessage: (_app, _msg, cb) => {
+            capturedOneShotCb = cb
+          }
+        }
+      },
+      { requestTimeoutMs: 5_000 }
+    )
+    const pOneShot = oneShotSender({ id: 'os-1', action: 'ping' })
+    await vi.advanceTimersByTimeAsync(5_000)
+    ;(capturedOneShotCb as ((r: unknown) => void) | undefined)?.({ id: 'os-1', ok: true, result: { late: true } })
+    expect(await pOneShot).toMatchObject({
+      id: 'os-1',
+      ok: false,
+      error: { code: 'TIMEOUT', details: { phase: 'native_port', timeoutMs: 5_000 } }
+    })
+
+    // Content runtime-message transport 25s timeout + consents forwarding
+    let capturedRuntimeCb: ((r: unknown) => void) | undefined
+    const rtTransport = createRuntimeMessageTransport(
+      {
+        runtime: {
+          sendMessage: (_payload, cb) => {
+            capturedRuntimeCb = cb
+          }
+        }
+      },
+      'deepseek',
+      'https://chat.deepseek.com',
+      { timeoutMs: 25_000 }
+    )
+    const pRt = rtTransport.mcpRequest({
+      method: 'tools/call',
+      expectedProjectId: null,
+      expectedBindingId: null,
+      expectedInstanceId: null
+    })
+    await vi.advanceTimersByTimeAsync(25_000)
+    ;(capturedRuntimeCb as ((r: unknown) => void) | undefined)?.({ ok: true, result: { late: true } })
+    expect(await pRt).toMatchObject({
+      ok: false,
+      error: { code: 'TIMEOUT', details: { phase: 'runtime_message', timeoutMs: 25_000 } }
+    })
+
+    const rtWithConsents = createRuntimeMessageTransport(
+      {
+        runtime: {
+          sendMessage: (_payload, cb) => {
+            cb?.({
+              ok: true,
+              result: {
+                available: true,
+                mode: 'PROJECT',
+                projectId: 'p1',
+                consents: { metadata: true, literalSource: false }
+              }
+            })
+          }
+        }
+      },
+      'deepseek',
+      'https://chat.deepseek.com'
+    )
+    expect(await rtWithConsents.getStatus()).toMatchObject({
+      available: true,
+      consents: { metadata: true, literalSource: false }
+    })
+    vi.useRealTimers()
   })
 })

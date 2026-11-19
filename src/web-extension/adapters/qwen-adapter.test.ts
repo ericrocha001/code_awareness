@@ -133,7 +133,7 @@ describe('QwenWebAdapter & ContentSessionController', () => {
 
     expect(adapter.isAuthenticatedChatReady(doc)).toBe(true)
     const sent = await adapter.sendMessage(doc, 'test')
-    expect(sent).toEqual({ ok: true })
+    expect(sent).toEqual({ ok: true, status: 'DISPATCHED' })
     expect(clicked).toBe(1)
   })
 
@@ -173,7 +173,7 @@ describe('QwenWebAdapter & ContentSessionController', () => {
     let clicked = 0
     sendBtn.addEventListener('click', () => { clicked += 1 })
 
-    expect(await adapter.sendMessage(doc, 'ready')).toEqual({ ok: true })
+    expect(await adapter.sendMessage(doc, 'ready')).toEqual({ ok: true, status: 'DISPATCHED' })
     expect(clicked).toBe(1)
   })
 })
