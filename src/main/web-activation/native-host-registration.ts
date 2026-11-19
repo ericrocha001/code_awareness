@@ -17,6 +17,7 @@ export interface NativeHostRegistryRunner {
 export interface InstallNativeHostOptions {
   extensionIds: readonly string[]
   hostScriptPath: string
+  hostName?: string
   installDir?: string
   runtimeExecutable?: string
   runtimeArgs?: readonly string[]
@@ -35,6 +36,7 @@ export interface InstallNativeHostResult {
 }
 
 export interface UninstallNativeHostOptions {
+  hostName?: string
   installDir?: string
   browsers?: readonly NativeBrowserTarget[]
   registry?: NativeHostRegistryRunner
@@ -146,12 +148,13 @@ export function installNativeMessagingHost(options: InstallNativeHostOptions): I
   }
 
   const allowedOrigins = normalizeExtensionAllowedOrigins(options.extensionIds)
+  const hostName = options.hostName?.trim() || WEB_NATIVE_HOST_NAME
   const browsers = options.browsers && options.browsers.length > 0 ? options.browsers : (['chrome', 'edge'] as const)
   const registry = options.registry ?? createWindowsRegistryRunner()
 
   mkdirSync(installDir, { recursive: true })
   const launcherPath = join(installDir, 'code-awareness-web-host.cmd')
-  const manifestPath = join(installDir, `${WEB_NATIVE_HOST_NAME}.json`)
+  const manifestPath = join(installDir, `${hostName}.json`)
 
   const launcherContents = buildWindowsLauncherCmd({
     runtimeExecutable: options.runtimeExecutable ?? process.execPath,
@@ -162,7 +165,7 @@ export function installNativeMessagingHost(options: InstallNativeHostOptions): I
   writeFileSync(launcherPath, launcherContents, 'utf8')
 
   const manifest = {
-    name: WEB_NATIVE_HOST_NAME,
+    name: hostName,
     description: 'Code Awareness Local Web Activation Native Messaging Bridge',
     path: launcherPath,
     type: 'stdio',
@@ -170,13 +173,13 @@ export function installNativeMessagingHost(options: InstallNativeHostOptions): I
   }
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf8')
 
-  const registryKeys = browsers.map((browser) => getBrowserNativeMessagingRegistryKey(browser, WEB_NATIVE_HOST_NAME))
+  const registryKeys = browsers.map((browser) => getBrowserNativeMessagingRegistryKey(browser, hostName))
   for (const keyPath of registryKeys) {
     registry.addDefaultStringValue(keyPath, manifestPath)
   }
 
   return {
-    hostName: WEB_NATIVE_HOST_NAME,
+    hostName,
     installDir,
     manifestPath,
     launcherPath,
@@ -186,16 +189,17 @@ export function installNativeMessagingHost(options: InstallNativeHostOptions): I
 }
 
 export function uninstallNativeMessagingHost(options: UninstallNativeHostOptions = {}): void {
+  const hostName = options.hostName?.trim() || WEB_NATIVE_HOST_NAME
   const installDir = resolve(options.installDir ?? resolveStableWebActivationDir())
   const browsers = options.browsers && options.browsers.length > 0 ? options.browsers : (['chrome', 'edge'] as const)
   const registry = options.registry ?? createWindowsRegistryRunner()
 
   for (const browser of browsers) {
-    registry.deleteKey(getBrowserNativeMessagingRegistryKey(browser, WEB_NATIVE_HOST_NAME))
+    registry.deleteKey(getBrowserNativeMessagingRegistryKey(browser, hostName))
   }
 
   const launcherPath = join(installDir, 'code-awareness-web-host.cmd')
-  const manifestPath = join(installDir, `${WEB_NATIVE_HOST_NAME}.json`)
+  const manifestPath = join(installDir, `${hostName}.json`)
   if (existsSync(launcherPath)) rmSync(launcherPath, { force: true })
   if (existsSync(manifestPath)) rmSync(manifestPath, { force: true })
 }

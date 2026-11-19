@@ -5,7 +5,9 @@
   "description": "Read-only local MCP Skills and Context bridge for DeepSeek and Qwen web chats via Code Awareness Desktop.",
   "permissions": [
     "nativeMessaging",
-    "storage"
+    "storage",
+    "alarms",
+    "scripting"
   ],
   "host_permissions": [
     "https://chat.deepseek.com/*",

@@ -30,3 +30,23 @@ Load `dist/web-extension/` in `chrome://extensions` (Developer Mode -> Load unpa
 - Read-only bridge: write tools, script execution, CLI execution, Git writes, file edits, Academy mutations, and Continuum publication are never exposed.
 - Consent changes (`SET_CONSENT`) are accepted only from trusted extension UI (`popup.html`), never from web page tabs or content scripts.
 - No Skill bodies, MCP tool schemas, cryptographic digests, or source files are eagerly injected into the web prompt during first-turn bootstrap.
+
+## Extension Manager (Build, Reload & Remote Attestation)
+
+For development unpacked installations (`installType === "development"`), the Code Awareness Channel exposes three operational tools (`get_web_extension_status`, `start_web_extension_operation` with `action: BUILD | RELOAD | UPDATE`, and `get_web_extension_operation`). None of these tools are ever exposed over the web activation read-only allowlist.
+
+1. **Managed Installation Enrollment**:
+   - Enroll the active machine installation explicitly through the Local Agent Channel:
+     ```bash
+     node scripts/local-agent/local.cjs web_activation enroll --extension-id <extId> --profile-id <profileId> --unpacked-path <canonicalUnpackedDir> --host-install-dir <stableHostDir> --host-script-path <stableHostScript> --source-repo <canonicalCheckout>
+     ```
+   - Supports one active managed installation per Desktop profile (`enrollment.json`), requiring canonical non-symlink/junction paths and revocable at any time via `web_activation revoke`.
+2. **Isolated Staging & Transactional Promotion**:
+   - `BUILD` validates `expectedSourceHead` / clean working tree and compiles isolated staging bundles (`background.js`, `content-script.js`, `popup.js`, `native-host.cjs`) embedding an immutable `buildId`, `sourceHead`, `inputsFingerprint`, and per-file SHA-256 hashes without disturbing the live unpacked directory.
+   - `UPDATE` revalidates source drift and promotes staged bundles atomically on the same volume with a minimal rollback journal (`swap-journal.json`) while preserving `allowed_origins` in the Native Messaging host manifest.
+3. **MV3 Maintenance, Quiescence & Attestation**:
+   - Background SW schedules a low-cost 1-minute `chrome.alarms` check only for enrolled `development` installs (backing off up to 15 min on `APP_UNAVAILABLE` and clearing immediately if unmanaged/revoked).
+   - Before calling `chrome.runtime.reload()`, active tool calls, streaming responses, and recent draft typing defer the reload (`WAITING_IDLE`).
+   - Post-reload startup sends a fresh `bootId`, compiled `buildId`, `manifestVersion`, `extensionId`, `installationId`, and host `hostBuildId`, then idempotently re-injects `content-script.js` into open authorized tabs via `chrome.scripting.executeScript` (preserving existing composer text) before converging to `VERIFIED` (or `PARTIAL` / `NOT_ATTESTED`).
+
+> **Post-Integration Live Migration**: After merging changes to the canonical `main` checkout, rebuild with `npm run web-activation:build`, copy updated unpacked files into the live unpacked directory, update `%LOCALAPPDATA%\CodeAwareness\web-activation\native-host.bundle.cjs`, reload once in `chrome://extensions`, and run `web_activation enroll`.

@@ -218,6 +218,7 @@ export class McpLifecycle {
       this.requested.githubIntegration === context.githubIntegration &&
       this.requested.repositoryFileIngress === context.repositoryFileIngress &&
       this.requested.repositoryFileEditing === context.repositoryFileEditing &&
+      this.requested.webExtensionManager === context.webExtensionManager &&
       this.state.status !== 'ERROR' &&
       this.state.status !== 'STOPPING'
     ) {

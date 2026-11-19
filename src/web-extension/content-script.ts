@@ -3,10 +3,15 @@ import {
   type ActivationSessionState,
   type WebActivationTransport
 } from '../shared/web-activation/activation-session'
-import { getChromeApi, type ChromeApi } from './chrome-api'
+import { getChromeApi, type ChromeApi, type ChromeMessageListener } from './chrome-api'
 import type { ChatDomTurn, WebChatAdapter } from './adapters/adapter-interface'
 import { DeepSeekWebAdapter } from './adapters/deepseek-adapter'
 import { QwenWebAdapter } from './adapters/qwen-adapter'
+import { getBuiltWebExtensionBuildId } from './runtime-config'
+
+const GLOBAL_CONTENT_CONTROLLER_KEY = '__codeAwarenessContentController__'
+const ACTIVE_DRAFT_TYPING_GRACE_MS = 2500
+const MAINTENANCE_DRAIN_WINDOW_MS = 15_000
 
 export interface ControllerDiagnostic {
   code: string
@@ -194,6 +199,10 @@ export class ContentSessionController {
   private processing = false
   private pendingMutationCheck = false
   private pillEl: HTMLElement | null = null
+  private lastComposerInputAt = 0
+  private maintenanceDrainUntil = 0
+  private readonly inputListener: () => void
+  private onDisposeCallback?: () => void
 
   constructor(
     readonly adapter: WebChatAdapter,
@@ -205,7 +214,12 @@ export class ContentSessionController {
       site: adapter.site,
       transport
     })
+    this.inputListener = () => {
+      this.lastComposerInputAt = Date.now()
+    }
+    this.rootDocument.addEventListener?.('input', this.inputListener, true)
     if (this.mountUi) {
+      this.rootDocument.getElementById('code-awareness-activation-pill')?.remove()
       this.renderPill()
     }
   }
@@ -215,15 +229,20 @@ export class ContentSessionController {
     state: ActivationSessionState
     binding: ReturnType<ActivationSession['getBinding']>
     authenticated: boolean
+    buildId: string
+    busy: boolean
     lastError: string | null
     lastDiagnostic: ControllerDiagnostic | null
     lastDelivery: LastDeliveryStatus | null
   } {
+    const quiescence = this.checkMaintenanceReadiness(false)
     return {
       site: this.adapter.site,
       state: this.session.getState(),
       binding: this.session.getBinding(),
       authenticated: this.adapter.isAuthenticatedChatReady(this.rootDocument),
+      buildId: getBuiltWebExtensionBuildId(),
+      busy: !quiescence.ready,
       lastError: this.lastErrorMessage,
       lastDiagnostic: this.lastDiagnostic,
       lastDelivery: this.lastDelivery
@@ -346,12 +365,40 @@ export class ContentSessionController {
     this.renderPill()
   }
 
+  setOnDispose(callback: () => void): void {
+    this.onDisposeCallback = callback
+  }
+
+  checkMaintenanceReadiness(enterDrain = true): { ready: boolean; reason?: string; buildId: string } {
+    const buildId = getBuiltWebExtensionBuildId()
+    if (this.processing) {
+      return { ready: false, reason: 'ACTIVE_TOOL_OR_DELIVERY', buildId }
+    }
+    if (this.adapter.isGenerating(this.rootDocument)) {
+      return { ready: false, reason: 'ASSISTANT_STREAMING', buildId }
+    }
+    if (Date.now() - this.lastComposerInputAt < ACTIVE_DRAFT_TYPING_GRACE_MS) {
+      return { ready: false, reason: 'ACTIVE_DRAFT_INPUT', buildId }
+    }
+    if (enterDrain) {
+      this.maintenanceDrainUntil = Date.now() + MAINTENANCE_DRAIN_WINDOW_MS
+    }
+    return { ready: true, buildId }
+  }
+
+  clearMaintenanceDrain(): void {
+    this.maintenanceDrainUntil = 0
+  }
+
   dispose(): void {
     this.activationEpoch += 1
     this.pendingMutationCheck = false
+    this.maintenanceDrainUntil = 0
     this.stopObserving()
+    this.rootDocument.removeEventListener?.('input', this.inputListener, true)
     this.pillEl?.remove()
     this.pillEl = null
+    this.onDisposeCallback?.()
   }
 
   private markCurrentTurnsSeen(): void {
@@ -561,6 +608,9 @@ export class ContentSessionController {
   }
 
   private async processSingleDomPass(): Promise<void> {
+    if (Date.now() < this.maintenanceDrainUntil) {
+      return
+    }
     if (!this.adapter.isAuthenticatedChatReady(this.rootDocument)) {
       return
     }
@@ -876,14 +926,24 @@ export function bootstrapContentScript(
   const adapter = selectWebChatAdapter(href)
   if (!adapter) return null
 
+  const globalRegistry = globalThis as unknown as Record<string, ContentSessionController | undefined>
+  if (globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY]) {
+    try {
+      globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY]!.dispose()
+    } catch {
+      // Ignore cleanup failures from stale isolated world controllers
+    }
+  }
+
   const controller = new ContentSessionController(
     adapter,
     doc,
     createRuntimeMessageTransport(chromeApi, adapter.site, adapter.allowedOrigin),
     true
   )
+  globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY] = controller
 
-  chromeApi.runtime?.onMessage?.addListener((rawMessage, _sender, sendResponse) => {
+  const listener: ChromeMessageListener = (rawMessage, _sender, sendResponse) => {
     const msg = rawMessage as { type?: string; sendBootstrap?: boolean } | undefined
     if (!msg?.type) return false
 
@@ -905,7 +965,24 @@ export function bootstrapContentScript(
       sendResponse({ ok: true, ...controller.getStatusSnapshot() })
       return false
     }
+    if (msg.type === 'CONTENT_PREPARE_MAINTENANCE') {
+      sendResponse({ ok: true, ...controller.checkMaintenanceReadiness(true) })
+      return false
+    }
+    if (msg.type === 'CONTENT_ABORT_MAINTENANCE') {
+      controller.clearMaintenanceDrain()
+      sendResponse({ ok: true })
+      return false
+    }
     return false
+  }
+
+  chromeApi.runtime?.onMessage?.addListener(listener)
+  controller.setOnDispose(() => {
+    chromeApi.runtime?.onMessage?.removeListener?.(listener)
+    if (globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY] === controller) {
+      delete globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY]
+    }
   })
 
   return controller

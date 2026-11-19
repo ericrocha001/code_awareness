@@ -74,6 +74,8 @@ import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-me
 import type { SessionMemoryCentralService } from '../buildx/smc/session-memory-central-service'
 import { BUILDX_UNITFLOW_TOOLS, executeBuildxUnitflowTool } from '../buildx/unitflow/unitflow-mcp'
 import type { UnitFlowRuntimeFacade } from '../buildx/unitflow/unitflow-runtime-facade'
+import { WEB_EXTENSION_MANAGER_TOOLS, executeWebExtensionManagerTool } from '../web-activation/extension-manager-mcp'
+import type { ExtensionManagerService } from '../web-activation/extension-manager-service'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file', 'read_agent_session_event'])
 const literalReadOutputSchema = {
@@ -134,6 +136,7 @@ export class ChannelMcpAdapter {
   private readonly cliExecution?: CliExecutionService
   private readonly sessionMemoryCentral?: SessionMemoryCentralService
   private readonly unitflowRuntime?: UnitFlowRuntimeFacade
+  private readonly webExtensionManager?: ExtensionManagerService
   private readonly projectId?: string
   private readonly repoRoot?: string
   private readonly codeNavigationAvailable: boolean
@@ -196,6 +199,7 @@ export class ChannelMcpAdapter {
       this.cliExecution = context.cliExecution
       this.sessionMemoryCentral = context.sessionMemoryCentral
       this.unitflowRuntime = context.unitflowRuntime
+      this.webExtensionManager = context.webExtensionManager
       this.projectId = context.projectId
       this.repoRoot = context.repoRoot
       this.codeNavigationAvailable = Boolean(context.projectId || context.repoRoot)
@@ -331,6 +335,7 @@ export class ChannelMcpAdapter {
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
     if (this.sessionMemoryCentral && this.projectId) tools.push(...BUILDX_SMC_TOOLS)
     if (this.unitflowRuntime && this.projectId) tools.push(...BUILDX_UNITFLOW_TOOLS)
+    if (this.webExtensionManager) tools.push(...WEB_EXTENSION_MANAGER_TOOLS)
     if (this.usage) {
       const inventory = tools.map(tool => ({ name: tool.name, capability: this.capabilityForTool(tool.name) ?? 'unclassified', instrumental: tool.name === GET_CHANNEL_USAGE_TOOL.name })).sort((a, b) => a.name < b.name ? -1 : 1)
       const signature = JSON.stringify(inventory)
@@ -424,6 +429,7 @@ export class ChannelMcpAdapter {
     if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
+    if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) return 'Web Extension Manager'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
     return undefined
   }
@@ -542,6 +548,10 @@ export class ChannelMcpAdapter {
       return this.runtimeRestart
         ? executeRequestRuntimeRestart(this.runtimeRestart, args)
         : { content: [{ type: 'text', text: 'RUNTIME_RESTART_UNAVAILABLE' }], isError: true }
+    }
+
+    if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) {
+      return executeWebExtensionManagerTool(this.webExtensionManager, name, args)
     }
 
     if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {

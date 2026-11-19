@@ -33,5 +33,6 @@ export interface McpProjectContext {
   runtimePreview?: { service: import('../work-orchestration/runtime-preview/operations').RuntimePreviewOperations; isCurrent: () => boolean }
   sessionMemoryCentral?: import('../buildx/smc').SessionMemoryCentralService
   unitflowRuntime?: import('../buildx/unitflow/unitflow-runtime-facade').UnitFlowRuntimeFacade
+  webExtensionManager?: import('../web-activation/extension-manager-service').ExtensionManagerService
   assertActiveProject?: () => void
 }
