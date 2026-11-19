@@ -14,6 +14,10 @@ export interface NativeSessionFilter {
   worktreeId?: string; generation?: string; agent?: string; after?: string; before?: string
   artifactId?: string; executionId?: string; commitSha?: string; pullRequest?: number
 }
+export interface NativeSessionPageOptions {
+  offset?: number
+  limit?: number
+}
 export interface RegistrySessionRecord {
   provider: string; providerSessionId: string; agent: string
   origin: 'NATIVE_HOOK' | 'CHECKPOINT_REGISTRY'
@@ -50,6 +54,8 @@ export const REGISTRY_SCHEMA = `
  CREATE INDEX IF NOT EXISTS registry_to ON registry_edges(toId,state);
  CREATE INDEX IF NOT EXISTS registry_scope_scan ON registry_edges(toId,state,fromId);
  CREATE INDEX IF NOT EXISTS registry_source ON registry_edges(source,sourceRevision);
+ CREATE INDEX IF NOT EXISTS registry_native_sessions ON registry_entities(externalId,id,localSessionId) WHERE kind='SESSION' AND (externalId LIKE 'codex-native:%' OR externalId LIKE 'antigravity-native:%');
+ CREATE INDEX IF NOT EXISTS registry_native_hook_session_edges ON registry_edges(toId,source,observedAt) WHERE state='OBSERVED' AND source LIKE 'NATIVE_HOOK:%';
  CREATE TABLE IF NOT EXISTS registry_sources(source TEXT PRIMARY KEY, revision TEXT NOT NULL, cursor TEXT, status TEXT NOT NULL, observedAt TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS checkpoint_registry(checkpointId TEXT NOT NULL, refRevision TEXT NOT NULL, state TEXT NOT NULL, digest TEXT NOT NULL, sessionIds TEXT NOT NULL, integrity TEXT NOT NULL,
    observedAt TEXT NOT NULL, PRIMARY KEY(checkpointId,refRevision));
@@ -278,7 +284,7 @@ export class CheckpointRegistry {
     return this.worktreesAndObservedAt(`${provider}:${id}`).worktrees
   }
 
-  private worktreesAndObservedAt(externalId: string): { worktrees: WorktreeRef[]; lastObserved?: string; agent?: string } {
+  private worktreesAndObservedAt(externalId: string, priorityWorktree?: WorktreeRef): { worktrees: WorktreeRef[]; lastObserved?: string; agent?: string } {
     const key = this.key({ kind: 'SESSION', id: externalId })
     const worktrees = new Map<string, WorktreeRef>()
     let eventObservedAt: string | undefined
@@ -299,13 +305,25 @@ export class CheckpointRegistry {
         if (!agent) agent = event.source === 'ANTIGRAVITY_NATIVE_HOOK' ? 'antigravity' : 'codex'
       } catch {}
     }
-    const edgeRows = this.db.prepare(`SELECT w.externalId, MAX(e.observedAt) AS observedAt FROM registry_edges e
-      JOIN registry_entities w ON w.kind='WORKTREE' AND w.id IN (e.fromId, e.toId)
-      WHERE e.state='OBSERVED' AND (e.fromId=? OR e.toId=? OR EXISTS (
-        SELECT 1 FROM registry_edges r WHERE r.state='OBSERVED' AND (r.fromId=? OR r.toId=?)
-          AND ((r.fromId=e.fromId AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to')) OR (r.fromId=e.fromId AND r.toId=? AND json_extract(e.payload,'$.relation')='window-start'))
-      ))
-      GROUP BY w.externalId ORDER BY MAX(e.observedAt) DESC LIMIT 12`).all(key, key, key, key, key) as { externalId: string; observedAt: string }[]
+    const edgeRows = this.db.prepare(`SELECT w.externalId, MAX(matches.observedAt) AS observedAt FROM (
+      SELECT e.toId AS wid, e.observedAt FROM registry_edges e
+      WHERE e.fromId=? AND e.state='OBSERVED'
+      UNION ALL
+      SELECT e.fromId AS wid, e.observedAt FROM registry_edges e
+      WHERE e.toId=? AND e.state='OBSERVED'
+      UNION ALL
+      SELECT e.toId AS wid, e.observedAt FROM registry_edges r
+      JOIN registry_edges e ON e.fromId=r.fromId AND e.state='OBSERVED'
+      WHERE r.toId=? AND r.state='OBSERVED'
+        AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to','window-start')
+      UNION ALL
+      SELECT e.toId AS wid, e.observedAt FROM registry_edges r
+      JOIN registry_edges e ON e.fromId=r.fromId AND e.state='OBSERVED'
+      WHERE r.fromId=? AND r.state='OBSERVED'
+        AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to')
+    ) matches
+    JOIN registry_entities w ON w.id=matches.wid AND w.kind='WORKTREE'
+    GROUP BY w.externalId ORDER BY MAX(matches.observedAt) DESC LIMIT 12`).all(key, key, key, key) as { externalId: string; observedAt: string }[]
     for (const row of edgeRows) {
       ingestionObservedAt = noteTime(ingestionObservedAt, row.observedAt)
       const [worktreeId, generation] = row.externalId.split(':')
@@ -313,8 +331,22 @@ export class CheckpointRegistry {
         worktrees.set(row.externalId, { worktreeId, generation })
       }
     }
+    if (priorityWorktree) {
+      const priorityId = priorityWorktree.worktreeId + ':' + priorityWorktree.generation
+      if (!worktrees.has(priorityId)) {
+        const list = [...worktrees.entries()]
+        if (list.length >= 12) list.pop()
+        worktrees.clear()
+        worktrees.set(priorityId, { worktreeId: priorityWorktree.worktreeId, generation: priorityWorktree.generation })
+        for (const [k, v] of list) worktrees.set(k, v)
+      }
+    }
     if (!eventObservedAt && !ingestionObservedAt) {
-      const latest = this.db.prepare("SELECT MAX(observedAt) AS observedAt FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED'").get(key, key) as { observedAt: string | null } | undefined
+      const latest = this.db.prepare(`SELECT MAX(ts) AS observedAt FROM (
+        SELECT MAX(observedAt) AS ts FROM registry_edges WHERE fromId=? AND state='OBSERVED'
+        UNION ALL
+        SELECT MAX(observedAt) AS ts FROM registry_edges WHERE toId=? AND state='OBSERVED'
+      )`).get(key, key) as { observedAt: string | null } | undefined
       ingestionObservedAt = noteTime(ingestionObservedAt, latest?.observedAt)
     }
     const lastObserved = eventObservedAt ?? ingestionObservedAt
@@ -332,9 +364,9 @@ export class CheckpointRegistry {
     return sameIdentity && otherRefs.n === 0 ? 'RECONCILED' : 'ALIAS_CONFLICT'
   }
 
-  private nativeSessionRecord(externalId: string, witness?: SessionWitness, evidence?: object): RegistrySessionRecord {
+  private nativeSessionRecord(externalId: string, witness?: SessionWitness, evidence?: object, priorityWorktree?: WorktreeRef): RegistrySessionRecord {
     const { provider, id, agent: parsedAgent } = sessionSelector(externalId)
-    const meta = this.worktreesAndObservedAt(externalId)
+    const meta = this.worktreesAndObservedAt(externalId, priorityWorktree)
     const agent = parsedAgent ?? meta.agent ?? (provider === 'antigravity-native' ? 'antigravity' : 'codex')
     const entityRow = this.db.prepare('SELECT localSessionId FROM registry_entities WHERE id=?').get(this.key({ kind: 'SESSION', id: externalId })) as { localSessionId: string | null } | undefined
     const localSessionId = entityRow?.localSessionId ?? null
@@ -407,13 +439,124 @@ export class CheckpointRegistry {
     return { rows, bounded: graph.bounded, revision: digest(JSON.stringify([selector, rows.map(r => [r.provider, r.providerSessionId, r.agent, r.witness])])) }
   }
 
-  queryNativeSessions(filter: NativeSessionFilter, accountHash?: string) {
+  private nativeAgentSql(agent?: string): { clause: string; empty: boolean } {
+    if (!agent) return { clause: "(s.externalId LIKE 'codex-native:%' OR s.externalId LIKE 'antigravity-native:%')", empty: false }
+    if (agent === 'codex') return { clause: "s.externalId LIKE 'codex-native:%'", empty: false }
+    if (agent === 'antigravity') return { clause: "s.externalId LIKE 'antigravity-native:%'", empty: false }
+    return { clause: '0=1', empty: true }
+  }
+
+  private nativeCandidateQuery(filter: NativeSessionFilter, needLastObserved: boolean): { sql: string; params: (string | number)[]; empty: boolean } {
+    const agent = this.nativeAgentSql(filter.agent)
+    if (agent.empty) return { sql: '', params: [], empty: true }
+    const afterMs = filter.after ? Date.parse(filter.after) : undefined
+    const beforeMs = filter.before ? Date.parse(filter.before) : undefined
+    if ((afterMs !== undefined && !Number.isFinite(afterMs)) || (beforeMs !== undefined && !Number.isFinite(beforeMs))) {
+      return { sql: '', params: [], empty: true }
+    }
+    const afterIso = afterMs !== undefined ? new Date(afterMs).toISOString() : undefined
+    const beforeIso = beforeMs !== undefined ? new Date(beforeMs).toISOString() : undefined
+    const params: (string | number)[] = []
+    let cte = ''
+    let from = 'registry_entities s'
+    if (filter.worktreeId && filter.generation) {
+      const wKey = this.key({ kind: 'WORKTREE', id: `${filter.worktreeId}:${filter.generation}` })
+      cte = `WITH candidate_ids(sid) AS (
+        SELECT e.toId FROM registry_edges e WHERE e.fromId=? AND e.state='OBSERVED'
+        UNION
+        SELECT e.fromId FROM registry_edges e WHERE e.toId=? AND e.state='OBSERVED'
+        UNION
+        SELECT r.toId FROM registry_edges e
+        JOIN registry_edges r ON r.fromId=e.fromId AND r.state='OBSERVED'
+        WHERE e.toId=? AND e.state='OBSERVED' AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to','window-start')
+        UNION
+        SELECT r.fromId FROM registry_edges e
+        JOIN registry_edges r ON r.fromId=e.fromId AND r.state='OBSERVED'
+        WHERE e.toId=? AND e.state='OBSERVED' AND json_extract(e.payload,'$.relation') IN ('observed-in','scoped-to')
+      ) `
+      from = 'candidate_ids c JOIN registry_entities s ON s.id=c.sid'
+      params.push(wKey, wKey, wKey, wKey)
+    }
+    const baseWhere = `s.kind='SESSION' AND ${agent.clause}`
+    if (!needLastObserved && !afterIso && !beforeIso) {
+      return { sql: `${cte}SELECT s.externalId FROM ${from} WHERE ${baseWhere}`, params, empty: false }
+    }
+    const lastObservedExpr = `COALESCE(
+      (SELECT MAX(strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(sr.cursor,'$.observedAt')))
+       FROM registry_edges e JOIN registry_sources sr ON sr.source=e.source
+       WHERE e.toId=s.id AND e.state='OBSERVED' AND e.source LIKE 'NATIVE_HOOK:%'
+         AND json_valid(sr.cursor) AND json_extract(sr.cursor,'$.repositoryId')=? AND json_extract(sr.cursor,'$.schema')=1),
+      (SELECT MAX(strftime('%Y-%m-%dT%H:%M:%fZ', sr.observedAt))
+       FROM registry_edges e JOIN registry_sources sr ON sr.source=e.source
+       WHERE e.toId=s.id AND e.state='OBSERVED' AND e.source LIKE 'NATIVE_HOOK:%'),
+      (SELECT MAX(ts) FROM (
+        SELECT MAX(strftime('%Y-%m-%dT%H:%M:%fZ', e.observedAt)) AS ts FROM registry_edges e WHERE e.fromId=s.id AND e.state='OBSERVED'
+        UNION ALL
+        SELECT MAX(strftime('%Y-%m-%dT%H:%M:%fZ', e.observedAt)) AS ts FROM registry_edges e WHERE e.toId=s.id AND e.state='OBSERVED'
+      ))
+    )`
+    params.push(this.repositoryId)
+    const timeFilters: string[] = []
+    if (afterIso) { timeFilters.push('lastObservedSort IS NOT NULL AND lastObservedSort >= ?'); params.push(afterIso) }
+    if (beforeIso) { timeFilters.push('lastObservedSort IS NOT NULL AND lastObservedSort <= ?'); params.push(beforeIso) }
+    const inner = `${cte}SELECT s.externalId, ${lastObservedExpr} AS lastObservedSort FROM ${from} WHERE ${baseWhere}`
+    const outerWhere = timeFilters.length ? ` WHERE ${timeFilters.join(' AND ')}` : ''
+    return { sql: `SELECT externalId, lastObservedSort FROM (${inner})${outerWhere}`, params, empty: false }
+  }
+
+  nativeSessionsRevision(filter: Pick<NativeSessionFilter, 'worktreeId' | 'generation'> = {}): string {
+    const hookRev = this.source('NATIVE_HOOK')?.revision ?? 'empty'
+    const importedRev = this.source('IMPORTED_SESSIONS')?.revision ?? 'empty'
+    const identityRow = this.db.prepare('SELECT revision FROM identity').get() as { revision: number } | undefined
+    const sessionRow = this.db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(revision),0) AS revSum FROM sessions').get() as { n: number; revSum: number }
+    const entityRow = this.db.prepare("SELECT COUNT(*) AS n, COUNT(localSessionId) AS aliased, COALESCE(MAX(localSessionId),'') AS maxAlias FROM registry_entities WHERE kind='SESSION' AND (externalId LIKE 'codex-native:%' OR externalId LIKE 'antigravity-native:%')").get() as { n: number; aliased: number; maxAlias: string }
+    const sourceRow = this.db.prepare("SELECT COUNT(*) AS n, COALESCE(MAX(observedAt),'') AS maxAt, COALESCE(SUM(CASE WHEN status='COMPLETE' THEN 1 ELSE 0 END),0) AS completeCount FROM registry_sources").get() as { n: number; maxAt: string; completeCount: number }
+    let worktreeEdges: { n: number; maxAt: string } | undefined
+    if (filter.worktreeId && filter.generation) {
+      const wKey = this.key({ kind: 'WORKTREE', id: `${filter.worktreeId}:${filter.generation}` })
+      worktreeEdges = this.db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(observedAt),'') AS maxAt FROM (
+        SELECT observedAt FROM registry_edges WHERE toId=? AND state='OBSERVED'
+        UNION ALL
+        SELECT observedAt FROM registry_edges WHERE fromId=? AND state='OBSERVED'
+      )`).get(wKey, wKey) as { n: number; maxAt: string }
+    }
+    return digest(JSON.stringify([
+      hookRev, importedRev, identityRow?.revision ?? 0,
+      sessionRow.n, sessionRow.revSum,
+      entityRow.n, entityRow.aliased, entityRow.maxAlias,
+      sourceRow.n, sourceRow.maxAt, sourceRow.completeCount,
+      worktreeEdges ? [worktreeEdges.n, worktreeEdges.maxAt] : null
+    ]))
+  }
+
+  hasNativeSession(filter: Pick<NativeSessionFilter, 'worktreeId' | 'generation' | 'agent' | 'after' | 'before'>, accountHash?: string): boolean {
+    const query = this.nativeCandidateQuery(filter, false)
+    if (query.empty) return false
+    const rows = this.db.prepare(`${query.sql} LIMIT 1`).all(...query.params) as { externalId: string }[]
+    if (rows.length === 0) return false
+    if (this.visible({ kind: 'SESSION', id: rows[0].externalId }, accountHash)) return true
+    const fallback = this.db.prepare(query.sql).all(...query.params) as { externalId: string }[]
+    return fallback.some(row => this.visible({ kind: 'SESSION', id: row.externalId }, accountHash))
+  }
+
+  queryNativeSessions(
+    filter: NativeSessionFilter,
+    accountHash?: string,
+    pageOrResolve?: NativeSessionPageOptions | ((revision: string) => NativeSessionPageOptions)
+  ) {
     const reasons = new Set<string>()
     for (const source of this.coverageSources()) {
       if (['NATIVE_HOOK', 'ENTIRE_REFS'].includes(source.source) && ['PARTIAL', 'UNAVAILABLE', 'UNSUPPORTED', 'NETWORK_NOT_AUTHORIZED'].includes(source.status)) {
         reasons.add(source.source + '_' + source.status)
       }
     }
+    const resolveSlice = (revision: string) => typeof pageOrResolve === 'function' ? pageOrResolve(revision) : pageOrResolve
+    const sliceRows = <T>(rows: T[], page?: NativeSessionPageOptions): T[] => {
+      if (!page) return rows
+      const offset = page.offset ?? 0
+      return page.limit !== undefined ? rows.slice(offset, offset + page.limit) : rows.slice(offset)
+    }
+    const priorityWorktree = filter.worktreeId && filter.generation ? { worktreeId: filter.worktreeId, generation: filter.generation } : undefined
     if (filter.commitSha || filter.pullRequest) {
       const delivery = this.nativeDeliverySessions(filter.commitSha ? { kind: 'COMMIT', id: filter.commitSha } : { kind: 'PR', id: String(filter.pullRequest) }, accountHash)
       const all = delivery.rows.map(row => {
@@ -421,11 +564,12 @@ export class CheckpointRegistry {
         const witness: SessionWitness | undefined = evidence?.native?.revision ? {
           kind: evidence.native.kind ?? 'NATIVE_GIT_CAUSAL', relation: 'committed', revision: evidence.native.revision, strength: 'VERIFIED_CAUSAL', state: 'VERIFIED'
         } : undefined
-        return this.nativeSessionRecord(`${row.provider}:${row.providerSessionId}`, witness, evidence)
+        return this.nativeSessionRecord(`${row.provider}:${row.providerSessionId}`, witness, evidence, priorityWorktree)
       }).filter(record => this.matchesSessionFilter(record, filter))
       const combinedReasons = [...new Set([...delivery.reasons])].sort()
       const revision = digest(JSON.stringify([delivery.revision, filter.worktreeId ?? null, filter.generation ?? null, filter.agent ?? null, filter.after ?? null, filter.before ?? null]))
-      return { rows: all, reasons: combinedReasons, revision, coverage: !all.length || combinedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: true }
+      const page = resolveSlice(revision)
+      return { rows: sliceRows(all, page), reasons: combinedReasons, revision, coverage: !all.length || combinedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: true }
     }
     if (filter.artifactId || filter.executionId) {
       const selector: RegistryEntity = filter.artifactId ? { kind: 'ARTIFACT', id: filter.artifactId } : { kind: 'EXECUTION', id: filter.executionId! }
@@ -434,20 +578,30 @@ export class CheckpointRegistry {
       if (linked.bounded) reasons.add('GRAPH_LIMIT_REACHED')
       const sortedReasons = [...reasons].sort()
       const revision = digest(JSON.stringify([linked.revision, sortedReasons]))
-      return { rows: nativeOnly, reasons: sortedReasons, revision, coverage: !nativeOnly.length || sortedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
+      const page = resolveSlice(revision)
+      return { rows: sliceRows(nativeOnly, page), reasons: sortedReasons, revision, coverage: !nativeOnly.length || sortedReasons.length ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
     }
-    const entities = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND (externalId LIKE 'codex-native:%' OR externalId LIKE 'antigravity-native:%') ORDER BY externalId").all() as { externalId: string }[]
-    const dedup = new Map<string, RegistrySessionRecord>()
-    for (const row of entities) {
+    const revision = this.nativeSessionsRevision(filter)
+    const page = resolveSlice(revision)
+    const candidate = this.nativeCandidateQuery(filter, true)
+    if (candidate.empty) {
+      return { rows: [], reasons: [...reasons].sort(), revision, coverage: reasons.size ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
+    }
+    const orderClause = "ORDER BY COALESCE(lastObservedSort,'') DESC, substr(externalId, instr(externalId, ':') + 1) ASC"
+    const offset = page?.offset ?? 0
+    const limit = page?.limit
+    const selected = (limit !== undefined
+      ? this.db.prepare(`${candidate.sql} ${orderClause} LIMIT ? OFFSET ?`).all(...candidate.params, limit, offset)
+      : offset > 0
+        ? this.db.prepare(`${candidate.sql} ${orderClause} LIMIT -1 OFFSET ?`).all(...candidate.params, offset)
+        : this.db.prepare(`${candidate.sql} ${orderClause}`).all(...candidate.params)
+    ) as { externalId: string; lastObservedSort: string | null }[]
+    const rows: RegistrySessionRecord[] = []
+    for (const row of selected) {
       if (!this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)) continue
-      const record = this.nativeSessionRecord(row.externalId)
-      if (!this.matchesSessionFilter(record, filter)) continue
-      const key = `${record.provider}\0${record.agent}\0${record.providerSessionId}`
-      if (!dedup.has(key)) dedup.set(key, record)
+      rows.push(this.nativeSessionRecord(row.externalId, undefined, undefined, priorityWorktree))
     }
-    const all = [...dedup.values()].sort((a, b) => (b.lastObserved ?? '').localeCompare(a.lastObserved ?? '') || a.providerSessionId.localeCompare(b.providerSessionId))
-    const revision = digest(JSON.stringify([this.source('NATIVE_HOOK')?.revision ?? 'empty', all.map(r => [r.provider, r.providerSessionId, r.aliasState, r.lastObserved, r.worktrees])]))
-    return { rows: all, reasons: [...reasons].sort(), revision, coverage: reasons.size ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
+    return { rows, reasons: [...reasons].sort(), revision, coverage: reasons.size ? 'PARTIAL' : 'OBSERVED_INDEX', isDelivery: false }
   }
 
   private nativeSession(externalId: string) {
