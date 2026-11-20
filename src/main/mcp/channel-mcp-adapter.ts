@@ -8,6 +8,7 @@ import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergea
 import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
 import { ChannelActivityMonitor } from './channel-activity-monitor'
 import { GET_CHANNEL_USAGE_TOOL, executeGetChannelUsage } from './channel-usage-mcp'
+import { GET_EVIDENCE_EVALUATION_CONTRACT_TOOL, executeGetEvidenceEvaluationContract } from '../intelligence-center/mcp'
 import type { ChannelUsagePort } from './channel-usage-types'
 import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
@@ -308,6 +309,7 @@ export class ChannelMcpAdapter {
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
       GET_CHANNEL_USAGE_TOOL,
+      GET_EVIDENCE_EVALUATION_CONTRACT_TOOL,
     ]
     if (this.validationLedger) {
       tools.push(
@@ -368,7 +370,7 @@ export class ChannelMcpAdapter {
     const startedAt = performance.now()
     const channelCapability = this.capabilityForTool(name)
     const usage = this.usage
-    const repositoryId = ['Channel', 'System Health', 'Runtime Identity/Restart', 'Academy'].includes(channelCapability ?? '') ? null : this.repositoryId
+    const repositoryId = ['Channel', 'System Health', 'Runtime Identity/Restart', 'Academy', 'Intelligence Center'].includes(channelCapability ?? '') ? null : this.repositoryId
     let completed = false
     const record = (status: ChannelTraceEvent['status'], error?: string) => {
       if (status !== 'started' && !completed) {
@@ -423,6 +425,7 @@ export class ChannelMcpAdapter {
 
   private classifyTool(name: string): string | undefined {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return 'Channel'
+    if (name === GET_EVIDENCE_EVALUATION_CONTRACT_TOOL.name) return 'Intelligence Center'
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
     if (BUILDX_SMC_TOOLS.some(tool => tool.name === name) || BUILDX_UNITFLOW_TOOLS.some(tool => tool.name === name)) return 'BuildX'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
@@ -449,6 +452,7 @@ export class ChannelMcpAdapter {
   }
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
+    if (name === GET_EVIDENCE_EVALUATION_CONTRACT_TOOL.name) return executeGetEvidenceEvaluationContract(args)
     if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) {
       if (!this.sessionMemoryCentral || !this.projectId) {
         return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_SMC_UNAVAILABLE', message: 'Session Memory Central is not available for active project' }) }], isError: true }
