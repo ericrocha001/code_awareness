@@ -15,7 +15,16 @@ export interface NativeSessionFilter {
   artifactId?: string; executionId?: string; commitSha?: string; pullRequest?: number
 }
 export interface NativeObservationSelector { provider: 'codex-native' | 'antigravity-native'; id: string; worktreeId?: string; generation?: string }
-export interface NativeObservationFilter { hookEvents?: readonly string[]; turnId?: string; after?: string; before?: string }
+export interface NativeObservationFilter {
+  hookEvents?: readonly string[]
+  turnId?: string
+  invocationId?: string
+  tool?: string
+  status?: string
+  isError?: boolean
+  after?: string
+  before?: string
+}
 export interface NativeSessionPageOptions {
   offset?: number
   limit?: number
@@ -231,6 +240,9 @@ export class CheckpointRegistry {
     const where: string[] = [], values: (string | number)[] = []
     if (filter.hookEvents?.length) { where.push(`json_extract(cursor,'$.event') IN (${filter.hookEvents.map(() => '?').join(',')})`); values.push(...filter.hookEvents) }
     if (filter.turnId) { where.push(`json_extract(cursor,'$.turnId')=?`); values.push(filter.turnId) }
+    if (filter.invocationId) { where.push(`json_extract(cursor,'$.invocationId')=?`); values.push(filter.invocationId) }
+    if (filter.tool) { where.push(`json_extract(cursor,'$.tool')=?`); values.push(filter.tool) }
+    if (filter.isError) { where.push(`(json_extract(cursor,'$.event')='ERROR' OR json_extract(cursor,'$.error') IS NOT NULL)`) }
     for (const [key, op] of [['after', '>='], ['before', '<=']] as const) {
       if (!filter[key]) continue
       const ms = Date.parse(filter[key]!)
@@ -249,6 +261,95 @@ export class CheckpointRegistry {
     const filteredTotal = !rows.length && offset > 0
       ? (this.db.prepare(`${cte} SELECT COUNT(*) AS n FROM obs${clause}`).get(...params, ...values) as { n: number }).n : undefined
     return { events, more: rows.length > limit, ...(filteredTotal !== undefined ? { filteredTotal } : {}) }
+  }
+
+  nativeObservationInvocations(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {
+    const { cte, params } = this.nativeObservationSelection(selector, accountHash)
+    const rows = this.db.prepare(`${cte} SELECT json_extract(cursor,'$.invocationId') AS id, MIN(json_extract(cursor,'$.observedAt')) AS firstObserved,
+      MAX(json_extract(cursor,'$.observedAt')) AS lastObserved, COUNT(*) AS eventCount FROM obs WHERE json_extract(cursor,'$.invocationId') IS NOT NULL
+      GROUP BY id ORDER BY firstObserved, id LIMIT ? OFFSET ?`).all(...params, limit + 1, offset) as { id: string; firstObserved: string; lastObserved: string; eventCount: number }[]
+    return { invocations: rows.slice(0, limit), more: rows.length > limit }
+  }
+
+  nativeObservationTools(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {
+    const { cte, params } = this.nativeObservationSelection(selector, accountHash)
+    const rows = this.db.prepare(`${cte} SELECT json_extract(cursor,'$.tool') AS tool, COUNT(*) AS count
+      FROM obs WHERE json_extract(cursor,'$.tool') IS NOT NULL
+      GROUP BY tool ORDER BY count DESC, tool ASC LIMIT ? OFFSET ?`).all(...params, limit + 1, offset) as { tool: string; count: number }[]
+    return { tools: rows.slice(0, limit), more: rows.length > limit }
+  }
+
+  searchHookObservations(filter: {
+    repositoryId: string
+    worktreeId?: string
+    generation?: string
+    sessionIds?: string[]
+    tool?: string
+    invocationId?: string
+    turnId?: string
+    isError?: boolean
+    after?: string
+    before?: string
+    offset: number
+    limit: number
+  }, accountHash?: string): { events: NativeHookEnvelope[]; more: boolean } {
+    const where = [
+      "s.status='COMPLETE'",
+      "s.source LIKE 'NATIVE_HOOK:%'",
+      "e.state='OBSERVED'",
+      "json_extract(s.cursor,'$.repositoryId')=?"
+    ]
+    const params: (string | number)[] = [filter.repositoryId]
+    if (filter.worktreeId && filter.generation) {
+      where.push("json_extract(s.cursor,'$.worktreeId')=? AND json_extract(s.cursor,'$.generation')=?")
+      params.push(filter.worktreeId, filter.generation)
+    }
+    if (filter.sessionIds?.length) {
+      where.push(`json_extract(s.cursor,'$.sessionId') IN (${filter.sessionIds.map(() => '?').join(',')})`)
+      params.push(...filter.sessionIds)
+    }
+    if (filter.tool) {
+      where.push("json_extract(s.cursor,'$.tool')=?")
+      params.push(filter.tool)
+    }
+    if (filter.invocationId) {
+      where.push("json_extract(s.cursor,'$.invocationId')=?")
+      params.push(filter.invocationId)
+    }
+    if (filter.turnId) {
+      where.push("json_extract(s.cursor,'$.turnId')=?")
+      params.push(filter.turnId)
+    }
+    if (filter.isError) {
+      where.push("(json_extract(s.cursor,'$.event')='ERROR' OR json_extract(s.cursor,'$.error') IS NOT NULL)")
+    }
+    if (filter.after) {
+      const ms = Date.parse(filter.after)
+      if (Number.isFinite(ms)) {
+        where.push("json_extract(s.cursor,'$.observedAt') >= ?")
+        params.push(new Date(ms).toISOString())
+      }
+    }
+    if (filter.before) {
+      const ms = Date.parse(filter.before)
+      if (Number.isFinite(ms)) {
+        where.push("json_extract(s.cursor,'$.observedAt') <= ?")
+        params.push(new Date(ms).toISOString())
+      }
+    }
+    const sql = `
+      SELECT s.source, s.cursor
+      FROM registry_edges e
+      JOIN registry_sources s ON e.source = s.source
+      WHERE ${where.join(' AND ')}
+      GROUP BY s.source
+      ORDER BY json_extract(s.cursor,'$.observedAt') ASC, json_extract(s.cursor,'$.eventId') ASC
+      LIMIT ? OFFSET ?
+    `
+    const rows = this.db.prepare(sql).all(...params, filter.limit + 1, filter.offset) as Array<{ source: string; cursor: string }>
+    const more = rows.length > filter.limit
+    const events = rows.slice(0, filter.limit).map(r => parseNativeEnvelope(r.cursor))
+    return { events, more }
   }
 
   nativeObservationTurns(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {

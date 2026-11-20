@@ -105,14 +105,65 @@ export interface NativeIndexedEventRow {
   lineStart: number
   lineEnd: number
   partIndex: number
+  text?: string
 }
 
 export interface NativeEventFilter {
   types?: string[]
   tool?: string
   turnId?: string
+  status?: string
+  errorKind?: string
+  isError?: boolean
   after?: string
   before?: string
+}
+
+export interface NativeCrossSessionFilter {
+  repositoryId: string
+  worktreeId?: string
+  generation?: string
+  nativeKeys?: string[]
+  provider?: 'codex' | 'antigravity'
+  types?: string[]
+  tool?: string
+  status?: string
+  errorKind?: string
+  isError?: boolean
+  turnId?: string
+  after?: string
+  before?: string
+  limit: number
+  offset: number
+  rowids?: number[]
+}
+
+export interface NativeCrossSessionHit {
+  nativeKey: string
+  revision: number
+  provider: 'codex' | 'antigravity'
+  repositoryId: string
+  worktreeId: string
+  generation: string
+  sourceSessionId: string
+  normalizer: string
+  fileIdentity: string
+  seq: number
+  ordinal: number
+  eventId: string
+  type: NativeSourceEventType
+  timestamp?: string
+  timestampMs?: number
+  tool?: string
+  turnId?: string
+  status?: string
+  pairing?: string
+  errorKind?: string
+  bytes: number
+  lineStart: number
+  lineEnd: number
+  partIndex: number
+  text?: string
 }
 
 export function nativeReferenceKey(
@@ -228,6 +279,9 @@ export class NativeSessionReferences {
       CREATE INDEX IF NOT EXISTS native_ref_events_type ON native_reference_events(nativeKey, revision, type, seq);
       CREATE INDEX IF NOT EXISTS native_ref_events_tool ON native_reference_events(nativeKey, revision, tool, seq);
       CREATE INDEX IF NOT EXISTS native_ref_events_turn ON native_reference_events(nativeKey, revision, turnId, seq);
+      CREATE INDEX IF NOT EXISTS native_ref_events_status ON native_reference_events(nativeKey, revision, status, seq);
+      CREATE INDEX IF NOT EXISTS native_ref_events_errorkind ON native_reference_events(nativeKey, revision, errorKind, seq);
+      CREATE INDEX IF NOT EXISTS native_ref_events_timems ON native_reference_events(nativeKey, revision, timestampMs, seq);
       CREATE TABLE IF NOT EXISTS native_reference_turns (
         nativeKey TEXT NOT NULL,
         revision INTEGER NOT NULL,
@@ -243,6 +297,20 @@ export class NativeSessionReferences {
       CREATE TABLE IF NOT EXISTS native_reference_revisions (
         nativeKey TEXT PRIMARY KEY,
         lastRevision INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS native_reference_fts_map (
+        rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+        nativeKey TEXT NOT NULL,
+        revision INTEGER NOT NULL,
+        eventId TEXT NOT NULL,
+        UNIQUE (nativeKey, revision, eventId)
+      );
+      CREATE INDEX IF NOT EXISTS native_ref_fts_map_lookup ON native_reference_fts_map(nativeKey, revision);
+      CREATE VIRTUAL TABLE IF NOT EXISTS native_reference_fts USING fts5(
+        body,
+        content='',
+        contentless_delete=1,
+        tokenize='unicode61 remove_diacritics 2'
       );
     `)
     this.available = true
@@ -345,6 +413,16 @@ export class NativeSessionReferences {
       this.db.prepare(`DELETE FROM native_reference_turns WHERE nativeKey=? AND revision NOT IN (
         SELECT revision FROM native_reference_sources WHERE nativeKey=?
       )`).run(input.nativeKey, input.nativeKey)
+      const oldFts = this.db.prepare(`SELECT rowid FROM native_reference_fts_map WHERE nativeKey=? AND revision NOT IN (
+        SELECT revision FROM native_reference_sources WHERE nativeKey=?
+      )`).all(input.nativeKey, input.nativeKey) as Array<{ rowid: number }>
+      if (oldFts.length) {
+        const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
+        for (const r of oldFts) delFts.run(r.rowid)
+        this.db.prepare(`DELETE FROM native_reference_fts_map WHERE nativeKey=? AND revision NOT IN (
+          SELECT revision FROM native_reference_sources WHERE nativeKey=?
+        )`).run(input.nativeKey, input.nativeKey)
+      }
       this.db.prepare(`
         INSERT OR REPLACE INTO native_reference_checkpoints
         (nativeKey, revision, locatorHash, normalizer, fileIdentity, prefixDigest, nextOffset, tailDigest, sourceBytes, stateJson, updatedAt)
@@ -368,6 +446,7 @@ export class NativeSessionReferences {
     sourceBytes: number
     fileIdentity: string
     stateJson: string
+    allowLexicalIndex?: boolean
   }): void {
     this.assertWritable()
     this.db.transaction(() => {
@@ -415,6 +494,18 @@ export class NativeSessionReferences {
           upsertTurn.run(input.nativeKey, input.revision, t.ordinal, t.turnId, t.firstTime ?? null, t.lastTime ?? null, t.eventCount, t.typesJson)
         }
       }
+      if (input.allowLexicalIndex && this.available) {
+        const insertMap = this.db.prepare('INSERT OR IGNORE INTO native_reference_fts_map (nativeKey, revision, eventId) VALUES (?,?,?)')
+        const insertFts = this.db.prepare('INSERT INTO native_reference_fts (rowid, body) VALUES (?,?)')
+        for (const ev of input.events) {
+          if (ev.text) {
+            const res = insertMap.run(input.nativeKey, input.revision, ev.eventId)
+            if (res.changes > 0) {
+              insertFts.run(res.lastInsertRowid, ev.text)
+            }
+          }
+        }
+      }
       this.db.prepare(`
         UPDATE native_reference_checkpoints
         SET nextOffset=?, tailDigest=?, sourceBytes=?, fileIdentity=?, stateJson=?, updatedAt=?
@@ -452,6 +543,12 @@ export class NativeSessionReferences {
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=? AND revision<=?').run(persisted.nativeKey, persisted.revision)
       this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
       this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
+      const staleFts = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=? AND revision<>?').all(persisted.nativeKey, persisted.revision) as Array<{ rowid: number }>
+      if (staleFts.length) {
+        const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
+        for (const r of staleFts) delFts.run(r.rowid)
+        this.db.prepare('DELETE FROM native_reference_fts_map WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
+      }
       return persisted
     }).immediate()
   }
@@ -463,6 +560,12 @@ export class NativeSessionReferences {
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=?').run(nativeKey)
+      const ftsRows = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=?').all(nativeKey) as Array<{ rowid: number }>
+      if (ftsRows.length) {
+        const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
+        for (const r of ftsRows) delFts.run(r.rowid)
+        this.db.prepare('DELETE FROM native_reference_fts_map WHERE nativeKey=?').run(nativeKey)
+      }
     }).immediate()
   }
 
@@ -500,6 +603,17 @@ export class NativeSessionReferences {
       clauses.push('turnId=?')
       params.push(filters.turnId)
     }
+    if (filters.status) {
+      clauses.push('status=?')
+      params.push(filters.status)
+    }
+    if (filters.errorKind) {
+      clauses.push('errorKind=?')
+      params.push(filters.errorKind)
+    }
+    if (filters.isError) {
+      clauses.push("(type='ERROR' OR status IN ('FAILURE', 'REFUSAL'))")
+    }
     if (filters.after) {
       const ms = Date.parse(filters.after)
       if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
@@ -513,6 +627,139 @@ export class NativeSessionReferences {
       params.push(ms)
     }
     return { sql: clauses.join(' AND '), params }
+  }
+
+  searchFtsRowids(query: string, mode: 'ALL_TERMS' | 'PHRASE'): number[] {
+    if (!this.available) return []
+    const hasFts = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_fts'").get()
+    if (!hasFts) return []
+    const formatted = mode === 'PHRASE'
+      ? `"${query.replace(/"/g, '""')}"`
+      : query.split(/\s+/).filter(Boolean).map(t => `"${t.replace(/"/g, '""')}"`).join(' AND ')
+    if (!formatted) return []
+    try {
+      const rows = this.db.prepare('SELECT rowid FROM native_reference_fts WHERE native_reference_fts MATCH ?').all(formatted) as Array<{ rowid: number }>
+      return rows.map(r => r.rowid)
+    } catch {
+      return []
+    }
+  }
+
+  pageTools(nativeKey: string, revision: number, offset: number, limit: number): { tools: Array<{ tool: string; count: number }>; more: boolean } {
+    if (!this.available) return { tools: [], more: false }
+    const rows = this.db.prepare(`
+      SELECT tool, COUNT(*) AS count
+      FROM native_reference_events
+      WHERE nativeKey=? AND revision=? AND tool IS NOT NULL
+      GROUP BY tool
+      ORDER BY count DESC, tool ASC
+      LIMIT ? OFFSET ?
+    `).all(nativeKey, revision, limit + 1, offset) as Array<{ tool: string; count: number }>
+    return { tools: rows.slice(0, limit), more: rows.length > limit }
+  }
+
+  pageErrors(nativeKey: string, revision: number, offset: number, limit: number): { errors: NativeIndexedEventRow[]; more: boolean } {
+    if (!this.available) return { errors: [], more: false }
+    const rows = this.pageEvents(nativeKey, revision, { isError: true }, offset, limit + 1)
+    return { errors: rows.slice(0, limit), more: rows.length > limit }
+  }
+
+  searchCrossSessionEvents(filter: NativeCrossSessionFilter): { hits: NativeCrossSessionHit[]; more: boolean } {
+    if (!this.available) return { hits: [], more: false }
+    const clauses = ['s.repositoryId=?']
+    const params: unknown[] = [filter.repositoryId]
+    if (filter.worktreeId && filter.generation) {
+      clauses.push('s.worktreeId=? AND s.generation=?')
+      params.push(filter.worktreeId, filter.generation)
+    }
+    if (filter.nativeKeys?.length) {
+      clauses.push(`s.nativeKey IN (${filter.nativeKeys.map(() => '?').join(',')})`)
+      params.push(...filter.nativeKeys)
+    }
+    if (filter.provider) {
+      clauses.push('s.provider=?')
+      params.push(filter.provider)
+    }
+    if (filter.types?.length) {
+      clauses.push(`e.type IN (${filter.types.map(() => '?').join(',')})`)
+      params.push(...filter.types)
+    }
+    if (filter.tool) {
+      clauses.push('e.tool=?')
+      params.push(filter.tool)
+    }
+    if (filter.status) {
+      clauses.push('e.status=?')
+      params.push(filter.status)
+    }
+    if (filter.errorKind) {
+      clauses.push('e.errorKind=?')
+      params.push(filter.errorKind)
+    }
+    if (filter.isError) {
+      clauses.push("(e.type='ERROR' OR e.status IN ('FAILURE', 'REFUSAL'))")
+    }
+    if (filter.turnId) {
+      clauses.push('e.turnId=?')
+      params.push(filter.turnId)
+    }
+    if (filter.after) {
+      const ms = Date.parse(filter.after)
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      clauses.push('e.timestampMs IS NOT NULL AND e.timestampMs>=?')
+      params.push(ms)
+    }
+    if (filter.before) {
+      const ms = Date.parse(filter.before)
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      clauses.push('e.timestampMs IS NOT NULL AND e.timestampMs<=?')
+      params.push(ms)
+    }
+    if (filter.rowids !== undefined) {
+      if (!filter.rowids.length) return { hits: [], more: false }
+      clauses.push(`(e.nativeKey, e.revision, e.eventId) IN (SELECT nativeKey, revision, eventId FROM native_reference_fts_map WHERE rowid IN (${filter.rowids.map(() => '?').join(',')}))`)
+      params.push(...filter.rowids)
+    }
+    const where = clauses.join(' AND ')
+    const sql = `
+      SELECT s.nativeKey, s.revision, s.provider, s.repositoryId, s.worktreeId, s.generation, s.sourceSessionId, s.normalizer, s.fileIdentity,
+             e.seq, e.ordinal, e.eventId, e.type, e.timestamp, e.timestampMs, e.tool, e.turnId, e.status, e.pairing, e.errorKind,
+             e.bytes, e.lineStart, e.lineEnd, e.partIndex
+      FROM native_reference_sources s
+      JOIN native_reference_events e ON e.nativeKey = s.nativeKey AND e.revision = s.revision
+      WHERE ${where}
+      ORDER BY e.timestampMs ASC, e.eventId ASC
+      LIMIT ? OFFSET ?
+    `
+    const rows = this.db.prepare(sql).all(...params, filter.limit + 1, filter.offset) as Array<Record<string, unknown>>
+    const more = rows.length > filter.limit
+    const hits: NativeCrossSessionHit[] = rows.slice(0, filter.limit).map(r => ({
+      nativeKey: String(r.nativeKey),
+      revision: Number(r.revision),
+      provider: r.provider as 'codex' | 'antigravity',
+      repositoryId: String(r.repositoryId),
+      worktreeId: String(r.worktreeId),
+      generation: String(r.generation),
+      sourceSessionId: String(r.sourceSessionId),
+      normalizer: String(r.normalizer),
+      fileIdentity: String(r.fileIdentity),
+      seq: Number(r.seq),
+      ordinal: Number(r.ordinal),
+      eventId: String(r.eventId),
+      type: r.type as NativeSourceEventType,
+      ...(r.timestamp ? { timestamp: String(r.timestamp) } : {}),
+      ...(r.timestampMs !== null && r.timestampMs !== undefined ? { timestampMs: Number(r.timestampMs) } : {}),
+      ...(r.tool ? { tool: String(r.tool) } : {}),
+      ...(r.turnId ? { turnId: String(r.turnId) } : {}),
+      ...(r.status ? { status: String(r.status) } : {}),
+      ...(r.pairing ? { pairing: String(r.pairing) } : {}),
+      ...(r.errorKind ? { errorKind: String(r.errorKind) } : {}),
+      bytes: Number(r.bytes),
+      lineStart: Number(r.lineStart),
+      lineEnd: Number(r.lineEnd),
+      partIndex: Number(r.partIndex)
+    }))
+    return { hits, more }
   }
 
   countEvents(nativeKey: string, revision: number, filters: NativeEventFilter): number {

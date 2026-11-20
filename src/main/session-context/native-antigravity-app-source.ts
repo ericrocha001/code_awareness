@@ -54,6 +54,7 @@ interface AntigravityAppGrant {
   profile: string
   sessionHash?: string
   sessionHashes?: string[]
+  allowLexicalIndex?: boolean
 }
 
 function stripVerbatimPrefix(path: string): string {
@@ -104,10 +105,11 @@ function readAntigravityAppGrantStatus(storePath: string, repositoryId: string, 
       if (sessionHash !== undefined && sessionHash !== nativeHash) throw new Error()
       if (sessionHashes !== undefined && !sessionHashes.includes(nativeHash)) throw new Error()
     }
+    const allowLexicalIndex = grant.allowLexicalIndex === true
     assertProfilePath(profile, profile)
     assertUserOwned(profile)
     if (!lstatSync(profile).isDirectory() || !sameNativePath(realpathSync.native(profile), profile)) throw new Error()
-    return { configured: true, ok: true, grant: { configPath, configText, profile, sessionHash, sessionHashes } }
+    return { configured: true, ok: true, grant: { configPath, configText, profile, sessionHash, sessionHashes, allowLexicalIndex } }
   } catch {
     return { configured: true, ok: false }
   }
@@ -286,7 +288,7 @@ export function openAntigravitySourceHandle(options: {
   const { storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent } = options
   if (!antigravityAppSessionId.test(sourceSessionId) ||
     nativeDigest(JSON.stringify([repositoryId, 'antigravity', sourceSessionId])) !== nativeHash) throw new Error('IDENTITY_MISMATCH')
-  const { configPath, configText, profile } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
+  const { configPath, configText, profile, allowLexicalIndex } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
   const directory = dirname(storePath)
 
   const path = antigravityAppTranscriptPath(profile, sourceSessionId)
@@ -327,6 +329,7 @@ export function openAntigravitySourceHandle(options: {
       sizeBytes: Number(stat.size),
       locatorHash: digest(JSON.stringify([path, effectiveLocator, resolvedRoot, configText])),
       liveFingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])),
+      allowLexicalIndex,
       assertPath: () => {
         assertProfilePath(path, profile)
         assertProfilePath(configPath, directory)

@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3'
 import { closeSync, fstatSync, lstatSync, openSync, readSync, constants, type BigIntStats } from 'node:fs'
 import { digest, sanitize, utf8Prefix } from './privacy'
 import {
@@ -133,7 +134,8 @@ export function emitIndexedEvent(
     sanitized: content !== input.rawText,
     lineStart: input.lineStart,
     lineEnd: input.lineEnd,
-    partIndex: input.part
+    partIndex: input.part,
+    text: content
   }
   acc.events.push(row)
   acc.state.typeCounts[row.type] = (acc.state.typeCounts[row.type] ?? 0) + 1
@@ -279,6 +281,7 @@ export interface NativeIndexedSourceHandle {
   configUnchanged: () => boolean
   assertPath: () => void
   verifyAfterClose?: () => void
+  allowLexicalIndex?: boolean
 }
 
 export type NativeReferenceStepResult =
@@ -479,7 +482,8 @@ export function runNativeReferenceStep(options: {
         tailDigest: '',
         sourceBytes: handle.sizeBytes,
         fileIdentity: handle.identity,
-        stateJson: JSON.stringify(state)
+        stateJson: JSON.stringify(state),
+        allowLexicalIndex: handle.allowLexicalIndex
       })
 
       if (!stepOut.done) {
@@ -626,6 +630,38 @@ export function extractAndVerifyEventLiteral(options: {
   return { content, sanitized: content !== rawText }
 }
 
+export function findFtsMatchOffset(content: string, queryText: string): number | undefined {
+  const trimmed = queryText.trim()
+  if (!trimmed) return undefined
+  let db: Database.Database | undefined
+  try {
+    db = new Database(':memory:')
+    db.exec("CREATE VIRTUAL TABLE mem_fts USING fts5(body, tokenize='unicode61 remove_diacritics 2')")
+    db.prepare('INSERT INTO mem_fts(rowid, body) VALUES (1, ?)').run(content)
+    let matchExpr = `"${trimmed.replaceAll('"', '""')}"`
+    let match = db.prepare("SELECT highlight(mem_fts, 0, char(1), char(2)) AS hl FROM mem_fts WHERE mem_fts MATCH ?").get(matchExpr) as { hl: string } | undefined
+    if (!match) {
+      const tokens = trimmed.split(/\s+/).map(t => t.replaceAll(/["*^:{}()]/g, '')).filter(Boolean)
+      if (tokens.length) {
+        matchExpr = tokens.map(t => `"${t}"`).join(' ')
+        match = db.prepare("SELECT highlight(mem_fts, 0, char(1), char(2)) AS hl FROM mem_fts WHERE mem_fts MATCH ?").get(matchExpr) as { hl: string } | undefined
+      }
+    }
+    if (match && typeof match.hl === 'string') {
+      const idx = match.hl.indexOf('\x01')
+      if (idx >= 0) {
+        const prefix = match.hl.slice(0, idx)
+        return Buffer.byteLength(prefix)
+      }
+    }
+    return undefined
+  } catch {
+    return undefined
+  } finally {
+    try { db?.close() } catch {}
+  }
+}
+
 export function readEventLiteralSlice(options: {
   content: string
   sanitized: boolean
@@ -636,20 +672,32 @@ export function readEventLiteralSlice(options: {
   base: Record<string, unknown>
   nextCursor: (end: number) => string
   fits: (payload: object, budget: number, strict?: boolean) => boolean
+  queryText?: string
 }) {
-  const { content, sanitized, eventId, payloadDigest, offset, budget, base, nextCursor, fits } = options
+  const { content, sanitized, eventId, payloadDigest, offset, budget, base, nextCursor, fits, queryText } = options
   const raw = Buffer.from(content)
-  if (offset > raw.length || (offset < raw.length && (raw[offset] & 0xc0) === 0x80)) {
+  let effectiveOffset = offset
+  if (effectiveOffset === 0 && queryText) {
+    const matchOffset = findFtsMatchOffset(content, queryText)
+    if (matchOffset !== undefined) {
+      let candidateStart = Math.max(0, matchOffset - 1024)
+      while (candidateStart > 0 && (raw[candidateStart] & 0xc0) === 0x80) {
+        candidateStart--
+      }
+      effectiveOffset = candidateStart
+    }
+  }
+  if (effectiveOffset > raw.length || (effectiveOffset < raw.length && (raw[effectiveOffset] & 0xc0) === 0x80)) {
     throw new Error('CURSOR_STALE')
   }
   for (let size = 8192; size >= 4; size = Math.floor(size / 2)) {
-    const slice = utf8Prefix(raw.subarray(offset).toString('utf8'), size)
-    const end = offset + Buffer.byteLength(slice)
+    const slice = utf8Prefix(raw.subarray(effectiveOffset).toString('utf8'), size)
+    const end = effectiveOffset + Buffer.byteLength(slice)
     const result = {
       ...base,
       eventId,
       content: slice,
-      range: { startByte: offset, endByte: end },
+      range: { startByte: effectiveOffset, endByte: end },
       payloadDigest,
       provenance: 'OBSERVED_FROM_PROVIDER',
       omission: null,
