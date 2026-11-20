@@ -16,7 +16,7 @@ export const nativeDigest = (value: string): string => createHash('sha256').upda
 export const nativeCaptureRuntimeId = nativeDigest(randomUUID())
 export const nativeCaptureRuntimeStartedAt = Date.now()
 export const nativeGapReasons = ['JSON_SYNTAX', 'JSON_STRUCTURE', 'EVENT_UNSUPPORTED', 'REQUIRED_ID_MISSING', 'INVALID_ID', 'CWD_MISSING', 'INVOCATION_ID_MISSING',
-  'WORKTREE_MISMATCH', 'WORKTREE_SCOPE_AMBIGUOUS', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
+  'WORKTREE_MISMATCH', 'WORKTREE_SCOPE_AMBIGUOUS', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'SPOOL_PROBE_BUDGET', 'SPOOL_CLAIM_CONFLICT', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
 export type NativeGapReason = typeof nativeGapReasons[number]
 export type NativeGapPhase = 'READ' | 'PARSE' | 'NORMALIZE' | 'WRITE' | 'INGEST'
 export interface NativeGap {
@@ -571,29 +571,144 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   return value as unknown as NativeHookEnvelope
 }
 
-export function spoolNativeHook(envelope: NativeHookEnvelope, spool: string): 'WRITTEN' | 'DUPLICATE' | 'FULL' {
+export interface SpoolAdmissionOptions {
+  deadlineMs?: number
+  maxFallbackProbes?: number
+}
+
+export interface SpoolAdmissionResult {
+  outcome: 'WRITTEN' | 'DUPLICATE' | 'FULL' | 'PROBE_BUDGET' | 'CLAIM_CONFLICT'
+  slotCollisions: number
+  fallbackUsed: boolean
+  relocated: boolean
+}
+
+function readSlotEventId(destination: string, targetEventId: string): { present: boolean; duplicate: boolean } {
+  try {
+    const raw = boundedFile(destination, nativeHookLimits.envelopeBytes)
+    if (!raw.includes(`"${targetEventId}"`)) return { present: true, duplicate: false }
+    const previous = parseNativeEnvelope(raw)
+    return { present: true, duplicate: previous.eventId === targetEventId }
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return { present: false, duplicate: false }
+    if (code) throw error
+    return { present: true, duplicate: false }
+  }
+}
+
+export function spoolNativeHookWithDetail(envelope: NativeHookEnvelope, spool: string, options?: SpoolAdmissionOptions): SpoolAdmissionResult {
   const text = JSON.stringify(envelope)
   parseNativeEnvelope(text)
   const stat = lstatSync(spool)
   if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(spool) !== resolve(spool)) throw new Error('UNSAFE_SPOOL')
-  const slot = parseInt(envelope.eventId.slice(0, 8), 16) % nativeHookLimits.slots
-  for (let offset = 0; offset < 8; offset++) {
-    const destination = join(spool, `${(slot + offset) % nativeHookLimits.slots}.json`)
-    try {
-      const previous = parseNativeEnvelope(boundedFile(destination, nativeHookLimits.envelopeBytes))
-      if (previous.eventId === envelope.eventId) return 'DUPLICATE'
-      continue
-    } catch (error) { const code = (error as NodeJS.ErrnoException).code; if (code && code !== 'ENOENT') throw error; if (code !== 'ENOENT') continue }
-    const pending = destination + '.pending'
-    try { writeFileSync(pending, text, { flag: 'wx', mode: 0o600, flush: true }) }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; continue }
-    try {
-      linkSync(pending, destination)
-      return 'WRITTEN'
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error }
-    finally { unlinkSync(pending) }
+  const totalSlots = nativeHookLimits.slots
+  const startSlot = parseInt(envelope.eventId.slice(0, 8), 16) % totalSlots
+  let slotCollisions = 0
+  let claimConflicts = 0
+  let verifiedOccupied = 0
+  let pendingPath: string | undefined
+
+  const ensurePending = (): string => {
+    if (pendingPath) return pendingPath
+    const candidate = join(spool, `.claim-${randomUUID()}.pending`)
+    writeFileSync(candidate, text, { flag: 'wx', mode: 0o600, flush: true })
+    pendingPath = candidate
+    return candidate
   }
-  return 'FULL'
+
+  const tryClaim = (destination: string, slotIndex: number): 'WRITTEN' | 'DUPLICATE' | 'OCCUPIED' => {
+    const status = readSlotEventId(destination, envelope.eventId)
+    if (status.present) {
+      if (status.duplicate) return 'DUPLICATE'
+      verifiedOccupied++
+      if (slotIndex === startSlot) slotCollisions++
+      return 'OCCUPIED'
+    }
+    const staging = ensurePending()
+    try {
+      linkSync(staging, destination)
+      return 'WRITTEN'
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      claimConflicts++
+      slotCollisions++
+      const racer = readSlotEventId(destination, envelope.eventId)
+      if (racer.present && racer.duplicate) return 'DUPLICATE'
+      if (racer.present) verifiedOccupied++
+      return 'OCCUPIED'
+    }
+  }
+
+  const budgetExceeded = (probes: number) =>
+    (options?.deadlineMs !== undefined && Date.now() >= options.deadlineMs) ||
+    (options?.maxFallbackProbes !== undefined && probes >= options.maxFallbackProbes)
+
+  try {
+    for (let offset = 0; offset < 8; offset++) {
+      const idx = (startSlot + offset) % totalSlots
+      const outcome = tryClaim(join(spool, `${idx}.json`), idx)
+      if (outcome === 'WRITTEN' || outcome === 'DUPLICATE') {
+        return { outcome, slotCollisions, fallbackUsed: false, relocated: offset > 0 }
+      }
+    }
+
+    if (budgetExceeded(0)) {
+      return { outcome: 'PROBE_BUDGET', slotCollisions, fallbackUsed: true, relocated: false }
+    }
+
+    const existing = new Set<number>()
+    for (const name of readdirSync(spool)) {
+      const match = /^(\d+)\.json$/.exec(name)
+      if (!match) continue
+      const idx = Number(match[1])
+      if (Number.isSafeInteger(idx) && idx >= 0 && idx < totalSlots) existing.add(idx)
+    }
+
+    const freeCandidates: number[] = []
+    const occupiedCandidates: number[] = []
+    for (let offset = 8; offset < totalSlots; offset++) {
+      const idx = (startSlot + offset) % totalSlots
+      if (existing.has(idx)) occupiedCandidates.push(idx)
+      else freeCandidates.push(idx)
+    }
+
+    let fallbackProbes = 0
+    for (const idx of occupiedCandidates) {
+      if (budgetExceeded(fallbackProbes)) {
+        return { outcome: 'PROBE_BUDGET', slotCollisions, fallbackUsed: true, relocated: false }
+      }
+      fallbackProbes++
+      const outcome = tryClaim(join(spool, `${idx}.json`), idx)
+      if (outcome === 'WRITTEN' || outcome === 'DUPLICATE') {
+        return { outcome, slotCollisions, fallbackUsed: true, relocated: true }
+      }
+    }
+
+    for (const idx of freeCandidates) {
+      if (budgetExceeded(fallbackProbes)) {
+        return { outcome: 'PROBE_BUDGET', slotCollisions, fallbackUsed: true, relocated: false }
+      }
+      fallbackProbes++
+      const outcome = tryClaim(join(spool, `${idx}.json`), idx)
+      if (outcome === 'WRITTEN' || outcome === 'DUPLICATE') {
+        return { outcome, slotCollisions, fallbackUsed: true, relocated: true }
+      }
+    }
+
+    if (verifiedOccupied >= totalSlots || claimConflicts === 0) {
+      return { outcome: 'FULL', slotCollisions, fallbackUsed: true, relocated: false }
+    }
+    return { outcome: verifiedOccupied >= totalSlots - 1 ? 'FULL' : 'CLAIM_CONFLICT', slotCollisions, fallbackUsed: true, relocated: false }
+  } finally {
+    if (pendingPath) {
+      try { unlinkSync(pendingPath) } catch {}
+    }
+  }
+}
+
+export function spoolNativeHook(envelope: NativeHookEnvelope, spool: string, options?: SpoolAdmissionOptions): SpoolAdmissionResult['outcome'] {
+  return spoolNativeHookWithDetail(envelope, spool, options).outcome
 }
 
 export function prepareNativeSpool(spool: string): void {
