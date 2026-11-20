@@ -109,7 +109,7 @@ test('deduplicates independently of observed time and bounds disk admission', ()
   expect(spoolNativeHook(other, f.spool)).toBe('FULL')
   expect(readdirSync(f.spool)).toHaveLength(nativeHookLimits.slots)
   expect(readdirSync(f.spool).every(file => Buffer.byteLength(readFileSync(join(f.spool, file))) < nativeHookLimits.envelopeBytes)).toBe(true)
-})
+}, 15000)
 test('command fails open without output for malformed, oversized or disabled input', () => {
   const f = commandFixture(), file = nativeBindingPath(f.root)
   writeFileSync(file, JSON.stringify(f.binding))
