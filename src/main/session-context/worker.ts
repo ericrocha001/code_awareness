@@ -217,8 +217,16 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
                   const scanLimit = nativeMode === 'MAINTENANCE' ? 4 : 32
                   for (const [invocation, kinds] of observed) {
                     if (nativeMode === 'MAINTENANCE' && Date.now() >= nativeDeadline) { remainingNativeBacklog = true; targetRemainingScan = true; break }
-                    if (kinds.git) await correlateNativeGit(store.registry, binding, invocation, new GitService(), assertRequest)
-                    if (kinds.artifact) await correlateNativeArtifact(store.registry, binding, invocation, publicationPort, assertRequest)
+                    let pending = false
+                    if (kinds.git) {
+                      const res = await correlateNativeGit(store.registry, binding, invocation, new GitService(), assertRequest)
+                      if (res === 'INVOCATION_INCOMPLETE' || res === 'RECEIPT_UNAVAILABLE') pending = true
+                    }
+                    if (kinds.artifact) {
+                      const res = await correlateNativeArtifact(store.registry, binding, invocation, publicationPort, assertRequest)
+                      if (res === 'INVOCATION_INCOMPLETE' || res === 'RECEIPT_UNAVAILABLE') pending = true
+                    }
+                    if (pending) { remainingNativeBacklog = true; targetRemainingScan = true }
                     targetProgressed = true
                   }
                   for (const kind of ['ARTIFACT', 'GIT'] as const) {
@@ -227,6 +235,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
                     const previous = store.registry.source(scan)
                     const keys = store.registry.nativeCorrelationCandidates(kind, binding.worktreeId, binding.generation, previous?.cursor, scanLimit)
                     let processedKeys = 0
+                    let anyPending = false
                     for (const key of keys) {
                       if (nativeMode === 'MAINTENANCE' && Date.now() >= nativeDeadline) { remainingNativeBacklog = true; targetRemainingScan = true; break }
                       processedKeys++
@@ -235,13 +244,15 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
                       const session = store.registry.directEvidence({ kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, `NATIVE_${kind}_REQUEST`).find(edge => edge.relation === 'PreToolUse')?.to
                       const current = session && nativeInvocationWindow(store.registry, binding, { kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, session) === 'VERIFIED'
                       if (store.registry.source(`NATIVE_${kind}:` + invocationId)?.status !== 'COMPLETE' || !current) {
-                        if (kind === 'ARTIFACT') await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
-                        else await correlateNativeGit(store.registry, binding, invocationId, new GitService(), assertRequest)
+                        const res = kind === 'ARTIFACT'
+                          ? await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
+                          : await correlateNativeGit(store.registry, binding, invocationId, new GitService(), assertRequest)
+                        if (res === 'INVOCATION_INCOMPLETE' || res === 'RECEIPT_UNAVAILABLE') anyPending = true
                         targetProgressed = true
                       }
                       if (nativeMode === 'MAINTENANCE') await yieldToEventLoop()
                     }
-                    const moreScan = processedKeys < keys.length || keys.length === scanLimit
+                    const moreScan = processedKeys < keys.length || keys.length === scanLimit || anyPending
                     if (moreScan) { remainingNativeBacklog = true; targetRemainingScan = true }
                     const lastKey = processedKeys > 0 ? keys[processedKeys - 1] : (previous?.cursor ?? '')
                     store.registry.apply({

@@ -166,7 +166,10 @@ export class GitOperationsService {
     return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
   }
   async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
-    const page = await this.git.operationReceiptPage(this.repoRoot, after)
+    let page = await this.git.operationReceiptPage(this.repoRoot, after)
+    if (after && page.receipts.length === 0) {
+      page = await this.git.operationReceiptPage(this.repoRoot, '')
+    }
     const observations: DeliveryProjectionPage['observations'] = []
     for (const { receipt, sha } of page.receipts) {
       const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
