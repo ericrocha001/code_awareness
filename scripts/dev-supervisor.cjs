@@ -18,6 +18,45 @@ if (process.platform === 'win32') {
   catch { console.warn('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
 }
 const supervisor = createDevSupervisor({
+  async renewRuntime({ port, token, devSync }) {
+    console.log(`[Dev Supervisor] Executando renovação completa DevSync (operação ${devSync.operationId})...`)
+    const executable = process.platform === 'win32' ? (process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe') : 'npm'
+    const predevArgs = process.platform === 'win32'
+      ? ['/d', '/s', '/c', 'npm.cmd', 'run', 'predev']
+      : ['run', 'predev']
+    const predevResult = spawnSync(executable, predevArgs, {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+      shell: false,
+      windowsHide: true
+    })
+    if (predevResult.error || predevResult.status !== 0) {
+      throw new Error(`PREDEV_FAILED: ${predevResult.error?.message ?? predevResult.status}`)
+    }
+    if (process.platform === 'win32') {
+      try {
+        delete require.cache[require.resolve('./runtime-preview/build.cjs')]
+        nativePreviewBuild = JSON.stringify(require('./runtime-preview/build.cjs').build(false))
+      } catch {
+        console.warn('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE')
+      }
+    }
+    const runtimeArgs = process.platform === 'win32'
+      ? ['/d', '/s', '/c', 'npm.cmd', 'run', 'dev:runtime']
+      : ['run', 'dev:runtime']
+    return spawn(executable, runtimeArgs, {
+      cwd: projectRoot,
+      stdio: 'inherit',
+      windowsHide: true,
+      shell: false,
+      env: {
+        ...createDevRuntimeEnvironment(process.env, { port, token }),
+        CODE_AWARENESS_DEV_SUPERVISOR_ROOT: projectRoot,
+        CODE_AWARENESS_PREVIEW_NATIVE_BUILD: nativePreviewBuild ?? ''
+      }
+    })
+  },
   spawnRuntime({ port, token }) {
     const executable = process.platform === 'win32' ? (process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe') : 'npm'
     const args = process.platform === 'win32'
@@ -28,7 +67,11 @@ const supervisor = createDevSupervisor({
       stdio: 'inherit',
       windowsHide: true,
       shell: false,
-      env: { ...createDevRuntimeEnvironment(process.env, { port, token }), CODE_AWARENESS_PREVIEW_NATIVE_BUILD: nativePreviewBuild ?? '' }
+      env: {
+        ...createDevRuntimeEnvironment(process.env, { port, token }),
+        CODE_AWARENESS_DEV_SUPERVISOR_ROOT: projectRoot,
+        CODE_AWARENESS_PREVIEW_NATIVE_BUILD: nativePreviewBuild ?? ''
+      }
     })
   },
   onFinalExit(code) {

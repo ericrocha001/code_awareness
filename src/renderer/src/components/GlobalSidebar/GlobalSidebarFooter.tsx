@@ -3,8 +3,9 @@
 */
 
 import React from 'react'
-import { Tag, EyeOff, ChevronsLeft, ChevronsRight, Sun, Moon, Monitor, Wrench, Settings } from 'lucide-react'
+import { Tag, EyeOff, ChevronsLeft, ChevronsRight, Sun, Moon, Monitor, Settings } from 'lucide-react'
 import { useTheme } from '../../hooks/useTheme'
+import { DevelopmentMenu } from './DevelopmentMenu'
 
 interface GlobalSidebarFooterProps {
   isSidebarOpen: boolean
@@ -81,17 +82,7 @@ export const GlobalSidebarFooter: React.FC<GlobalSidebarFooterProps> = ({
         </span>
         <span className="global-sidebar-nav-label">{isSidebarOpen ? 'Recolher' : 'Expandir'}</span>
       </button>
-      <button
-        className="global-sidebar-footer-btn global-sidebar-devtools-btn"
-        onClick={() => window.codeAwareness.toggleDevTools()}
-        aria-label="Abrir DevTools"
-        title="Abrir DevTools (F12)"
-      >
-        <span className="global-sidebar-nav-icon" aria-hidden="true">
-          <Wrench size={18} strokeWidth={2} />
-        </span>
-        <span className="global-sidebar-nav-label">DevTools</span>
-      </button>
+      <DevelopmentMenu isSidebarOpen={isSidebarOpen} />
     </div>
   )
 }

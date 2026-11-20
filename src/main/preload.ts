@@ -490,6 +490,12 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   toggleDevTools: (): Promise<{ success: boolean }> =>
     ipcRenderer.invoke('devtools:toggle'),
 
+  getDevSyncStatus: (): Promise<import('./dev-sync/dev-sync-types').DevSyncAvailability> =>
+    ipcRenderer.invoke('devsync:get-status'),
+
+  requestDevSync: (): Promise<import('./dev-sync/dev-sync-types').DevSyncResult> =>
+    ipcRenderer.invoke('devsync:request-sync'),
+
   // ─── Banco de Dados (Code Checkpoints) ──────────────────────────────────────
   initializeDatabase: (repoPath: string) =>
     ipcRenderer.invoke('database:initialize', repoPath),
