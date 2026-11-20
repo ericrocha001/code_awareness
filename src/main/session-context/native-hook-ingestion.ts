@@ -12,10 +12,33 @@ export function nativeObservationBatch(event: NativeHookEnvelope): RegistryBatch
   const observation: RegistryEntity = { kind: 'EXECUTION', id: `native-observation:${event.eventId}` }
   const invocation: RegistryEntity | undefined = event.invocationId ? { kind: 'EXECUTION', id: `native-invocation:${event.invocationId}` } : undefined
   const evidence = { evidenceKind: 'NATIVE_HOOK_OBSERVED', evidenceRef: event.eventId, digest: event.digest, freshness: 'OBSERVED_SNAPSHOT' }
+  const activationEdges = event.activation ? (() => {
+    const exec: RegistryEntity = { kind: 'EXECUTION', id: event.activation.executionId }
+    const plan: RegistryEntity = { kind: 'ARTIFACT', id: `${event.activation.planArtifactId}:${event.activation.planRevision}` }
+    const actEvidence = {
+      evidenceKind: 'EXECUTION_CONTEXT_OBSERVED',
+      evidenceRef: `${event.activation.activationId}:${event.activation.revision}`,
+      digest: event.digest,
+      freshness: 'OBSERVED_SNAPSHOT'
+    }
+    return [
+      { from: session, relation: 'observed-in-execution', to: exec, ...actEvidence },
+      { from: plan, relation: 'execution-context', to: exec, ...actEvidence },
+      ...(invocation ? [{ from: invocation, relation: 'observed-in-execution', to: exec, ...actEvidence }] : []),
+      ...(event.activation.scope === 'DELEGATED' && event.activation.parentSessionId ? [{
+        from: session,
+        relation: 'delegated-from',
+        to: { kind: 'SESSION' as const, id: `${nativeSessionEntityId(event, event.activation.parentSessionId)}` },
+        ...actEvidence,
+        evidenceKind: 'DELEGATED_SESSION_LINEAGE'
+      }] : [])
+    ]
+  })() : []
   return { repositoryId: event.repositoryId, source: `NATIVE_HOOK:${event.eventId}`, revision: event.digest, status: 'COMPLETE', cursor: JSON.stringify(event), entities: [session, observation], edges: [
     { from: observation, relation: event.event, to: session, ...evidence },
     { from: observation, relation: 'observed-in', to: { kind: 'WORKTREE', id: `${event.worktreeId}:${event.generation}` }, ...evidence },
     ...(invocation ? [{ from: observation, relation: 'invocation', to: invocation, ...evidence }] : []),
+    ...activationEdges,
     ...(event.capture ? [{ from: observation, relation: 'captured-in', to: { kind: 'EXECUTION' as const, id: 'native-window:' + event.capture.epoch },
       ...evidence, evidenceKind: 'NATIVE_CAPTURE_MEMBERSHIP' }] : []),
     ...(event.capture && invocation ? [{ from: invocation, relation: event.event, to: { kind: 'EXECUTION' as const, id: 'native-window:' + event.capture.epoch },

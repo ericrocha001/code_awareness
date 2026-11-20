@@ -191,9 +191,9 @@ export class GitOperationsService {
   }
   getBranchInventory() { return this.branchReader().inventory() }
   getBranchCommits(query: BranchHistoryQuery) { return this.branchReader().history(query) }
-  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<LegacyGitReceiptResult> {
+  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: { sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness }): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
-    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate, prepareDelivery)
+    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate, prepareDelivery, options)
     const changesTopology = ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'revert_git_commit', 'integrate_worktree', 'manage_worktree'].includes(name)
       || name === 'sync_git_remote' && args.action !== 'PUSH'
       || name === 'mutate_worktree' && ['COMMIT', 'CREATE_BRANCH'].includes(String(args.action))

@@ -54,6 +54,22 @@ export interface NativeHookBinding {
   configPath?: string
   gitCommitTool?: string
 }
+export interface NativeHookActivationRef {
+  activationId: string
+  revision: number
+  executionId: string
+  planArtifactId: string
+  planRevision: number
+  bindingArtifactId: string
+  bindingRevision: number
+  scope: 'CHECKOUT_OBSERVED' | 'DELEGATED'
+  parentSessionId?: string
+}
+export interface NativeProducerWitness {
+  verifiedBy: 'MANAGED_RUNTIME'
+  sessionId: string
+  receiptId?: string
+}
 export interface NativeHookEnvelope {
   schema: 1
   source: 'CODEX_NATIVE_HOOK' | 'ANTIGRAVITY_NATIVE_HOOK'
@@ -66,6 +82,8 @@ export interface NativeHookEnvelope {
   invocationId?: string
   subagentId?: string
   appTranscriptDigest?: string
+  activation?: NativeHookActivationRef
+  producerWitness?: NativeProducerWitness
   tool?: 'SHELL' | 'MCP' | 'OTHER'
   git?: { operationId: string; fingerprint: string; expectedHead: string | null; sha?: string; parent?: string | null; replayed?: boolean }
   artifact?: NativeArtifactFact
@@ -296,11 +314,131 @@ export function resolveAntigravityPayloadIdentity(payload: Record<string, unknow
   return identity
 }
 
+export interface NormalizeHookOptions {
+  expectedEvent?: NativeHookEvent
+  activation?: NativeHookActivationRef
+  producerWitness?: NativeProducerWitness
+}
+
+export function readActiveHookActivation(
+  profile: string | undefined,
+  binding: Pick<NativeHookBinding, 'repositoryId' | 'worktreeId' | 'generation' | 'root'>,
+  env: NodeJS.ProcessEnv = process.env
+): NativeHookActivationRef | undefined {
+  if (!profile) return undefined
+  try {
+    const dbPath = join(profile, 'continuum', 'repositories', Buffer.from(binding.repositoryId).toString('base64url'), 'continuum.db')
+    const stat = lstatSync(dbPath, { throwIfNoEntry: false })
+    if (!stat || stat.isSymbolicLink() || !stat.isFile()) return undefined
+    const sqlite = require('node:sqlite') as typeof import('node:sqlite')
+    const db = new sqlite.DatabaseSync(dbPath, { readOnly: true })
+    try {
+      db.exec('PRAGMA busy_timeout=50')
+      const row = db.prepare(`SELECT activation_id, revision, worktree_generation, branch_ref, execution_id, plan_artifact_id, plan_revision, binding_artifact_id, binding_revision
+        FROM execution_activations WHERE repository_id=? AND worktree_id=? AND status='ACTIVE' LIMIT 1`).get(binding.repositoryId, binding.worktreeId) as Record<string, unknown> | undefined
+      if (!row || row.worktree_generation !== binding.generation) return undefined
+      try {
+        const { admin } = nativeGitDirectories(binding.root, false)
+        const head = boundedFile(join(admin, 'HEAD'), 4096).trim()
+        const headRef = /^ref:\s*(refs\/heads\/.+)$/.exec(head)?.[1]
+        if (headRef && row.branch_ref !== headRef) return undefined
+      } catch { return undefined }
+      const parentRaw = typeof env.CODE_AWARENESS_PARENT_SESSION_ID === 'string' && hashPattern.test(env.CODE_AWARENESS_PARENT_SESSION_ID)
+        ? env.CODE_AWARENESS_PARENT_SESSION_ID
+        : undefined
+      let delegated = false
+      if (parentRaw && typeof env.CODE_AWARENESS_DELIVERY_CONTEXT === 'string' && env.CODE_AWARENESS_DELIVERY_CONTEXT.trim()) {
+        try {
+          const parsed = JSON.parse(env.CODE_AWARENESS_DELIVERY_CONTEXT) as Record<string, unknown>
+          delegated = parsed?.executionId === row.execution_id && parsed?.planArtifactId === row.plan_artifact_id &&
+            parsed?.planRevision === row.plan_revision && parsed?.bindingArtifactId === row.binding_artifact_id && parsed?.bindingRevision === row.binding_revision
+        } catch {}
+      }
+      return {
+        activationId: String(row.activation_id),
+        revision: Number(row.revision),
+        executionId: String(row.execution_id),
+        planArtifactId: String(row.plan_artifact_id),
+        planRevision: Number(row.plan_revision),
+        bindingArtifactId: String(row.binding_artifact_id),
+        bindingRevision: Number(row.binding_revision),
+        scope: delegated ? 'DELEGATED' : 'CHECKOUT_OBSERVED',
+        ...(delegated && parentRaw ? { parentSessionId: parentRaw } : {})
+      }
+    } finally { db.close() }
+  } catch { return undefined }
+}
+
+function validActivationRef(value: unknown): value is NativeHookActivationRef {
+  if (!object(value)) return false
+  const allowed = ['activationId', 'revision', 'executionId', 'planArtifactId', 'planRevision', 'bindingArtifactId', 'bindingRevision', 'scope', 'parentSessionId']
+  if (Object.keys(value).some(k => !allowed.includes(k))) return false
+  if (typeof value.activationId !== 'string' || !idPattern.test(value.activationId)) return false
+  if (!Number.isSafeInteger(value.revision) || Number(value.revision) < 1) return false
+  if (typeof value.executionId !== 'string' || !idPattern.test(value.executionId)) return false
+  if (typeof value.planArtifactId !== 'string' || !idPattern.test(value.planArtifactId)) return false
+  if (!Number.isSafeInteger(value.planRevision) || Number(value.planRevision) < 1) return false
+  if (typeof value.bindingArtifactId !== 'string' || !idPattern.test(value.bindingArtifactId)) return false
+  if (!Number.isSafeInteger(value.bindingRevision) || Number(value.bindingRevision) < 1) return false
+  if (value.scope !== 'CHECKOUT_OBSERVED' && value.scope !== 'DELEGATED') return false
+  if (value.parentSessionId !== undefined && (value.scope !== 'DELEGATED' || typeof value.parentSessionId !== 'string' || !hashPattern.test(value.parentSessionId))) return false
+  return true
+}
+
+function validProducerWitness(value: unknown): value is NativeProducerWitness {
+  if (!object(value)) return false
+  if (Object.keys(value).some(k => !['verifiedBy', 'sessionId', 'receiptId'].includes(k))) return false
+  if (value.verifiedBy !== 'MANAGED_RUNTIME' || typeof value.sessionId !== 'string' || !hashPattern.test(value.sessionId)) return false
+  if (value.receiptId !== undefined && (typeof value.receiptId !== 'string' || !idPattern.test(value.receiptId))) return false
+  return true
+}
+
+function extractNativeGitFact(
+  event: NativeHookEvent,
+  binding: NativeHookBinding,
+  toolName: unknown,
+  toolInput: unknown,
+  toolResponse: unknown
+): NativeHookEnvelope['git'] {
+  if (!binding.gitCommitTool || toolName !== binding.gitCommitTool || !object(toolInput)) return undefined
+  const { operationId, ...args } = toolInput
+  const context = args.deliveryContext
+  const hasContext = context !== undefined
+  const validContext = object(context) && Object.keys(context).length === 5 &&
+    typeof context.bindingArtifactId === 'string' && /^artifact-execution-branch-[a-f0-9]{64}$/.test(context.bindingArtifactId) &&
+    Number.isSafeInteger(context.bindingRevision) && Number(context.bindingRevision) > 0 && Number.isSafeInteger(context.planRevision) && Number(context.planRevision) > 0 &&
+    typeof context.planArtifactId === 'string' && /^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(context.planArtifactId) &&
+    typeof context.executionId === 'string' && idPattern.test(context.executionId)
+  if (typeof operationId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(operationId) ||
+    Object.keys(args).length !== (hasContext ? 4 : 3) || (hasContext && !validContext) || typeof args.message !== 'string' || args.message.length > 10000 ||
+    !(args.expectedHead === null || typeof args.expectedHead === 'string' && /^[a-f0-9]{40}$/.test(args.expectedHead)) ||
+    typeof args.expectedIndexRevision !== 'string' || !hashPattern.test(args.expectedIndexRevision)) return undefined
+  const git: NonNullable<NativeHookEnvelope['git']> = {
+    operationId,
+    fingerprint: gitReceiptFingerprint('commit_git_changes', args),
+    expectedHead: args.expectedHead as string | null
+  }
+  if (event === 'PostToolUse' && object(toolResponse) && toolResponse.isError !== true) {
+    let result: unknown = toolResponse.structuredContent
+    if (!result && Array.isArray(toolResponse.content)) {
+      const first = toolResponse.content[0]
+      if (object(first) && first.type === 'text' && typeof first.text === 'string') {
+        try { result = JSON.parse(first.text) } catch {}
+      }
+    }
+    if (object(result) && result.operationId === operationId && typeof result.sha === 'string' && /^[a-f0-9]{40}$/.test(result.sha) &&
+      result.parent === args.expectedHead && typeof result.replayed === 'boolean') {
+      Object.assign(git, { sha: result.sha, parent: result.parent, replayed: result.replayed })
+    }
+  }
+  return git
+}
+
 function normalizeAntigravityHook(
   payload: Record<string, unknown>,
   binding: NativeHookBinding,
   now: Date,
-  options?: { expectedEvent?: NativeHookEvent }
+  options?: NormalizeHookOptions
 ): NativeHookEnvelope {
   const payloadEvent = payload.hookEventName
   if (options?.expectedEvent !== undefined) {
@@ -332,16 +470,38 @@ function normalizeAntigravityHook(
     ? (toolName === 'run_command' || toolName === 'Bash' || toolName === 'bash' ? 'SHELL' : (toolName === 'call_mcp_tool' || toolName.startsWith('mcp_') || toolName.startsWith('mcp__')) ? 'MCP' : 'OTHER')
     : undefined
   const appTranscriptDigest = antigravityAppLocatorDigest(payload.conversationId, payload.transcriptPath)
+  const activation = options?.activation && validActivationRef(options.activation) ? options.activation : undefined
+  const producerWitness = options?.producerWitness && validProducerWitness(options.producerWitness) && options.producerWitness.sessionId === sessionId
+    ? options.producerWitness
+    : undefined
+  let git: NativeHookEnvelope['git']
+  let artifact: NativeArtifactFact | undefined
+  if (toolEvent && producerWitness && invocationId) {
+    const toolInput = toolCall?.input ?? payload.tool_input
+    const toolResponse = toolCall?.response ?? payload.tool_response
+    git = extractNativeGitFact(event, binding, toolName, toolInput, toolResponse)
+    artifact = nativeArtifactFact({
+      hook_event_name: event,
+      tool_name: toolName,
+      tool_input: toolInput,
+      ...(toolResponse !== undefined ? { tool_response: toolResponse } : {})
+    }, binding.repositoryId)
+  }
+  const hasVerifiedCausalFact = Boolean(git || artifact)
   const facts = {
     schema: 1 as const, source: 'ANTIGRAVITY_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
     generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(tool ? { tool } : {}),
-    ...(appTranscriptDigest ? { appTranscriptDigest } : {})
+    ...(appTranscriptDigest ? { appTranscriptDigest } : {}),
+    ...(activation ? { activation } : {}),
+    ...(hasVerifiedCausalFact && producerWitness ? { producerWitness } : {}),
+    ...(git ? { git } : {}),
+    ...(artifact ? { artifact } : {})
   }
   const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
   return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
 }
 
-export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding, now = new Date(), options?: { expectedEvent?: NativeHookEvent }): NativeHookEnvelope {
+export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding, now = new Date(), options?: NormalizeHookOptions): NativeHookEnvelope {
   if (!binding.enabled) throw new Error('DISABLED')
   if (!object(payload)) throw new Error('JSON_STRUCTURE')
   if ((binding.provider ?? 'codex') === 'antigravity') return normalizeAntigravityHook(payload, binding, now, options)
@@ -364,37 +524,11 @@ export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding
   const toolEvent = event === 'PreToolUse' || event === 'PostToolUse'
   if (toolEvent && !invocationId) throw new Error('INVOCATION_ID_MISSING')
   const tool: NativeHookEnvelope['tool'] = toolEvent ? payload.tool_name === 'Bash' ? 'SHELL' : typeof payload.tool_name === 'string' && payload.tool_name.startsWith('mcp__') ? 'MCP' : 'OTHER' : undefined
-  let git: NativeHookEnvelope['git']
-  if (toolEvent && binding.gitCommitTool && payload.tool_name === binding.gitCommitTool && object(payload.tool_input)) {
-    const { operationId, ...args } = payload.tool_input
-    const context = args.deliveryContext
-    const hasContext = context !== undefined
-    const validContext = object(context) && Object.keys(context).length === 5 &&
-      typeof context.bindingArtifactId === 'string' && /^artifact-execution-branch-[a-f0-9]{64}$/.test(context.bindingArtifactId) &&
-      Number.isSafeInteger(context.bindingRevision) && Number(context.bindingRevision) > 0 && Number.isSafeInteger(context.planRevision) && Number(context.planRevision) > 0 &&
-      typeof context.planArtifactId === 'string' && /^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(context.planArtifactId) &&
-      typeof context.executionId === 'string' && idPattern.test(context.executionId)
-    if (typeof operationId === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(operationId) &&
-      Object.keys(args).length === (hasContext ? 4 : 3) && (!hasContext || validContext) && typeof args.message === 'string' && args.message.length <= 10000 &&
-      (args.expectedHead === null || typeof args.expectedHead === 'string' && /^[a-f0-9]{40}$/.test(args.expectedHead)) &&
-      typeof args.expectedIndexRevision === 'string' && hashPattern.test(args.expectedIndexRevision)) {
-      git = { operationId, fingerprint: gitReceiptFingerprint('commit_git_changes', args), expectedHead: args.expectedHead as string | null }
-      if (event === 'PostToolUse' && object(payload.tool_response) && payload.tool_response.isError !== true) {
-        let result: unknown = payload.tool_response.structuredContent
-        if (!result && Array.isArray(payload.tool_response.content)) {
-          const first = payload.tool_response.content[0]
-          if (object(first) && first.type === 'text' && typeof first.text === 'string') {
-            try { result = JSON.parse(first.text) } catch {}
-          }
-        }
-        if (object(result) && result.operationId === operationId && typeof result.sha === 'string' && /^[a-f0-9]{40}$/.test(result.sha) &&
-          result.parent === args.expectedHead && typeof result.replayed === 'boolean') Object.assign(git, { sha: result.sha, parent: result.parent, replayed: result.replayed })
-      }
-    }
-  }
+  const git = toolEvent ? extractNativeGitFact(event, binding, payload.tool_name, payload.tool_input, payload.tool_response) : undefined
   const artifact = toolEvent ? nativeArtifactFact(payload, binding.repositoryId) : undefined
+  const activation = options?.activation && validActivationRef(options.activation) ? options.activation : undefined
   const facts = { schema: 1 as const, source: 'CODEX_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
-    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}), ...(artifact ? { artifact } : {}) }
+    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(activation ? { activation } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}), ...(artifact ? { artifact } : {}) }
   const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
   return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
 }
@@ -403,7 +537,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   if (Buffer.byteLength(text) > nativeHookLimits.envelopeBytes) throw new Error('ENVELOPE_LIMIT')
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
-  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'capture', 'appTranscriptDigest', 'observedAt', 'eventId', 'digest']
+  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'activation', 'producerWitness', 'tool', 'git', 'artifact', 'capture', 'appTranscriptDigest', 'observedAt', 'eventId', 'digest']
   const validEvent = value.source === 'CODEX_NATIVE_HOOK'
     ? codexHookEvents.includes(value.event as typeof codexHookEvents[number])
     : value.source === 'ANTIGRAVITY_NATIVE_HOOK'
@@ -413,7 +547,9 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
     typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) ||
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
     ['turnId','invocationId','subagentId'].some(k => value[k] !== undefined && (typeof value[k] !== 'string' || !hashPattern.test(value[k] as string))) ||
-    (value.source === 'ANTIGRAVITY_NATIVE_HOOK' && (value.git !== undefined || value.artifact !== undefined || value.subagentId !== undefined)) ||
+    (value.activation !== undefined && !validActivationRef(value.activation)) ||
+    (value.producerWitness !== undefined && (!validProducerWitness(value.producerWitness) || value.producerWitness.sessionId !== value.sessionId)) ||
+    (value.source === 'ANTIGRAVITY_NATIVE_HOOK' && (value.subagentId !== undefined || ((value.git !== undefined || value.artifact !== undefined) && !value.producerWitness))) ||
     (value.appTranscriptDigest !== undefined && (value.source !== 'ANTIGRAVITY_NATIVE_HOOK' || typeof value.appTranscriptDigest !== 'string' || !hashPattern.test(value.appTranscriptDigest))) ||
     (value.tool !== undefined && !['SHELL','MCP','OTHER'].includes(String(value.tool))) ||
     typeof value.observedAt !== 'string' || !Number.isFinite(Date.parse(value.observedAt))) throw new Error('INVALID_ENVELOPE')

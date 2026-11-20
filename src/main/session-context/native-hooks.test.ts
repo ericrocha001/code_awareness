@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdir
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFile, execFileSync, spawnSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, normalizeNativeHook, parseNativeEnvelope, nativeBindingPath, prepareNativeSpool, readNativeBinding, recordNativeGap, resolveNativeHookBinding, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, normalizeNativeHook, parseNativeEnvelope, nativeBindingPath, prepareNativeSpool, readActiveHookActivation, readNativeBinding, recordNativeGap, resolveNativeHookBinding, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
 import { inspectNativeTrust, type NativeHookClient } from './native-hook-preflight'
 import { buildSync } from 'esbuild'
@@ -545,4 +545,46 @@ test('Antigravity provisions .agents/hooks.json, executes via Windows cmd when o
 
   expect(disableNativeHooks(f.root, true, 'antigravity')).toEqual({ state: 'DISABLED', restored: true })
   expect(readFileSync(configPath, 'utf8')).toBe(before)
+}, 30000)
+
+test('attaches verifiable active execution ref only on exact active checkout/generation and rejects forged Antigravity envelopes without managed producerWitness', () => {
+  const { DatabaseSync } = require('node:sqlite') as typeof import('node:sqlite')
+  const f = antigravityFixture()
+  const profile = mkdtempSync(join(tmpdir(), 'ag-u3-profile-')); directories.push(profile)
+  const dbDir = join(profile, 'continuum', 'repositories', Buffer.from(f.binding.repositoryId).toString('base64url'))
+  mkdirSync(dbDir, { recursive: true })
+  const db = new DatabaseSync(join(dbDir, 'continuum.db'))
+  db.exec(`CREATE TABLE execution_activations(activation_id TEXT PRIMARY KEY, revision INTEGER NOT NULL, repository_id TEXT NOT NULL, worktree_id TEXT NOT NULL, worktree_generation TEXT NOT NULL, branch_ref TEXT NOT NULL, branch_generation TEXT NOT NULL, execution_id TEXT NOT NULL, plan_artifact_id TEXT NOT NULL, plan_revision INTEGER NOT NULL, plan_content_hash TEXT NOT NULL, binding_artifact_id TEXT NOT NULL, binding_revision INTEGER NOT NULL, binding_content_hash TEXT NOT NULL, scope_kind TEXT NOT NULL, status TEXT NOT NULL, activated_at TEXT NOT NULL, updated_at TEXT NOT NULL, revoked_at TEXT, revoked_reason TEXT)`)
+  const planId = 'artifact-11111111-1111-4111-8111-111111111111'
+  const bindId = 'artifact-execution-branch-' + 'a'.repeat(64)
+  db.prepare(`INSERT INTO execution_activations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    'act-1', 1, f.binding.repositoryId, f.binding.worktreeId, f.binding.generation,
+    'refs/heads/test', '3'.repeat(64), 'exec-u3-1', planId, 1, '4'.repeat(64), bindId, 1, '5'.repeat(64),
+    'CHECKOUT', 'ACTIVE', '2026-11-20T00:00:00Z', '2026-11-20T00:00:00Z', null, null
+  )
+
+  const checkoutObserved = readActiveHookActivation(profile, f.binding, {})!
+  expect(checkoutObserved).toMatchObject({ activationId: 'act-1', revision: 1, executionId: 'exec-u3-1', scope: 'CHECKOUT_OBSERVED' })
+  expect(checkoutObserved.parentSessionId).toBeUndefined()
+
+  const parentSessionId = nativeDigest('parent-session')
+  const delegated = readActiveHookActivation(profile, f.binding, {
+    CODE_AWARENESS_PARENT_SESSION_ID: parentSessionId,
+    CODE_AWARENESS_DELIVERY_CONTEXT: JSON.stringify({ executionId: 'exec-u3-1', planArtifactId: planId, planRevision: 1, bindingArtifactId: bindId, bindingRevision: 1 })
+  })!
+  expect(delegated).toMatchObject({ scope: 'DELEGATED', parentSessionId })
+
+  expect(readActiveHookActivation(profile, { ...f.binding, generation: '9'.repeat(64) }, {})).toBeUndefined()
+  db.prepare(`UPDATE execution_activations SET status='REVOKED' WHERE activation_id='act-1'`).run()
+  expect(readActiveHookActivation(profile, f.binding, {})).toBeUndefined()
+  db.close()
+
+  const envWithActivation = normalizeNativeHook({ conversationId: 'conv-u3', workspacePaths: [f.root], hookEventName: 'SessionStart' }, f.binding, new Date(), { activation: checkoutObserved })
+  expect(parseNativeEnvelope(JSON.stringify(envWithActivation)).activation).toEqual(checkoutObserved)
+  const forged = { ...envWithActivation, git: { operationId: 'op-1', fingerprint: 'a'.repeat(64), expectedHead: null } }
+  expect(() => parseNativeEnvelope(JSON.stringify(forged))).toThrow(/INVALID_ENVELOPE|ENVELOPE_INTEGRITY/)
+  const batch = nativeObservationBatch(envWithActivation)
+  expect(batch.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'observed-in-execution', evidenceKind: 'EXECUTION_CONTEXT_OBSERVED', to: { kind: 'EXECUTION', id: 'exec-u3-1' } })
+  ]))
 }, 30000)

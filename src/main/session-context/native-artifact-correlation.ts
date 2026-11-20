@@ -1,9 +1,25 @@
 import type { PublicationProvenancePort } from '../../shared/types/publication-provenance-types'
 import { publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import type { CheckpointRegistry, RegistryEntity } from './checkpoint-registry'
-import { nativeDigest, type NativeHookBinding } from './native-hooks'
+import { nativeDigest, parseNativeEnvelope, type NativeHookBinding } from './native-hooks'
 import { nativeInvocationWindow } from './native-capture-window'
 import type { NativeArtifactFact } from './native-artifact-facts'
+
+function hasAntigravityProducerWitness(registry: CheckpointRegistry, invocation: RegistryEntity, sessionId: string): boolean {
+  const obs = registry.directEvidence(invocation, 'NATIVE_HOOK_OBSERVED')
+  const rawSession = sessionId.slice('antigravity-native:'.length)
+  const sessionObs = registry.directEvidence({ kind: 'SESSION', id: sessionId }, 'NATIVE_HOOK_OBSERVED')
+  const match = (rel: string) => sessionObs.filter(e => e.relation === rel).some(e => {
+    const raw = registry.source('NATIVE_HOOK:' + e.evidenceRef)?.cursor
+    if (!raw) return false
+    try {
+      const env = parseNativeEnvelope(raw)
+      return env.source === 'ANTIGRAVITY_NATIVE_HOOK' && obs.some(edge => edge.evidenceRef === env.eventId) &&
+        env.producerWitness?.verifiedBy === 'MANAGED_RUNTIME' && env.producerWitness.sessionId === rawSession
+    } catch { return false }
+  })
+  return match('PreToolUse') && match('PostToolUse')
+}
 
 interface RequestFact { action: 'PUBLISH' | 'UPDATE'; requestDigest: string; context: string; outcome: NativeArtifactFact['outcome']; receipt?: NativeArtifactFact['receipt'] }
 export async function correlateNativeArtifact(registry: CheckpointRegistry, binding: NativeHookBinding, invocationId: string, port: PublicationProvenancePort, assertCurrent: () => void): Promise<string> {
@@ -19,9 +35,19 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
   const facts = registry.directEvidence(invocation, 'NATIVE_ARTIFACT_REQUEST')
   const scopes = registry.directEvidence(invocation, 'NATIVE_ARTIFACT_SCOPE')
   const pre = facts.filter(edge => edge.relation === 'PreToolUse'), post = facts.filter(edge => edge.relation === 'PostToolUse')
+  const hookObs = registry.directEvidence(invocation, 'NATIVE_HOOK_OBSERVED')
+  const isAntigravityHook = binding.provider === 'antigravity' || hookObs.some(e => {
+    const c = registry.source('NATIVE_HOOK:' + e.evidenceRef)?.cursor
+    return typeof c === 'string' && c.includes('"ANTIGRAVITY_NATIVE_HOOK"')
+  })
+  if (isAntigravityHook && pre.length === 0 && post.length === 0) return reject('ANTIGRAVITY_CAUSAL_UNSUPPORTED', 'UNAVAILABLE')
   if (pre.length > 1 || post.length > 1) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   if (pre.length !== 1 || post.length !== 1) return reject('INVOCATION_INCOMPLETE', 'PARTIAL')
-  if (pre[0].to.kind !== 'SESSION' || !pre[0].to.id.startsWith('codex-native:') || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== binding.worktreeId + ':' + binding.generation)) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
+  const sessionEntity = pre[0].to
+  const isCodex = sessionEntity.id.startsWith('codex-native:')
+  const isAntigravity = sessionEntity.id.startsWith('antigravity-native:')
+  if (sessionEntity.kind !== 'SESSION' || (!isCodex && !isAntigravity) || sessionEntity.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== binding.worktreeId + ':' + binding.generation)) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
+  if (isAntigravity && !hasAntigravityProducerWitness(registry, invocation, sessionEntity.id)) return reject('ANTIGRAVITY_CAUSAL_UNVERIFIABLE', 'UNAVAILABLE')
   const request = JSON.parse(pre[0].evidenceRef) as RequestFact, result = JSON.parse(post[0].evidenceRef) as RequestFact
   if (request.action !== result.action || request.requestDigest !== result.requestDigest || request.context !== result.context) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   if (result.outcome !== 'SUCCESS' || !result.receipt) return reject('RESULT_UNCONFIRMED')
@@ -41,11 +67,17 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
     const dc = receipt.deliveryContext
     if (dc.repositoryId !== registry.repositoryId || dc.snapshot?.worktreeId !== binding.worktreeId || dc.snapshot?.worktreeGeneration !== binding.generation) return reject('DELIVERY_CONTEXT_CONFLICT', 'PARTIAL')
   }
-  if (receipt.sessionWitness && receipt.sessionWitness.sessionId !== pre[0].to.id.slice('codex-native:'.length)) return reject('SESSION_WITNESS_MISMATCH', 'PARTIAL')
+  if (isCodex && receipt.sessionWitness && receipt.sessionWitness.sessionId !== sessionEntity.id.slice('codex-native:'.length)) return reject('SESSION_WITNESS_MISMATCH', 'PARTIAL')
+  if (isAntigravity) {
+    const rawSession = sessionEntity.id.slice('antigravity-native:'.length)
+    const sw = receipt.sessionWitness
+    const hashed = sw?.sessionId ? nativeDigest(JSON.stringify([registry.repositoryId, 'antigravity', sw.sessionId])) : undefined
+    if (!sw || sw.provider !== 'antigravity' || (sw.sessionId !== rawSession && hashed !== rawSession)) return reject('ANTIGRAVITY_CAUSAL_UNVERIFIABLE', 'UNAVAILABLE')
+  }
   integrity = window()
   if (integrity !== 'VERIFIED') return reject(integrity, 'PARTIAL')
   const revision = nativeDigest(JSON.stringify([pre[0].digest, post[0].digest, receipt.digest]))
-  const sessionId = pre[0].to.id.slice('codex-native:'.length)
+  const sessionId = isCodex ? sessionEntity.id.slice('codex-native:'.length) : sessionEntity.id.slice('antigravity-native:'.length)
   const recorded = await port.associate({ repositoryId: registry.repositoryId, receiptId: receipt.receiptId, sessionId, invocationId, worktreeId: binding.worktreeId, generation: binding.generation, evidenceDigest: revision })
   assertCurrent()
   integrity = window()

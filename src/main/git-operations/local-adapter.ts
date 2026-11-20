@@ -182,9 +182,14 @@ export class GitLocalAdapter implements LocalChannelAdapter {
           const expectedHead = request.expectedHead === null ? null : text(request.expectedHead, 64)
           const expectedIndexRevision = text(request.expectedIndexRevision, 64)
           const args = { message, expectedHead, expectedIndexRevision }
+          let parsedWitness: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness | undefined
+          if (request.sessionWitness !== undefined) {
+            const parsed = authenticatedSessionWitness.safeParse(request.sessionWitness)
+            if (parsed.success) parsedWitness = parsed.data
+          }
           return unwrapResult(await state.service.executeReceipted(operationId, 'commit_git_changes', args, async () =>
             encodeGitReceiptResult({ value: await state.service.commit(args) as unknown as Record<string, unknown> })
-          , prepareDelivery))
+          , prepareDelivery, parsedWitness ? { sessionWitness: parsedWitness } : undefined))
         }
       ),
       sync: operation(

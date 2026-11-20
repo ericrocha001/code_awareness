@@ -10,7 +10,7 @@ import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
 import { GitOperationReceipts, gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { executeGitOperationsTool } from '../git-operations/git-operations-mcp'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitLocalAdapter } from '../git-operations/local-adapter'
 import { GitHubLocalAdapter } from '../github/local-adapter'
@@ -19,8 +19,10 @@ import { SessionStore, sessionStorePath } from './store'
 import { registrySources, handoffTargets } from './registry-sources'
 import { executeSessionTool } from './mcp'
 import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding } from './native-hooks'
+import { correlateNativeArtifact } from './native-artifact-correlation'
 import { startCaptureFixture } from './fixtures/native-capture-fixture'
 import { nativeObservationBatch } from './native-hook-ingestion'
+import { stampNativeCapture } from './native-capture-window'
 import { correlateNativeGit } from './native-git-correlation'
 import Database from 'better-sqlite3'
 const cleanup: (() => Promise<void>)[] = []
@@ -413,4 +415,99 @@ it('propagates active execution identity automatically through LocalChannel Git,
     expect.objectContaining({ type: 'ARTIFACT', id: u2Plan.artifactId, revision: 1, key: `ARTIFACT:fixture:${u2Plan.artifactId}:1` }),
     expect.objectContaining({ type: 'PR', id: '202', key: 'PR:fixture:202' })
   ]))
+}, 60000)
+
+it('separates Antigravity contextual activation from verified causal proof, handles multi-session & delegated lineage, and enforces producerWitness', async () => {
+  const f = await fixture()
+  const agPlan = f.service.publish('---\nname: U3 Plan\ndescription: U3 Antigravity fixture\nkind: EXECUTABLE_PLAN\n---\nPRIVATE_U3')
+  const booted = await f.service.bootstrapExecution({ planArtifactId: agPlan.artifactId, expectedPlanRevision: 1 }, f.observe)
+  const snapshot = await f.observe()
+  const activation = {
+    activationId: booted.activationId!,
+    revision: booted.activationRevision!,
+    executionId: booted.executionId,
+    planArtifactId: agPlan.artifactId,
+    planRevision: 1,
+    bindingArtifactId: booted.artifactId,
+    bindingRevision: booted.revision,
+    scope: 'CHECKOUT_OBSERVED' as const
+  }
+
+  const spool = join(f.root, '.code-awareness/native-hooks/antigravity/spool')
+  prepareNativeSpool(spool)
+  const agBinding: NativeHookBinding = {
+    schema: 1, provider: 'antigravity', enabled: true, repositoryId: 'fixture',
+    worktreeId: snapshot.worktreeId, generation: snapshot.worktreeGeneration,
+    ...nativeGitIdentity(f.root), spool, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes'
+  }
+  mkdirSync(join(f.root, '.agents'), { recursive: true })
+  writeFileSync(join(f.root, '.agents/hooks.json'), '{}')
+  writeFileSync(join(f.root, '.code-awareness/native-hooks/antigravity/binding.json'), JSON.stringify(agBinding))
+
+  const path = sessionStorePath(join(f.root, '.git'), 'fixture')
+  const sessions = new SessionStore(path, 'fixture'); cleanup.push(async () => sessions.close())
+
+  const s1Raw = 'ag-session-1', s2Raw = 'ag-session-2'
+  const s1Id = nativeDigest(JSON.stringify(['fixture', 'antigravity', s1Raw]))
+  const s2Id = nativeDigest(JSON.stringify(['fixture', 'antigravity', s2Raw]))
+  const stamp = (ev: ReturnType<typeof normalizeNativeHook>) => stampNativeCapture(ev, agBinding)
+
+  const passiveStart = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBinding, new Date(), { activation }))
+  const passivePre = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'call-passive', name: agBinding.gitCommitTool, input: { operationId: 'op-passive' } } }, agBinding, new Date(), { activation }))
+  const passivePost = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'PostToolUse', toolCall: { id: 'call-passive', name: agBinding.gitCommitTool } }, agBinding, new Date(), { activation }))
+  for (const ev of [passiveStart, passivePre, passivePost]) sessions.registry.apply(nativeObservationBatch(ev), undefined)
+
+  expect(await correlateNativeGit(sessions.registry, agBinding, passivePre.invocationId!, f.git, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+  expect(await correlateNativeArtifact(sessions.registry, agBinding, passivePre.invocationId!, { readReceipt: async () => null, associate: async () => ({ state: 'VERIFIED', conflictingInvocationIds: [] }), invalidate: async () => {} } as any, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+
+  const execGraphPassive = sessions.registry.contextGraph({ kind: 'EXECUTION', id: booted.executionId }, undefined, 2)
+  expect(execGraphPassive.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'observed-in-execution', evidenceKind: 'EXECUTION_CONTEXT_OBSERVED', confidenceClass: 'OBSERVED' })
+  ]))
+  expect(execGraphPassive.edges.some(e => e.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
+
+  const delegatedStart = stamp(normalizeNativeHook({ conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBinding, new Date(), {
+    activation: { ...activation, scope: 'DELEGATED', parentSessionId: s1Id }
+  }))
+  sessions.registry.apply(nativeObservationBatch(delegatedStart), undefined)
+  const s2Graph = sessions.registry.contextGraph({ kind: 'SESSION', id: `antigravity-native:${s2Id}` }, undefined, 2)
+  expect(s2Graph.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'delegated-from', evidenceKind: 'DELEGATED_SESSION_LINEAGE', to: `SESSION:fixture:antigravity-native:${s1Id}` }),
+    expect.objectContaining({ relation: 'observed-in-execution', to: `EXECUTION:fixture:${booted.executionId}` })
+  ]))
+
+  const ops = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  writeFileSync(join(f.root, 'ag-managed.txt'), 'managed u3 commit')
+  const authorityNoHeaderSpoof = authorizeArtifactAgent(authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true), 'fixture', () => true, snapshot.worktreeId, {
+    sessionWitness: { provider: 'antigravity', sessionId: s2Raw, invocationId: 'call-managed' }
+  })
+  const st0 = await ops.getState()
+  const stageRes = await executeGitOperationsTool(ops, 'stage_git_changes', {
+    operationId: 'ag-stage-1', mode: 'STAGE', paths: ['ag-managed.txt'], expectedIndexRevision: st0.indexRevision, expectedWorktreeRevision: st0.worktreeRevision
+  }, undefined, authorityNoHeaderSpoof)
+  expect(stageRes.isError).toBeFalsy()
+  const st = await ops.getState()
+  const commitArgs = { operationId: 'ag-managed-1', message: 'ag commit', expectedHead: st.head, expectedIndexRevision: st.indexRevision }
+  const commitRes = await executeGitOperationsTool(ops, 'commit_git_changes', commitArgs, req => f.service.prepareDeliveryContext(authorityNoHeaderSpoof, req, f.observe), authorityNoHeaderSpoof, () => f.observe().then(() => f.service.resolveExecutionContext(authorityNoHeaderSpoof, undefined, f.observe).then(r => r.anchor)))
+  expect(commitRes.isError).toBeFalsy()
+
+  const s2PreSpoof = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse',
+    toolCall: { id: 'call-unverified', name: agBinding.gitCommitTool, input: commitArgs }
+  }, agBinding, new Date(), { activation }))
+  sessions.registry.apply(nativeObservationBatch(s2PreSpoof), undefined)
+  expect(await correlateNativeGit(sessions.registry, agBinding, s2PreSpoof.invocationId!, f.git, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+
+  const witness = { verifiedBy: 'MANAGED_RUNTIME' as const, sessionId: s2Id }
+  const s2PreManaged = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse',
+    toolCall: { id: 'call-managed', name: agBinding.gitCommitTool, input: commitArgs }
+  }, agBinding, new Date(), { activation, producerWitness: witness }))
+  const s2PostManaged = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PostToolUse',
+    toolCall: { id: 'call-managed', name: agBinding.gitCommitTool, input: commitArgs, response: commitRes }
+  }, agBinding, new Date(), { activation, producerWitness: witness }))
+  sessions.registry.apply(nativeObservationBatch(s2PreManaged), undefined)
+  sessions.registry.apply(nativeObservationBatch(s2PostManaged), undefined)
+  expect(await correlateNativeGit(sessions.registry, agBinding, s2PreManaged.invocationId!, f.git, () => {})).toBe('VERIFIED')
 }, 60000)

@@ -1,4 +1,4 @@
-import { sameDeliveryScope, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
+import { sameDeliveryScope, type AuthenticatedSessionWitness, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
 import { createHash } from 'node:crypto'
 import type { GitService } from '../core/git-service'
 import type { GitOperationalResult } from '../../shared/types/git-management-types'
@@ -19,6 +19,7 @@ export interface GitOperationReceipt {
   createdAt: string
   completedAt?: string
   deliveryContext?: DeliveryAnchor
+  sessionWitness?: AuthenticatedSessionWitness
   deliveryVerified?: boolean
   deliveryStatus?: 'BOUND' | 'UNBOUND' | 'VERIFIED' | 'UNVERIFIED'
   result?: LegacyGitReceiptResult
@@ -45,11 +46,11 @@ export function isReceiptedGitMutation(name: string, args: Record<string, unknow
 export class GitOperationReceipts {
   constructor(private readonly root: string, private readonly git: GitService) {}
 
-  async execute(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<LegacyGitReceiptResult> {
-    return encodeGitReceiptResult(await this.executeResult(operationId, operation, args, async () => decodeGitReceiptResult(await mutate()), prepareDelivery))
+  async execute(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: { sessionWitness?: AuthenticatedSessionWitness }): Promise<LegacyGitReceiptResult> {
+    return encodeGitReceiptResult(await this.executeResult(operationId, operation, args, async () => decodeGitReceiptResult(await mutate()), prepareDelivery, options))
   }
 
-  async executeResult(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<GitOperationalResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<GitOperationalResult> {
+  async executeResult(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<GitOperationalResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: { sessionWitness?: AuthenticatedSessionWitness }): Promise<GitOperationalResult> {
     const operationalFailure = (value: Record<string, unknown>): GitOperationalResult => ({ value, isError: true })
     const fingerprint = gitReceiptFingerprint(operation, args)
     const recover = (receipt: GitOperationReceipt): GitOperationalResult => {
@@ -61,7 +62,7 @@ export class GitOperationReceipts {
     const existing = await this.git.readOperationReceipt(this.root, operationId)
     if (existing) return recover(existing.receipt)
     const deliveryContext = prepareDelivery ? await prepareDelivery() : undefined
-    const receipt: GitOperationReceipt = { operationId, operation, argumentFingerprint: fingerprint, status: 'PREPARED', createdAt: new Date().toISOString(), ...(deliveryContext ? { deliveryContext } : { deliveryStatus: 'UNBOUND' }) }
+    const receipt: GitOperationReceipt = { operationId, operation, argumentFingerprint: fingerprint, status: 'PREPARED', createdAt: new Date().toISOString(), ...(deliveryContext ? { deliveryContext } : { deliveryStatus: 'UNBOUND' }), ...(options?.sessionWitness ? { sessionWitness: options.sessionWitness } : {}) }
     const prepared = await this.git.prepareOperationReceipt(this.root, receipt)
     if (!prepared.created) return recover(prepared.receipt)
     const result = await mutate()
