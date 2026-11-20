@@ -29,6 +29,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/session-context/focal-discovery.test.ts',
   'src/main/session-context/hookless-source-recovery.test.ts',
   'src/main/session-context/agent-behavior-investigation.test.ts',
+  'src/main/session-context/native-addressability.test.ts',
   'src/main/session-context/context-economy.test.ts',
   'src/main/session-context/target.test.ts',
   'src/main/session-context/selective-ingestion.test.ts',

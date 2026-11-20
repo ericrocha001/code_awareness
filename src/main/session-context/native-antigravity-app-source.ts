@@ -1,18 +1,25 @@
 import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync, type BigIntStats } from 'node:fs'
+import { closeSync, fstatSync, lstatSync, realpathSync, type BigIntStats } from 'node:fs'
 import { dirname, isAbsolute, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertProfilePath, assertUserOwned } from '../local-mcp-clients/safe-config-file'
 import { antigravityAppLocatorDigest, antigravityAppSessionId, antigravityAppTranscriptPath } from './antigravity-app-locator'
 import { boundedFile, nativeDigest, sameNativePath } from './native-hooks'
-import type { NativeSourceAttemptRef, NativeSourceEvent } from './native-source-events'
-import { sanitize } from './privacy'
+import type { NativeSourceEventType } from './native-source-events'
+import {
+  applyAttemptOutcome,
+  emitIndexedEvent,
+  openNoFollowReadOnly,
+  runNativeReferenceStep,
+  type NativeIndexedSourceHandle,
+  type NativeReferenceStepResult,
+  type NativeStepBudget,
+  type StepAccumulator
+} from './native-source-index'
+import { NATIVE_ANTIGRAVITY_NORMALIZER, nativeReferenceKey, type NativeSessionReferences } from './native-session-references'
+import { digest, sanitize } from './privacy'
 
-const maxBytes = 8 * 1024 * 1024
-const maxRecordBytes = 512 * 1024
-const maxRecords = 16_384
-const maxEvents = 512
 const maxDiscoveryRows = 256
 const maxDiscoveryResults = 20
 const sha256Pattern = /^[a-f0-9]{64}$/
@@ -196,7 +203,106 @@ function summaryRowMatchesWorktree(
   }
 }
 
-function readTranscriptChecked(path: string, profile: string, assertCurrent: () => void) {
+interface DecodedAntigravityPart {
+  part: number
+  type: NativeSourceEventType
+  timestamp: string
+  rawText: string
+  tool?: string
+  status?: string
+  pairing?: string
+  errorKind?: string
+  isAttempt?: boolean
+}
+
+function decodeAntigravityRecordParts(rawRecord: unknown): { timestamp: string; parts: DecodedAntigravityPart[]; omitted: boolean } {
+  const entry = rawRecord as Record<string, unknown> | null
+  if (
+    !entry ||
+    !Number.isSafeInteger(entry.step_index) ||
+    (entry.step_index as number) < 0 ||
+    typeof entry.type !== 'string' ||
+    typeof entry.source !== 'string' ||
+    typeof entry.created_at !== 'string' ||
+    !Number.isFinite(Date.parse(entry.created_at))
+  ) {
+    throw new Error('FORMAT_UNSUPPORTED')
+  }
+  const ts = entry.created_at
+  const parts: DecodedAntigravityPart[] = []
+  if (entry.type === 'USER_INPUT' && (entry.source === 'USER_EXPLICIT' || entry.source === 'USER') && typeof entry.content === 'string') {
+    parts.push({ part: 0, type: 'INPUT', timestamp: ts, rawText: entry.content })
+    return { timestamp: ts, parts, omitted: false }
+  }
+  if (entry.type === 'PLANNER_RESPONSE' && entry.source === 'MODEL') {
+    let part = 0
+    if (Array.isArray(entry.tool_calls)) {
+      for (const tc of entry.tool_calls as { name?: unknown; args?: unknown }[]) {
+        if (!tc || typeof tc.name !== 'string') continue
+        const tool = sanitize(tc.name).slice(0, 80)
+        const rawArgs = tc.args !== undefined ? JSON.stringify(tc.args) : '{}'
+        const status = entry.status === 'ERROR' ? 'FAILURE' : 'UNKNOWN'
+        parts.push({ part: part++, type: 'TOOL_CALL', timestamp: ts, rawText: rawArgs, tool, status, pairing: 'NO_NATIVE_CALL_PAIR_ID', isAttempt: true })
+      }
+    }
+    if (typeof entry.content === 'string' && entry.content.length > 0) {
+      parts.push({ part: part++, type: 'AGENT_UPDATE', timestamp: ts, rawText: entry.content })
+    }
+    if (entry.status === 'ERROR' || typeof entry.error === 'string') {
+      const errorKind = typeof entry.error_code === 'string' ? entry.error_code : 'PLANNER_ERROR'
+      const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
+      parts.push({ part: part++, type: 'ERROR', timestamp: ts, rawText: rawErr, status: 'FAILURE', errorKind })
+    }
+    return { timestamp: ts, parts, omitted: false }
+  }
+  if (entry.type === 'ERROR_MESSAGE' || entry.status === 'ERROR' || typeof entry.error === 'string') {
+    const errorKind = typeof entry.error_code === 'string' ? entry.error_code : entry.type === 'ERROR_MESSAGE' ? 'ERROR_MESSAGE' : `${entry.type}_ERROR`
+    const refusal = /(?:DENIED|REJECTED|REFUSED)/i.test(errorKind)
+    const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
+    parts.push({ part: 0, type: 'ERROR', timestamp: ts, rawText: rawErr, status: refusal ? 'REFUSAL' : 'FAILURE', errorKind })
+    return { timestamp: ts, parts, omitted: false }
+  }
+  if ((entry.type === 'GENERIC' || entry.type === 'GENERATE_IMAGE') && entry.source === 'MODEL' && typeof entry.content === 'string' && entry.content.length > 0) {
+    parts.push({ part: 0, type: 'TOOL_RESULT', timestamp: ts, rawText: entry.content, status: 'UNKNOWN', pairing: 'NO_NATIVE_CALL_PAIR_ID' })
+    return { timestamp: ts, parts, omitted: false }
+  }
+  return { timestamp: ts, parts, omitted: true }
+}
+
+export function extractAntigravityRecordPart(record: unknown, partIndex: number): string | undefined {
+  return decodeAntigravityRecordParts(record).parts.find(p => p.part === partIndex)?.rawText
+}
+
+export function openAntigravitySourceHandle(options: {
+  storePath: string
+  repositoryId: string
+  nativeHash: string
+  sourceSessionId: string
+  locatorDigest?: string
+  worktreeRoot?: string
+  registryVerifiedOrigin?: boolean
+  assertCurrent: () => void
+}): NativeIndexedSourceHandle {
+  const { storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent } = options
+  if (!antigravityAppSessionId.test(sourceSessionId) ||
+    nativeDigest(JSON.stringify([repositoryId, 'antigravity', sourceSessionId])) !== nativeHash) throw new Error('IDENTITY_MISMATCH')
+  const { configPath, configText, profile } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
+  const directory = dirname(storePath)
+
+  const path = antigravityAppTranscriptPath(profile, sourceSessionId)
+  if (locatorDigest !== undefined && antigravityAppLocatorDigest(sourceSessionId, path) !== locatorDigest) throw new Error('IDENTITY_MISMATCH')
+  const verifyWorktreeOrigin = () => {
+    if (locatorDigest === undefined) {
+      if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
+      const resolvedRoot = realpathSync.native(worktreeRoot)
+      const dbMatch = summaryRowMatchesWorktree(profile, sourceSessionId, resolvedRoot, assertCurrent)
+      if (dbMatch === 'MISMATCHED') throw new Error('ORIGIN_UNVERIFIED')
+      if (dbMatch === 'UNAVAILABLE' && !registryVerifiedOrigin) throw new Error('ORIGIN_UNVERIFIED')
+    }
+  }
+  verifyWorktreeOrigin()
+
+  const effectiveLocator = locatorDigest ?? canonicalLocatorHash(path)
   assertCurrent()
   let stat: BigIntStats
   try {
@@ -207,22 +313,31 @@ function readTranscriptChecked(path: string, profile: string, assertCurrent: () 
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('SOURCE_NOT_FOUND')
     throw error
   }
-  if (stat.size > BigInt(maxBytes)) throw new Error('SOURCE_LIMIT_REACHED')
+  if (stat.size === 0n) throw new Error('FORMAT_UNSUPPORTED')
   const identity = fingerprint(stat)
-  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  const fd = openNoFollowReadOnly(path)
   try {
     if (fingerprint(fstatSync(fd, { bigint: true })) !== identity) throw new Error('SOURCE_STALE')
-    const data = Buffer.alloc(Number(stat.size))
-    for (let offset = 0; offset < data.length;) {
-      assertCurrent()
-      const count = readSync(fd, data, offset, Math.min(65536, data.length - offset), offset)
-      if (!count) throw new Error('SOURCE_STALE')
-      offset += count
+    const resolvedRoot = worktreeRoot ? realpathSync.native(worktreeRoot) : ''
+    return {
+      fd,
+      path,
+      profile,
+      identity,
+      sizeBytes: Number(stat.size),
+      locatorHash: digest(JSON.stringify([path, effectiveLocator, resolvedRoot, configText])),
+      liveFingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])),
+      assertPath: () => {
+        assertProfilePath(path, profile)
+        assertProfilePath(configPath, directory)
+      },
+      configUnchanged: () => boundedFile(configPath, 65536) === configText,
+      verifyAfterClose: verifyWorktreeOrigin
     }
-    if (fingerprint(fstatSync(fd, { bigint: true })) !== identity) throw new Error('SOURCE_STALE')
-    try { return { identity, text: new TextDecoder('utf-8', { fatal: true }).decode(data) } }
-    catch { throw new Error('FORMAT_UNSUPPORTED') }
-  } finally { closeSync(fd) }
+  } catch (error) {
+    closeSync(fd)
+    throw error
+  }
 }
 
 export function discoverAntigravityAppSources(options: {
@@ -360,127 +475,75 @@ export function discoverAntigravityAppSources(options: {
   }
 }
 
-export function antigravityAppSourceSnapshot(options: {
+export function stepAntigravityAppSourceIndex(options: {
+  refs: NativeSessionReferences
   storePath: string
   repositoryId: string
+  worktreeId: string
+  generation: string
   nativeHash: string
   sourceSessionId: string
   locatorDigest?: string
   worktreeRoot?: string
   registryVerifiedOrigin?: boolean
+  mode: 'READ_ONLY' | 'ON_DEMAND' | 'STEP'
+  stepBudget?: NativeStepBudget
+  onReady?: (ready: { summary: import('./native-session-references').NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
   assertCurrent: () => void
-}) {
-  const { storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent } = options
-  if (!antigravityAppSessionId.test(sourceSessionId) ||
-    nativeDigest(JSON.stringify([repositoryId, 'antigravity', sourceSessionId])) !== nativeHash) throw new Error('IDENTITY_MISMATCH')
-  const { configPath, configText, profile } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
-  const directory = dirname(storePath)
-
-  const path = antigravityAppTranscriptPath(profile, sourceSessionId)
-  if (locatorDigest !== undefined && antigravityAppLocatorDigest(sourceSessionId, path) !== locatorDigest) throw new Error('IDENTITY_MISMATCH')
-  if (locatorDigest === undefined) {
-    if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
-    const resolvedRoot = realpathSync.native(worktreeRoot)
-    const dbMatch = summaryRowMatchesWorktree(profile, sourceSessionId, resolvedRoot, assertCurrent)
-    if (dbMatch === 'MISMATCHED') throw new Error('ORIGIN_UNVERIFIED')
-    if (dbMatch === 'UNAVAILABLE' && !registryVerifiedOrigin) throw new Error('ORIGIN_UNVERIFIED')
-  }
-
-  const effectiveLocator = locatorDigest ?? canonicalLocatorHash(path)
-  const { identity, text } = readTranscriptChecked(path, profile, assertCurrent)
-
-  if (!text.trim() || !text.endsWith('\n')) throw new Error('FORMAT_UNSUPPORTED')
-  const events: NativeSourceEvent[] = []
-  const attempts: NativeSourceAttemptRef[] = []
-  let omitted = 0
-  let ordinal = 0
-  const pushEvent = (part: number, type: NativeSourceEvent['type'], timestamp: string, rawText: string, extra: Partial<NativeSourceEvent> = {}) => {
-    if (events.length >= maxEvents) { omitted++; return undefined }
-    const content = sanitize(rawText), payloadDigest = nativeDigest(content)
-    const event: NativeSourceEvent = {
-      eventId: nativeDigest(JSON.stringify([identity, ordinal, part, payloadDigest])),
-      ordinal,
-      type,
-      ...(extra.tool ? { tool: extra.tool } : {}),
-      ...(extra.status ? { status: extra.status } : {}),
-      ...(extra.pairing ? { pairing: extra.pairing } : {}),
-      ...(extra.errorKind ? { errorKind: extra.errorKind } : {}),
-      bytes: Buffer.byteLength(content),
-      payloadDigest,
-      content,
-      sanitized: rawText !== content
-    }
-    events.push(event)
-    return event
-  }
-  for (let offset = 0; offset < text.length;) {
-    assertCurrent()
-    const next = text.indexOf('\n', offset)
-    const line = text.slice(offset, next)
-    offset = next + 1
-    if (++ordinal > maxRecords) throw new Error('SOURCE_LIMIT_REACHED')
-    if (Buffer.byteLength(line) > maxRecordBytes) throw new Error('SOURCE_LIMIT_REACHED')
-    let entry
-    try { entry = JSON.parse(line) } catch { throw new Error('FORMAT_UNSUPPORTED') }
-    if (!Number.isSafeInteger(entry?.step_index) || entry.step_index < 0 || typeof entry.type !== 'string' ||
-      typeof entry.source !== 'string' || typeof entry.created_at !== 'string' || !Number.isFinite(Date.parse(entry.created_at))) throw new Error('FORMAT_UNSUPPORTED')
-    const ts = entry.created_at as string
-    if (entry.type === 'USER_INPUT' && (entry.source === 'USER_EXPLICIT' || entry.source === 'USER') && typeof entry.content === 'string') {
-      pushEvent(0, 'INPUT', ts, entry.content)
-      continue
-    }
-    if (entry.type === 'PLANNER_RESPONSE' && entry.source === 'MODEL') {
-      let part = 0
-      if (Array.isArray(entry.tool_calls)) {
-        for (const tc of entry.tool_calls as { name?: unknown; args?: unknown }[]) {
-          if (!tc || typeof tc.name !== 'string') continue
-          const tool = sanitize(tc.name).slice(0, 80)
-          const rawArgs = tc.args !== undefined ? JSON.stringify(tc.args) : '{}'
-          const ev = pushEvent(part++, 'TOOL_CALL', ts, rawArgs, { tool, status: entry.status === 'ERROR' ? 'FAILURE' : 'UNKNOWN', pairing: 'NO_NATIVE_CALL_PAIR_ID' })
-          if (ev) attempts.push({ eventId: ev.eventId, ordinal, timestamp: ts, tool, status: ev.status!, pairing: 'NO_NATIVE_CALL_PAIR_ID' })
+}): NativeReferenceStepResult {
+  const {
+    refs, storePath, repositoryId, worktreeId, generation, nativeHash, sourceSessionId,
+    locatorDigest, worktreeRoot, registryVerifiedOrigin, mode, stepBudget, onReady, assertCurrent
+  } = options
+  const nativeKey = nativeReferenceKey('antigravity', repositoryId, worktreeId, generation, sourceSessionId)
+  return runNativeReferenceStep({
+    refs,
+    nativeKey,
+    provider: 'antigravity',
+    repositoryId,
+    worktreeId,
+    generation,
+    sourceSessionId,
+    normalizer: NATIVE_ANTIGRAVITY_NORMALIZER,
+    sourceCoverage: 'TYPED_SOURCE_EVENTS_UNPAIRED_TOOLS',
+    attemptCoverage: 'NO_NATIVE_CALL_PAIR_ID',
+    formatError: 'FORMAT_UNSUPPORTED',
+    staleError: 'SOURCE_STALE',
+    mode,
+    stepBudget,
+    onReady,
+    assertCurrent,
+    openHandle: () => openAntigravitySourceHandle({
+      storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent
+    }),
+    makeEventId: (ordinal, part, payloadDigest) => nativeDigest(JSON.stringify(['antigravity', sourceSessionId, ordinal, part, payloadDigest])),
+    processRecord: (rawRecord, lineStart, lineEnd, acc: StepAccumulator) => {
+      acc.state.ordinal++
+      const ordinal = acc.state.ordinal
+      const decoded = decodeAntigravityRecordParts(rawRecord)
+      if (decoded.omitted) {
+        acc.state.omittedRecords++
+        return
+      }
+      for (const p of decoded.parts) {
+        emitIndexedEvent(acc, {
+          ordinal,
+          part: p.part,
+          type: p.type,
+          rawText: p.rawText,
+          timestamp: p.timestamp,
+          tool: p.tool,
+          status: p.status,
+          pairing: p.pairing,
+          errorKind: p.errorKind,
+          lineStart,
+          lineEnd
+        })
+        if (p.isAttempt) {
+          acc.state.attemptCounts.total++
+          applyAttemptOutcome(acc.state.attemptCounts, p.status ?? 'UNKNOWN')
         }
       }
-      if (typeof entry.content === 'string' && entry.content.length > 0) {
-        pushEvent(part++, 'AGENT_UPDATE', ts, entry.content)
-      }
-      if (entry.status === 'ERROR' || typeof entry.error === 'string') {
-        const errorKind = typeof entry.error_code === 'string' ? entry.error_code : 'PLANNER_ERROR'
-        const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
-        pushEvent(part++, 'ERROR', ts, rawErr, { status: 'FAILURE', errorKind })
-      }
-      continue
     }
-    if (entry.type === 'ERROR_MESSAGE' || entry.status === 'ERROR' || typeof entry.error === 'string') {
-      const errorKind = typeof entry.error_code === 'string' ? entry.error_code : entry.type === 'ERROR_MESSAGE' ? 'ERROR_MESSAGE' : `${entry.type}_ERROR`
-      const refusal = /(?:DENIED|REJECTED|REFUSED)/i.test(errorKind)
-      const rawErr = typeof entry.error === 'string' ? entry.error : typeof entry.content === 'string' ? entry.content : errorKind
-      pushEvent(0, 'ERROR', ts, rawErr, { status: refusal ? 'REFUSAL' : 'FAILURE', errorKind })
-      continue
-    }
-    if ((entry.type === 'GENERIC' || entry.type === 'GENERATE_IMAGE') && entry.source === 'MODEL' && typeof entry.content === 'string' && entry.content.length > 0) {
-      pushEvent(0, 'TOOL_RESULT', ts, entry.content, { status: 'UNKNOWN', pairing: 'NO_NATIVE_CALL_PAIR_ID' })
-      continue
-    }
-    omitted++
-  }
-  assertCurrent()
-  try {
-    assertProfilePath(path, profile)
-    assertProfilePath(configPath, directory)
-    if (fingerprint(lstatSync(path, { bigint: true })) !== identity || boundedFile(configPath, 65536) !== configText) throw new Error()
-  } catch { throw new Error('SOURCE_STALE') }
-  if (locatorDigest === undefined) {
-    if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
-    const dbMatch = summaryRowMatchesWorktree(profile, sourceSessionId, realpathSync.native(worktreeRoot), assertCurrent)
-    if (dbMatch === 'MISMATCHED' || (dbMatch === 'UNAVAILABLE' && !registryVerifiedOrigin)) throw new Error('ORIGIN_UNVERIFIED')
-  }
-  if (!events.length) throw new Error('SOURCE_CONTENT_UNAVAILABLE')
-  return {
-    fingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])),
-    events,
-    attempts,
-    omitted,
-    sourceCoverage: 'TYPED_SOURCE_EVENTS_UNPAIRED_TOOLS' as const,
-    attemptCoverage: 'NO_NATIVE_CALL_PAIR_ID' as const
-  }
+  })
 }
