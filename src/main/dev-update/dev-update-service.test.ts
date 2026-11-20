@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
-import { DevSyncService } from './dev-sync-service'
-import type { IDevSyncSupervisorClient } from './dev-sync-supervisor-client'
+import { DevUpdateService } from './dev-update-service'
+import type { IDevUpdateSupervisorClient } from './dev-update-supervisor-client'
 import type { GitService } from '../core/git-service'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 
@@ -46,7 +46,7 @@ function createMockRuntimeIdentity(overrides: {
   } as unknown as RuntimeIdentityProvider
 }
 
-function createMockSupervisor(available = true): IDevSyncSupervisorClient & { receipts: Map<string, any> } {
+function createMockSupervisor(available = true): IDevUpdateSupervisorClient & { receipts: Map<string, any> } {
   const receipts = new Map<string, any>()
   return {
     receipts,
@@ -72,19 +72,19 @@ function createMockGitService(overrides: Partial<GitService> = {}) {
   } as unknown as GitService
 }
 
-describe('DevSyncService', () => {
+describe('DevUpdateService', () => {
   it('rejects execution when in production or packaged mode', async () => {
     const identity = createMockRuntimeIdentity({ mode: 'production' })
     const supervisor = createMockSupervisor()
     const git = createMockGitService()
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('UNSUPPORTED')
     expect(result.message).toContain('modo de desenvolvimento')
   })
@@ -93,14 +93,14 @@ describe('DevSyncService', () => {
     const identity = createMockRuntimeIdentity()
     const supervisor = createMockSupervisor(false)
     const git = createMockGitService()
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('UNSUPPORTED')
     expect(result.message).toContain('Supervisor não está acessível')
   })
@@ -109,14 +109,14 @@ describe('DevSyncService', () => {
     const identity = createMockRuntimeIdentity({ instanceId: 'actual-inst' })
     const supervisor = createMockSupervisor()
     const git = createMockGitService()
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'different-inst' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'different-inst' })
     expect(result.status).toBe('INSTANCE_MISMATCH')
     expect(result.oldInstanceId).toBe('actual-inst')
   })
@@ -125,14 +125,14 @@ describe('DevSyncService', () => {
     const identity = createMockRuntimeIdentity({ detached: true })
     const supervisor = createMockSupervisor()
     const git = createMockGitService()
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('DETACHED_HEAD')
   })
 
@@ -142,14 +142,14 @@ describe('DevSyncService', () => {
     const git = createMockGitService({
       getModifiedFiles: vi.fn(async () => [{ relativePath: 'src/main.ts', name: 'main.ts', changeType: 'modified' as const, mtime: 100, size: 100 }])
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('DIRTY_WORKTREE')
     expect(supervisor.reserve).not.toHaveBeenCalled()
   })
@@ -160,14 +160,14 @@ describe('DevSyncService', () => {
     const git = createMockGitService({
       getUpstreamReference: vi.fn(async () => ({ remote: 'origin', ref: 'refs/heads/main', trackingHead: 'upstream-head' }))
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('ASYMMETRIC_TRACKING_UNSUPPORTED')
   })
 
@@ -177,14 +177,14 @@ describe('DevSyncService', () => {
     const git = createMockGitService({
       fetchRemote: vi.fn(async () => { throw new Error('Remote host unreachable') })
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('FAILED')
     expect(result.message).toContain('Remote host unreachable')
     expect(supervisor.cancel).toHaveBeenCalledWith('op-1')
@@ -198,14 +198,14 @@ describe('DevSyncService', () => {
       getUpstreamReference: vi.fn(async () => ({ remote: 'origin', ref: 'refs/heads/main', trackingHead: 'head-behind' })),
       compareCommits: vi.fn(async () => ({ ahead: 2, behind: 1 }))
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
+    const result = await service.executeDevUpdate({ operationId: 'op-1', expectedInstanceId: 'test-instance-123' })
     expect(result.status).toBe('AHEAD_OR_DIVERGED')
     expect(supervisor.cancel).toHaveBeenCalledWith('op-1')
   })
@@ -218,14 +218,14 @@ describe('DevSyncService', () => {
       getUpstreamReference: vi.fn(async () => ({ remote: 'origin', ref: 'refs/heads/main', trackingHead: 'head-sha-2' })),
       isCommitReachable: vi.fn(async () => false)
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({
+    const result = await service.executeDevUpdate({
       operationId: 'op-1',
       expectedInstanceId: 'test-instance-123',
       expectedIntegratedCommit: 'commit-from-pr'
@@ -245,23 +245,24 @@ describe('DevSyncService', () => {
       compareCommits: vi.fn(async () => ({ ahead: 0, behind: 1 })),
       pullFastForward: vi.fn(async () => { currentHash = 'head-sha-2' })
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: shutdownFn
     })
 
-    const result = await service.executeDevSync({
-      operationId: 'op-successful-sync',
+    const result = await service.executeDevUpdate({
+      operationId: 'op-successful-update',
       expectedInstanceId: 'test-instance-123'
     })
 
     expect(result.status).toBe('SCHEDULED')
     expect(result.head).toBe('head-sha-2')
+    expect(result.message).toContain('DevUpdate agendado')
     expect(git.pullFastForward).toHaveBeenCalledWith('/app/root', 'origin', 'main')
     expect(supervisor.commit).toHaveBeenCalledWith({
-      operationId: 'op-successful-sync',
+      operationId: 'op-successful-update',
       origin: { rootPath: '/app/root', branch: 'main' },
       expectedHead: 'head-sha-2',
       oldInstanceId: 'test-instance-123'
@@ -280,14 +281,14 @@ describe('DevSyncService', () => {
       getCurrentCommitHash: vi.fn(async () => 'head-same'),
       getUpstreamReference: vi.fn(async () => ({ remote: 'origin', ref: 'refs/heads/main', trackingHead: 'head-same' }))
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({
+    const result = await service.executeDevUpdate({
       operationId: 'op-already-current',
       expectedInstanceId: 'test-instance-123',
       caller: 'MCP'
@@ -307,15 +308,15 @@ describe('DevSyncService', () => {
       getCurrentCommitHash: vi.fn(async () => 'head-same'),
       getUpstreamReference: vi.fn(async () => ({ remote: 'origin', ref: 'refs/heads/main', trackingHead: 'head-same' }))
     })
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: git,
       requestShutdown: shutdownFn
     })
 
-    const result = await service.executeDevSync({
-      operationId: 'op-ui-sync',
+    const result = await service.executeDevUpdate({
+      operationId: 'op-ui-update',
       expectedInstanceId: 'test-instance-123',
       caller: 'UI'
     })

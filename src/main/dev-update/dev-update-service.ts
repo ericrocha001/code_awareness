@@ -1,17 +1,16 @@
 import { realpathSync } from 'node:fs'
 import type { GitService } from '../core/git-service'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
-import type { IDevSyncSupervisorClient } from './dev-sync-supervisor-client'
+import type { IDevUpdateSupervisorClient } from './dev-update-supervisor-client'
 import type {
-  DevSyncAvailability,
-  DevSyncRequest,
-  DevSyncResult,
-  DevSyncStatus
-} from './dev-sync-types'
+  DevUpdateAvailability,
+  DevUpdateRequest,
+  DevUpdateResult
+} from './dev-update-types'
 
-export interface DevSyncServiceOptions {
+export interface DevUpdateServiceOptions {
   runtimeIdentity: RuntimeIdentityProvider
-  supervisor: IDevSyncSupervisorClient
+  supervisor: IDevUpdateSupervisorClient
   gitService: GitService
   requestShutdown: () => void
   supervisorRoot?: string
@@ -19,13 +18,13 @@ export interface DevSyncServiceOptions {
   isPreview?: () => boolean
 }
 
-export class DevSyncService {
-  private lastResult: DevSyncResult | null = null
+export class DevUpdateService {
+  private lastResult: DevUpdateResult | null = null
   private inFlightOperationId: string | null = null
 
-  constructor(private readonly options: DevSyncServiceOptions) {}
+  constructor(private readonly options: DevUpdateServiceOptions) {}
 
-  async getAvailability(): Promise<DevSyncAvailability> {
+  async getAvailability(): Promise<DevUpdateAvailability> {
     const isPackaged = this.options.isPackaged ? this.options.isPackaged() : false
     const isPreview = this.options.isPreview
       ? this.options.isPreview()
@@ -35,7 +34,7 @@ export class DevSyncService {
     if (isPackaged || runtime.mode !== 'development') {
       return {
         available: false,
-        reason: 'DevSync está disponível apenas em modo de desenvolvimento.',
+        reason: 'DevUpdate está disponível apenas em modo de desenvolvimento.',
         supervisorConnected: false
       }
     }
@@ -43,7 +42,7 @@ export class DevSyncService {
     if (isPreview) {
       return {
         available: false,
-        reason: 'DevSync desativado em instâncias de Runtime Preview.',
+        reason: 'DevUpdate desativado em instâncias de Runtime Preview.',
         supervisorConnected: false
       }
     }
@@ -102,7 +101,7 @@ export class DevSyncService {
         status: lastSupervisorStatus.status,
         head: lastSupervisorStatus.head,
         newInstanceId: lastSupervisorStatus.newInstanceId,
-        message: `DevSync concluído com sucesso. HEAD: ${lastSupervisorStatus.head?.slice(0, 8)}`
+        message: `DevUpdate concluído com sucesso. HEAD: ${lastSupervisorStatus.head?.slice(0, 8)}`
       }
     }
 
@@ -115,16 +114,16 @@ export class DevSyncService {
     }
   }
 
-  getLastResult(): DevSyncResult | null {
+  getLastResult(): DevUpdateResult | null {
     return this.lastResult
   }
 
-  async executeDevSync(request: DevSyncRequest): Promise<DevSyncResult> {
+  async executeDevUpdate(request: DevUpdateRequest): Promise<DevUpdateResult> {
     if (this.inFlightOperationId && this.inFlightOperationId !== request.operationId) {
       return {
         operationId: request.operationId,
         status: 'BUSY',
-        message: 'Uma operação DevSync já está em andamento nesta instância.'
+        message: 'Uma operação DevUpdate já está em andamento nesta instância.'
       }
     }
 
@@ -154,7 +153,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'UNSUPPORTED',
-        message: 'DevSync está disponível apenas em modo de desenvolvimento.'
+        message: 'DevUpdate está disponível apenas em modo de desenvolvimento.'
       }
     }
 
@@ -162,7 +161,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'UNSUPPORTED',
-        message: 'DevSync desativado em instâncias de Runtime Preview.'
+        message: 'DevUpdate desativado em instâncias de Runtime Preview.'
       }
     }
 
@@ -199,7 +198,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'DETACHED_HEAD',
-        message: 'DevSync exige uma branch ativa; HEAD está detached.'
+        message: 'DevUpdate exige uma branch ativa; HEAD está detached.'
       }
     }
 
@@ -227,7 +226,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'DIRTY_WORKTREE',
-        message: `Checkout possui ${modifiedFiles.length} arquivo(s) modificados ou não rastreados. DevSync requer worktree limpa.`
+        message: `Checkout possui ${modifiedFiles.length} arquivo(s) modificados ou não rastreados. DevUpdate requer worktree limpa.`
       }
     }
 
@@ -246,7 +245,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'ASYMMETRIC_TRACKING_UNSUPPORTED',
-        message: `Tracking assimétrico ('${branch}' aponta para '${upstream.ref}') não é suportado pelo DevSync.`
+        message: `Tracking assimétrico ('${branch}' aponta para '${upstream.ref}') não é suportado pelo DevUpdate.`
       }
     }
 
@@ -256,7 +255,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'BUSY',
-        message: 'Outra operação de sincronização ou reinício já está reservada no supervisor.'
+        message: 'Outra operação de atualização ou reinício já está reservada no supervisor.'
       }
     }
 
@@ -357,7 +356,7 @@ export class DevSyncService {
             operationId: request.operationId,
             status: 'AHEAD_OR_DIVERGED',
             details: comparison ? { ahead: comparison.ahead, behind: comparison.behind } : undefined,
-            message: `A branch local possui commits ahead (${comparison?.ahead ?? '?'}) em relação ao upstream. DevSync aceita apenas avanço fast-forward.`
+            message: `A branch local possui commits ahead (${comparison?.ahead ?? '?'}) em relação ao upstream. DevUpdate aceita apenas avanço fast-forward.`
           }
         }
 
@@ -406,12 +405,12 @@ export class DevSyncService {
         }
       }
 
-      const scheduledResult: DevSyncResult = {
+      const scheduledResult: DevUpdateResult = {
         operationId: request.operationId,
         status: 'SCHEDULED',
         head: targetHead,
         oldInstanceId: runtime.instanceId,
-        message: 'DevSync agendado com sucesso. Reiniciando o runtime de desenvolvimento...',
+        message: 'DevUpdate agendado com sucesso. Reiniciando o runtime de desenvolvimento...',
         postResponse: async () => {
           this.options.requestShutdown()
         }
@@ -427,7 +426,7 @@ export class DevSyncService {
       return {
         operationId: request.operationId,
         status: 'FAILED',
-        message: `Erro inesperado durante DevSync: ${errorMsg}`
+        message: `Erro inesperado durante DevUpdate: ${errorMsg}`
       }
     }
   }

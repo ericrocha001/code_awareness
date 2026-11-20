@@ -1,7 +1,7 @@
 import { createConnection, type Socket } from 'node:net'
-import type { DevSyncSupervisorReceipt } from './dev-sync-types'
+import type { DevUpdateSupervisorReceipt } from './dev-update-types'
 
-export interface IDevSyncSupervisorClient {
+export interface IDevUpdateSupervisorClient {
   isAvailable(): boolean
   reserve(operationId: string): Promise<boolean>
   cancel(operationId: string): Promise<boolean>
@@ -17,10 +17,12 @@ export interface IDevSyncSupervisorClient {
     sourceOrigin?: unknown
     freshness?: unknown
   }): Promise<boolean>
-  getStatus(operationId?: string): Promise<DevSyncSupervisorReceipt | null>
+  getStatus(operationId?: string): Promise<DevUpdateSupervisorReceipt | null>
 }
 
-export class DevSyncSupervisorClient implements IDevSyncSupervisorClient {
+// Legado técnico intencional: literais privados wire DEV_SYNC_* preservados para
+// interoperabilidade com o Dev Supervisor que pode sobreviver à troca de código Electron.
+export class DevUpdateSupervisorClient implements IDevUpdateSupervisorClient {
   constructor(
     private readonly endpoint = process.env.CODE_AWARENESS_DEV_SUPERVISOR_ENDPOINT,
     private readonly token = process.env.CODE_AWARENESS_DEV_SUPERVISOR_TOKEN
@@ -101,11 +103,11 @@ export class DevSyncSupervisorClient implements IDevSyncSupervisorClient {
     return response === 'ACK'
   }
 
-  async getStatus(operationId?: string): Promise<DevSyncSupervisorReceipt | null> {
+  async getStatus(operationId?: string): Promise<DevUpdateSupervisorReceipt | null> {
     const response = await this.executeCommand({ action: 'GET_DEV_SYNC_STATUS', operationId })
     if (!response) return null
     try {
-      const parsed = JSON.parse(response) as DevSyncSupervisorReceipt
+      const parsed = JSON.parse(response) as DevUpdateSupervisorReceipt
       return parsed.status === 'NONE' ? null : parsed
     } catch {
       return null

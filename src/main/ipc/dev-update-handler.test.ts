@@ -1,6 +1,6 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { registerDevSyncHandlers } from './dev-sync-handler'
-import type { DevSyncService } from '../dev-sync/dev-sync-service'
+import { registerDevUpdateHandlers } from './dev-update-handler'
+import type { DevUpdateService } from '../dev-update/dev-update-service'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 
 const handlers = new Map<string, (...args: any[]) => Promise<any>>()
@@ -13,36 +13,36 @@ vi.mock('electron', () => ({
   }
 }))
 
-describe('registerDevSyncHandlers', () => {
+describe('registerDevUpdateHandlers', () => {
   beforeEach(() => {
     handlers.clear()
   })
 
-  it('registers devsync:get-status and devsync:request-sync channels', async () => {
+  it('registers devupdate:get-status and devupdate:request-update channels', async () => {
     const mockService = {
       getAvailability: vi.fn(async () => ({ available: true, supervisorConnected: true })),
-      executeDevSync: vi.fn(async () => ({
+      executeDevUpdate: vi.fn(async () => ({
         operationId: 'op-ui',
         status: 'SCHEDULED' as const,
         head: 'target-head',
-        message: 'DevSync agendado',
+        message: 'DevUpdate agendado',
         postResponse: vi.fn(async () => {})
       }))
-    } as unknown as DevSyncService
+    } as unknown as DevUpdateService
 
     const mockIdentity = {
       getInstanceId: () => 'inst-ui-1'
     } as unknown as RuntimeIdentityProvider
 
-    registerDevSyncHandlers(mockService, mockIdentity)
+    registerDevUpdateHandlers(mockService, mockIdentity)
 
-    expect(handlers.has('devsync:get-status')).toBe(true)
-    expect(handlers.has('devsync:request-sync')).toBe(true)
+    expect(handlers.has('devupdate:get-status')).toBe(true)
+    expect(handlers.has('devupdate:request-update')).toBe(true)
 
-    const status = await handlers.get('devsync:get-status')!()
+    const status = await handlers.get('devupdate:get-status')!()
     expect(status.available).toBe(true)
 
-    const result = await handlers.get('devsync:request-sync')!()
+    const result = await handlers.get('devupdate:request-update')!()
     expect(result.status).toBe('SCHEDULED')
     expect(result.head).toBe('target-head')
     // postResponse should be omitted from IPC serialization

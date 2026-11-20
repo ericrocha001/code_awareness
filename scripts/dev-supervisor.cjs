@@ -18,8 +18,8 @@ if (process.platform === 'win32') {
   catch { console.warn('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
 }
 const supervisor = createDevSupervisor({
-  async renewRuntime({ port, token, devSync }) {
-    console.log(`[Dev Supervisor] Executando renovação completa DevSync (operação ${devSync.operationId})...`)
+  async renewRuntime({ port, token, devUpdate }) {
+    console.log(`[Dev Supervisor] Executando renovação completa DevUpdate (operação ${devUpdate.operationId})...`)
     const executable = process.platform === 'win32' ? (process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe') : 'npm'
     const predevArgs = process.platform === 'win32'
       ? ['/d', '/s', '/c', 'npm.cmd', 'run', 'predev']

@@ -25,7 +25,7 @@ export interface McpProjectContext {
   cliExecution?: CliExecutionService
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController
-  devSyncService?: import('../dev-sync/dev-sync-service').DevSyncService
+  devUpdateService?: import('../dev-update/dev-update-service').DevUpdateService
   gitOperations?: GitOperationsService
   githubIntegration?: GitHubIntegrationService
   githubPrIsActive?: () => boolean

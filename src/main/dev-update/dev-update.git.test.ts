@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
-import { DevSyncService } from './dev-sync-service'
-import type { IDevSyncSupervisorClient } from './dev-sync-supervisor-client'
+import { DevUpdateService } from './dev-update-service'
+import type { IDevUpdateSupervisorClient } from './dev-update-supervisor-client'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 import {
   createTempGitRepo,
@@ -72,7 +72,7 @@ function mockIdentity(localPath: string, instanceId = 'test-inst-git') {
   } as unknown as RuntimeIdentityProvider
 }
 
-function mockSupervisor(): IDevSyncSupervisorClient {
+function mockSupervisor(): IDevUpdateSupervisorClient {
   return {
     isAvailable: () => true,
     reserve: vi.fn(async () => true),
@@ -83,14 +83,14 @@ function mockSupervisor(): IDevSyncSupervisorClient {
   }
 }
 
-describe('DevSyncService real Git integration', () => {
+describe('DevUpdateService real Git integration', () => {
   it('fetches remote, detects behind, fast-forwards cleanly and schedules restart', async () => {
     const f = await fixture()
     const identity = mockIdentity(f.local)
     const supervisor = mockSupervisor()
     const shutdown = vi.fn()
 
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: f.git,
@@ -104,8 +104,8 @@ describe('DevSyncService real Git integration', () => {
     await gitExec(f.writer, ['push', 'origin', 'main'])
     const expectedHead = (await gitExec(f.writer, ['rev-parse', 'HEAD'])).trim()
 
-    const result = await service.executeDevSync({
-      operationId: 'sync-real-1',
+    const result = await service.executeDevUpdate({
+      operationId: 'update-real-1',
       expectedInstanceId: 'test-inst-git'
     })
 
@@ -125,7 +125,7 @@ describe('DevSyncService real Git integration', () => {
     const identity = mockIdentity(f.local)
     const supervisor = mockSupervisor()
 
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: f.git,
@@ -143,13 +143,13 @@ describe('DevSyncService real Git integration', () => {
     await commit(f.writer, 'remote commit')
     await gitExec(f.writer, ['push', 'origin', 'main'])
 
-    const result = await service.executeDevSync({
-      operationId: 'sync-ahead',
+    const result = await service.executeDevUpdate({
+      operationId: 'update-ahead',
       expectedInstanceId: 'test-inst-git'
     })
 
     expect(result.status).toBe('AHEAD_OR_DIVERGED')
-    expect(supervisor.cancel).toHaveBeenCalledWith('sync-ahead')
+    expect(supervisor.cancel).toHaveBeenCalledWith('update-ahead')
   }, 60000)
 
   it('returns ALREADY_CURRENT when local is already up to date with remote for MCP caller', async () => {
@@ -157,20 +157,20 @@ describe('DevSyncService real Git integration', () => {
     const identity = mockIdentity(f.local)
     const supervisor = mockSupervisor()
 
-    const service = new DevSyncService({
+    const service = new DevUpdateService({
       runtimeIdentity: identity,
       supervisor,
       gitService: f.git,
       requestShutdown: vi.fn()
     })
 
-    const result = await service.executeDevSync({
-      operationId: 'sync-mcp-noop',
+    const result = await service.executeDevUpdate({
+      operationId: 'update-mcp-noop',
       expectedInstanceId: 'test-inst-git',
       caller: 'MCP'
     })
 
     expect(result.status).toBe('ALREADY_CURRENT')
-    expect(supervisor.cancel).toHaveBeenCalledWith('sync-mcp-noop')
+    expect(supervisor.cancel).toHaveBeenCalledWith('update-mcp-noop')
   }, 60000)
 })

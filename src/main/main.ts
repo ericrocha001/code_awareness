@@ -17,9 +17,9 @@ import { registerTagHandlers } from './ipc/tag-handler'
 import { registerDatabaseHandlers } from './ipc/database-handler'
 import { registerCampaignHandlers } from './ipc/campaign-handler'
 import { registerDevToolsHandlers } from './ipc/devtools-handler'
-import { registerDevSyncHandlers } from './ipc/dev-sync-handler'
-import { DevSyncService } from './dev-sync/dev-sync-service'
-import { DevSyncSupervisorClient } from './dev-sync/dev-sync-supervisor-client'
+import { registerDevUpdateHandlers } from './ipc/dev-update-handler'
+import { DevUpdateService } from './dev-update/dev-update-service'
+import { DevUpdateSupervisorClient } from './dev-update/dev-update-supervisor-client'
 import { registerDeepLinkHandlers } from './ipc/deeplink-handler'
 import { registerDashHandlers } from './ipc/dash-handler'
 import { setPendingDeepLink, emitDeepLinkToRenderer } from './core/deeplink-manager'
@@ -209,19 +209,19 @@ const runtimeRestart = new RuntimeRestartController(
   new EnvironmentRestartSupervisorClient(),
   () => app.quit()
 )
-const devSyncSupervisor = new DevSyncSupervisorClient()
-const devSyncService = new DevSyncService({
+const devUpdateSupervisor = new DevUpdateSupervisorClient()
+const devUpdateService = new DevUpdateService({
   runtimeIdentity: runtimeIdentityProvider,
-  supervisor: devSyncSupervisor,
+  supervisor: devUpdateSupervisor,
   gitService: new GitService(),
   requestShutdown: () => app.quit(),
   isPackaged: () => app.isPackaged
 })
-registerDevSyncHandlers(devSyncService, runtimeIdentityProvider)
+registerDevUpdateHandlers(devUpdateService, runtimeIdentityProvider)
 runtimeIdentityProvider.sourceOriginReady.then(async () => {
-  if (devSyncSupervisor.isAvailable()) {
+  if (devUpdateSupervisor.isAvailable()) {
     const payload = runtimeIdentityProvider.getIdentityPayload()
-    await devSyncSupervisor.announceReady({
+    await devUpdateSupervisor.announceReady({
       instanceId: runtimeIdentityProvider.getInstanceId(),
       startupHead: payload.sourceOrigin.worktree?.head ?? '',
       sourceOrigin: payload.sourceOrigin,
@@ -862,7 +862,7 @@ app.whenReady().then(async () => {
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart,
-      devSyncService,
+      devUpdateService,
       webExtensionManager: extensionManagerService
     })
   })
