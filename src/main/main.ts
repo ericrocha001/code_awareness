@@ -82,6 +82,8 @@ import { authorizeHandoffAssociation, handoffSessionCoverage } from './session-c
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
 import { LocalChannelHost } from './local-agent-channel/local-channel-host'
 import { ContinuumLocalAdapter } from './continuum/local-adapter'
+import { GitLocalAdapter, type GitLocalSessionState } from './git-operations/local-adapter'
+import { GitHubLocalAdapter, type GitHubLocalSessionState } from './github/local-adapter'
 import { AcademyLocalAdapter } from './academy/local-adapter'
 import { WebActivationLocalAdapter } from './web-activation/web-activation-local-adapter'
 import { ExtensionManagerService } from './web-activation/extension-manager-service'
@@ -183,6 +185,8 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const sessionMemoryCentral = new SessionMemoryCentralService(app.getPath('userData'))
 const extensionManagerService = new ExtensionManagerService({ userDataPath: app.getPath('userData') })
+let activeGitLocalState: GitLocalSessionState | null = null
+let activeGithubLocalState: GitHubLocalSessionState | null = null
 const localAgentChannel = new LocalChannelHost(
   [
     new ContinuumLocalAdapter(
@@ -197,6 +201,8 @@ const localAgentChannel = new LocalChannelHost(
         return parsed.executionPreflight ?? parsed
       }
     ),
+    new GitLocalAdapter(() => activeGitLocalState, continuumSession),
+    new GitHubLocalAdapter(() => activeGithubLocalState, continuumSession),
     new AcademyLocalAdapter(academyService),
     new TestOutputLocalAdapter(continuumSession, validationLedger),
     new WebActivationLocalAdapter(() => mcpLifecycle.ensureGlobalSkillsEndpoint(), extensionManagerService)
@@ -769,6 +775,8 @@ app.whenReady().then(async () => {
     })
     gitManagement.bind(gitOperations)
     boardGit = gitOperations
+    activeGitLocalState = gitRepositoryId ? { repositoryId: gitRepositoryId, repositoryPath: project.path, service: gitOperations, isCurrent: sessionIsCurrent } : null
+    activeGithubLocalState = gitRepositoryId ? { repositoryId: gitRepositoryId, repositoryPath: project.path, integration: githubIntegration, gitOperations, isCurrent: sessionIsCurrent } : null
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
     branchOrchestration.bind(gitOperations, githubIntegration, project.path)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))

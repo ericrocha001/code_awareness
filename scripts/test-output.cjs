@@ -153,9 +153,15 @@ async function run(command, args = [], options = {}) {
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
   const resolveExecution = options.resolveExecutionContext === true || process.env.CODE_AWARENESS_RESOLVE_EXECUTION === '1'
-  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR || deliveryContext || resolveExecution)
+  const workValidationAuthorized = Boolean(
+    deliveryContext ||
+    options.authorizeWorkValidation === true ||
+    process.env.CODE_AWARENESS_VALIDATION_AUTHORIZE_PLAN === '1' ||
+    association.evidenceFor?.length
+  )
+  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR || deliveryContext || resolveExecution || workValidationAuthorized)
   const shouldCaptureSource = !options.evidenceRoot && options.register !== false && (expectTests || requestedRegistration)
-  receipt.ledger = { association, identity: null, before: null, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
+  receipt.ledger = { association, identity: null, before: null, after: null, ...(deliveryContext ? { deliveryContext } : {}), ...(workValidationAuthorized ? { workValidationAuthorized: true } : {}) }
   receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
@@ -178,7 +184,7 @@ async function run(command, args = [], options = {}) {
       }
       before = await connection.snapshot()
     } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
-    receipt.ledger = { association, identity: connection?.identity || null, before, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
+    receipt.ledger = { association, identity: connection?.identity || null, before, after: null, ...(deliveryContext ? { deliveryContext } : {}), ...(workValidationAuthorized ? { workValidationAuthorized: true } : {}) }
     save()
   }
   let child

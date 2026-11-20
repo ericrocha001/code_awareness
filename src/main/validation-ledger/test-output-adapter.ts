@@ -45,7 +45,7 @@ const schema = z.object({ version: z.literal(1), id: z.string().uuid(), digest: 
   finishedAt: z.string().datetime(), durationMs: z.number().int().nonnegative(), exitCode: z.number().int().nullable(), signal: z.string().nullable().optional(),
   state: z.string(), processState: z.string(), validation: z.object({ state: z.string(), runs: z.array(counts).max(100).optional() }).passthrough(),
   acceptance: acceptanceSchema.optional(),
-  ledger: z.object({ association, identity: selection.nullable(), before: source.nullable(), after: source.nullable(), deliveryContext: deliveryContextRequest.optional() }).strict() }).passthrough()
+  ledger: z.object({ association, identity: selection.nullable(), before: source.nullable(), after: source.nullable(), deliveryContext: deliveryContextRequest.optional(), workValidationAuthorized: z.boolean().optional() }).strict() }).passthrough()
 
 async function readReceipt(root: string, id: string): Promise<z.infer<typeof schema>> {
   let directory = root
@@ -137,19 +137,23 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       const effectiveDelivery = request.deliveryContext ?? receipt.ledger.deliveryContext
       const before = receipt.ledger.before, after = receipt.ledger.after
       let anchor: DeliveryAnchor | undefined
-      if (effectiveDelivery && !isLookup) {
+      if (!isLookup) {
         const continuum = session.getActiveService()
-        if (!continuum) throw new Error('DELIVERY_CONTEXT_INVALID')
+        const inventory = new GitBranchInventory(active.repositoryPath, git, registry, { repositoryId: request.repositoryId, isActive: current })
         const authority = authorizeArtifactAgent(
           context.principal ?? authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', current),
           request.repositoryId,
           current,
           tree.worktreeId
         )
-        const inventory = new GitBranchInventory(active.repositoryPath, git, registry, { repositoryId: request.repositoryId, isActive: current })
-        anchor = await continuum.prepareDeliveryContext(authority, effectiveDelivery, () => inventory.executionSnapshot(tree.worktreeId, tree.generation))
-        if (anchor.repositoryId !== request.repositoryId || anchor.snapshot.worktreeId !== tree.worktreeId || anchor.snapshot.worktreeGeneration !== tree.generation ||
-          (before && (anchor.snapshot.head !== before.head || anchor.snapshot.repositoryId !== before.repositoryId))) {
+        if (effectiveDelivery) {
+          if (!continuum) throw new Error('DELIVERY_CONTEXT_INVALID')
+          anchor = await continuum.prepareDeliveryContext(authority, effectiveDelivery, () => inventory.executionSnapshot(tree.worktreeId, tree.generation))
+        } else if (continuum?.resolveExecutionContext) {
+          anchor = (await continuum.resolveExecutionContext(authority, undefined, () => inventory.executionSnapshot(tree.worktreeId, tree.generation))).anchor
+        }
+        if (anchor && (anchor.repositoryId !== request.repositoryId || anchor.snapshot.worktreeId !== tree.worktreeId || anchor.snapshot.worktreeGeneration !== tree.generation ||
+          (before && (anchor.snapshot.head !== before.head || anchor.snapshot.repositoryId !== before.repositoryId)))) {
           throw new Error('DELIVERY_CONTEXT_STALE')
         }
       }
@@ -178,9 +182,10 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       const acceptanceSummary = receipt.acceptance
         ? `; provider=${receipt.acceptance.provider}@${receipt.acceptance.version ?? 'unverified'}; pin=${receipt.acceptance.pin}; outcome=${receipt.acceptance.outcome}`
         : ''
+      const workValidationAuthorized = declared.evidenceFor.length > 0 || Boolean(effectiveDelivery) || receipt.ledger.workValidationAuthorized === true
       const input: RecordProofInput = { kind: declared.kind, producer: 'IMPLEMENTER', status,
         startedAt: receipt.startedAt, finishedAt: receipt.finishedAt, durationMs: receipt.durationMs, scope: declared.scope,
-        evidenceFor: declared.evidenceFor.length ? declared.evidenceFor : (anchor ? [anchor.planArtifactId] : []),
+        evidenceFor: declared.evidenceFor.length ? declared.evidenceFor : (anchor && workValidationAuthorized ? [anchor.planArtifactId] : []),
         sourceFingerprint: before ? validationSourceFingerprint(before) : null,
         summary: `Test Output: ${status}; EXECUTOR_REPORTED; ${changed ? 'SOURCE_CHANGED_DURING_RUN' : before && after ? 'SOURCE_REPORTED' : 'SOURCE_UNAVAILABLE'}${acceptanceSummary}`,
         metrics: { durationMs: receipt.durationMs, ...(sufficient ? { testsPassed: runs!.reduce((n, c) => n + c.passed, 0) } : {}) },

@@ -12,6 +12,8 @@ import { GitOperationReceipts, gitReceiptFingerprint } from '../git-operations/g
 import { executeGitOperationsTool } from '../git-operations/git-operations-mcp'
 import { writeFileSync } from 'node:fs'
 import { GitOperationsService } from '../git-operations/git-operations-service'
+import { GitLocalAdapter } from '../git-operations/local-adapter'
+import { GitHubLocalAdapter } from '../github/local-adapter'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { SessionStore, sessionStorePath } from './store'
 import { registrySources, handoffTargets } from './registry-sources'
@@ -307,5 +309,108 @@ it('returns deliveryContext from bindExecutionBranch and projects Continuum publ
   expect(graph.edges).toEqual(expect.arrayContaining([
     expect.objectContaining({ evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: published.artifactId + ':1' }),
     expect.objectContaining({ evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: proof.proofId })
+  ]))
+}, 60000)
+
+it('propagates active execution identity automatically through LocalChannel Git, GitHub and Continuum adapters without manual deliveryContext', async () => {
+  const f = await fixture()
+  const rawPlan = '---\nname: U2 Local Plan\ndescription: U2 E2E fixture\nkind: EXECUTABLE_PLAN\n---\nPRIVATE_U2_PLAN'
+  const u2Plan = f.service.publish(rawPlan)
+  const booted = await f.service.bootstrapExecution({ planArtifactId: u2Plan.artifactId, expectedPlanRevision: 1 }, f.observe)
+  expect(booted.executionId).toMatch(/^exec-/)
+
+  const operations = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  const session = {
+    getActiveService: () => f.service,
+    getActiveSession: () => ({ repositoryId: 'fixture', repositoryPath: f.root })
+  } as any
+  const principal = authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true)
+  const context = { connected: () => true, principal }
+
+  const treeSnapshot = await f.observe()
+  writeFileSync(join(f.root, 'feature.txt'), 'u2 delivery')
+  const gitAdapter = new GitLocalAdapter(() => ({ repositoryId: 'fixture', repositoryPath: f.root, service: operations, isCurrent: () => true }), session)
+  await gitAdapter.operations.stage.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-stage-1',
+    mode: 'STAGE', paths: ['feature.txt'], expectedIndexRevision: (await operations.getState()).indexRevision,
+    expectedWorktreeRevision: (await operations.getState()).worktreeRevision
+  }, context)
+  const committed = await gitAdapter.operations.commit.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-commit-1',
+    message: 'u2 governed commit', expectedHead: (await operations.getState()).head,
+    expectedIndexRevision: (await operations.getState()).indexRevision
+  }, context) as { sha: string }
+
+  const commitReceipt = (await f.git.readOperationReceipt(f.root, 'u2-commit-1'))!.receipt
+  expect(commitReceipt.deliveryVerified).toBe(true)
+  expect(commitReceipt.deliveryContext?.executionId).toBe(booted.executionId)
+  expect(commitReceipt.deliveryContext?.planArtifactId).toBe(u2Plan.artifactId)
+
+  const receiptDirectory = join(f.root, '.git', 'pr-receipts-u2')
+  const prSummary = {
+    number: 202, url: 'https://github.com/owner/repo/pull/202', title: 'U2 PR', state: 'open' as const, draft: false,
+    head: { ref: 'main', repository: 'owner/repo', sha: committed.sha },
+    base: { ref: 'release', repository: 'owner/repo', sha: 'e'.repeat(40) },
+    mergeability: 'UNKNOWN' as const, mergedAt: null, observedAt: new Date().toISOString()
+  }
+  let prCreated = false
+  const ghIntegration = {
+    getPullRequestAccess: async () => ({ state: 'READY' }),
+    getPullRequestOperation: async () => ({ status: 'CREATED' }),
+    createPullRequest: async (_repoPath: string, prInput: any, execCtx: any) => {
+      const api = {
+        getPullRequestPermissions: async () => ({ create: true }),
+        getBranchSha: async (_repo: string, ref: string) => ref === 'main' ? committed.sha : 'e'.repeat(40),
+        listPullRequests: async () => ({ pullRequests: prCreated ? [prSummary] : [] }),
+        getPullRequest: async () => prSummary,
+        createPullRequest: async () => { prCreated = true; return prSummary }
+      }
+      return new GitHubPullRequests(api as any, async () => ({ repositoryId: 'fixture', repository: 'owner/repo' }), { receiptDirectory, approve: async () => true }).create(prInput, execCtx)
+    }
+  } as any
+  const ghAdapter = new GitHubLocalAdapter(() => ({ repositoryId: 'fixture', repositoryPath: f.root, integration: ghIntegration, gitOperations: operations, isCurrent: () => true }), session)
+  const prRes = await ghAdapter.operations.create_pr.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-pr-1',
+    headBranch: 'main', baseBranch: 'release', expectedHeadSha: committed.sha, title: 'U2 PR', body: 'PRIVATE_U2_PR'
+  }, context) as { status: string }
+  expect(prRes.status).toBe('CREATED')
+  expect(pullRequestDeliveryPage(receiptDirectory, 'fixture').observations).toMatchObject([{
+    operationId: 'u2-pr-1', pullRequest: 202, headSha: committed.sha, anchor: { executionId: booted.executionId, planArtifactId: u2Plan.artifactId }
+  }])
+
+  const authority = authorizeArtifactAgent(principal, 'fixture', () => true, treeSnapshot.worktreeId)
+  const resolved = await f.service.resolveExecutionContext(authority, undefined, () => operations.deliverySnapshot(treeSnapshot.worktreeId))
+  const handoff = f.service.publish(`---\nname: U2 Handoff\ndescription: U2 handoff\nkind: IMPLEMENTATION_HANDOFF\nrelations:\n  - artifactId: ${u2Plan.artifactId}\n    kind: implements\n---\nBody`, {}, authority, resolved.anchor)
+  expect(handoff.publicationReceipt?.deliveryContext?.executionId).toBe(booted.executionId)
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u2.db')); cleanup.push(async () => ledger.close())
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: cursor => operations.deliveryProjectionPage(cursor),
+    github: {
+      deliveryRepository: async () => 'owner/repo',
+      commitPullRequests: async () => [202],
+      getPullRequest: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', pullRequest: prSummary }),
+      deliveryProjectionPage: (id: string, cursor?: string) => pullRequestDeliveryPage(receiptDirectory, id, cursor),
+      pullRequestCommits: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', headSha: committed.sha, commits: [{ sha: committed.sha }], nextPage: null })
+    } as any,
+    networkAllowed: () => true,
+    assertCurrent: () => {}
+  })
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+  const planGraph = sessions.registry.contextGraph({ kind: 'ARTIFACT', id: `${u2Plan.artifactId}:1` }, undefined, 4)
+  expect(planGraph.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'delivery-context', to: `COMMIT:fixture:${committed.sha}` }),
+    expect.objectContaining({ relation: 'delivery-context', to: 'PR:fixture:202' }),
+    expect.objectContaining({ relation: 'delivery-context', to: `ARTIFACT:fixture:${handoff.artifactId}:1` })
+  ]))
+  const commitGraph = sessions.registry.contextGraph({ kind: 'COMMIT', id: committed.sha }, undefined, 4)
+  expect(commitGraph.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'ARTIFACT', id: u2Plan.artifactId, revision: 1, key: `ARTIFACT:fixture:${u2Plan.artifactId}:1` }),
+    expect.objectContaining({ type: 'PR', id: '202', key: 'PR:fixture:202' })
   ]))
 }, 60000)
