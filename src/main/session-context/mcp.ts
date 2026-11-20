@@ -280,9 +280,29 @@ function nextDiscoveryFor(query: { source?: 'IMPORTED' | 'NATIVE_HOOK'; view?: '
     provesPlanMembership: false
   }
 }
+function compactModelIntelligence(store: SessionStore, sessionId: string) {
+  if (!store.modelIntelligence) return undefined
+  const summary = store.modelIntelligence.summarizeSession(sessionId)
+  if (
+    summary.coverageStatus === 'UNAVAILABLE' &&
+    summary.models.length === 0 &&
+    summary.primaryUsage.scope === 'unavailable' &&
+    summary.unavailableReasons.length === 0
+  ) {
+    return undefined
+  }
+  return {
+    models: summary.models,
+    ...(summary.efforts.length ? { efforts: summary.efforts } : {}),
+    primaryUsage: summary.primaryUsage,
+    coverageStatus: summary.coverageStatus,
+    ...(summary.unavailableReasons.length ? { unavailableReasons: summary.unavailableReasons } : {})
+  }
+}
 function associationMetadata(store: SessionStore, row: SessionRow, filter: SessionFilter = {}, focal = false, worktreeAvailability: 'NOT_RECHECKED' | 'ACTIVE' | 'HISTORICAL_ONLY' = 'NOT_RECHECKED', extra?: { witness?: SessionWitness; worktrees?: WorktreeRef[]; aliasState?: string }) {
   const links = store.associations(row.id, 3, filter)
   const worktrees = extra?.worktrees ?? store.worktreesForSession(row.id)
+  const modelIntelligence = compactModelIntelligence(store, row.id)
   const witness = extra?.witness ?? (links[0] ? {
     kind: links[0].evidence,
     relation: links[0].sourceArtifactId && links[0].artifactId ? 'declared-link' : 'associated',
@@ -300,6 +320,7 @@ function associationMetadata(store: SessionStore, row: SessionRow, filter: Sessi
       claimsVerified: false, worktrees, worktreeAvailability,
       ...(extra?.aliasState ? { aliasState: extra.aliasState } : {}),
       ...(witness ? { witness } : {}),
+      ...(modelIntelligence ? { modelIntelligence } : {}),
       deepen: { tool: 'inspect_agent_session', arguments: { sessionId: row.id, view: 'FOCAL' } } }
     : { ...metadata(row), associationCoverage: links.length || witness ? 'ASSOCIATIONS_OBSERVED' : 'UNAVAILABLE',
       ...(row.historicalState ? { revision: null, lastObserved: null, associationObservedAt: row.lastObserved } : {}),
@@ -307,6 +328,7 @@ function associationMetadata(store: SessionStore, row: SessionRow, filter: Sessi
       claimsVerified: false, worktrees, worktreeAvailability,
       ...(extra?.aliasState ? { aliasState: extra.aliasState } : {}),
       ...(witness ? { witness } : {}),
+      ...(modelIntelligence ? { modelIntelligence } : {}),
       deepen: { tool: 'inspect_agent_session', arguments: { sessionId: row.id } } }
   if (focal) return base
   return { ...base,
@@ -1293,6 +1315,12 @@ export async function executeSessionTool(
             turnCoverage: turns.length ? 'PARTIAL' : 'UNKNOWN' }, turn => turn, 'turns'))
         }
         const map = actualStore.map(row.id, offset, query.limit + 1)
+        const fullModelIntelligence = actualStore.modelIntelligence ? actualStore.modelIntelligence.summarizeSession(row.id) : undefined
+        const hasModelIntelligence = !!fullModelIntelligence && (
+          fullModelIntelligence.models.length > 0 ||
+          fullModelIntelligence.primaryUsage.scope !== 'unavailable' ||
+          fullModelIntelligence.unavailableReasons.length > 0
+        )
         if (query.view === 'FOCAL') {
           const focalErrors = actualStore.events(row.id, { types: ['ERROR'] }, 0, 5).map(ev => ({
             eventId: ev.id, ordinal: ev.ordinal, ...(ev.timestamp ? { timestamp: ev.timestamp } : {}), ...(ev.tool ? { tool: ev.tool } : {})
@@ -1301,11 +1329,13 @@ export async function executeSessionTool(
             sessionId: row.id, provider: row.provider ?? 'entire', agent: row.agent, state: row.state, revision: row.revision,
             eventCount: row.eventCount, coverage: row.coverage, types: map.types, tools: map.tools.slice(0, 5),
             errors: focalErrors, turnView: { tool: 'inspect_agent_session', arguments: { sessionId: row.id, expectedRevision: row.revision, mapView: 'TURNS' } },
+            ...(hasModelIntelligence ? { modelIntelligence: fullModelIntelligence } : {}),
             claimsVerified: false
           }, segment => segment, 'segments')
         } else {
           data = page(actualStore, scope, offset, map.segments, query.limit, budget, { ...associationMetadata(actualStore, row), types: map.types, tools: map.tools.slice(0, 5), files: map.files.slice(0, 5),
             turnView: { tool: 'inspect_agent_session', arguments: { sessionId: row.id, expectedRevision: row.revision, mapView: 'TURNS' } },
+            ...(hasModelIntelligence ? { modelIntelligence: fullModelIntelligence } : {}),
             provenance: 'DERIVED_INDEX', claimsVerified: false, sourceObservation: actualStore.sourceObservation(row), diagnostics: actualStore.diagnostics() }, segment => segment, 'segments')
         }
       } else if (name === 'list_agent_session_events') {
