@@ -11,6 +11,7 @@ import { CheckpointRegistry, REGISTRY_SCHEMA } from './checkpoint-registry'
 import { entireAgent } from './entire-schema'
 import { migrateSessionNamespace } from './session-namespace-migration'
 import { SessionReferences } from './session-references'
+import { MODEL_INTELLIGENCE_SCHEMA, ModelIntelligenceStore } from './model-intelligence-store'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -45,6 +46,7 @@ function associationQuery(filter: SessionFilter): { where: string[]; params: (st
 export class SessionStore {
   readonly registry: CheckpointRegistry
   readonly references: SessionReferences
+  readonly modelIntelligence: ModelIntelligenceStore
   private readonly db: Database.Database
   private readonly key: string
   constructor(readonly path: string, readonly repositoryId: string, readOnly = false) {
@@ -52,12 +54,13 @@ export class SessionStore {
     this.db = new Database(path, readOnly ? { readonly: true, fileMustExist: true, timeout: 1000 } : {})
     try {
       if (readOnly) {
-        if (Number(this.db.pragma('user_version', { simple: true })) !== 8) throw new Error('SCHEMA_UNSUPPORTED')
+        if (Number(this.db.pragma('user_version', { simple: true })) !== 9) throw new Error('SCHEMA_UNSUPPORTED')
         const rows = this.db.prepare('SELECT repositoryId,cursorKey FROM identity').all() as { repositoryId: string; cursorKey: string }[]
         if (rows.length !== 1 || rows[0].repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
         this.key = rows[0].cursorKey
         this.registry = new CheckpointRegistry(this.db, repositoryId)
         this.references = new SessionReferences(this.db, true)
+        this.modelIntelligence = new ModelIntelligenceStore(this.db)
         return
       }
       if (process.platform !== 'win32') chmodSync(path, 0o600)
@@ -66,7 +69,7 @@ export class SessionStore {
       this.db.pragma('synchronous = NORMAL')
       this.db.pragma('foreign_keys = ON')
       this.db.pragma('busy_timeout = 3000')
-      if (Number(this.db.pragma('user_version', { simple: true })) > 8) throw new Error('SCHEMA_UNSUPPORTED')
+      if (Number(this.db.pragma('user_version', { simple: true })) > 9) throw new Error('SCHEMA_UNSUPPORTED')
       this.db.transaction(() => {
         this.db.exec(`
           CREATE TABLE IF NOT EXISTS identity(repositoryId TEXT PRIMARY KEY, cursorKey TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -121,11 +124,13 @@ export class SessionStore {
           const names = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
         }
-        this.db.pragma('user_version = 8')
+        this.db.exec(MODEL_INTELLIGENCE_SCHEMA)
+        this.db.pragma('user_version = 9')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
       this.registry = new CheckpointRegistry(this.db, repositoryId)
       this.references = new SessionReferences(this.db)
+      this.modelIntelligence = new ModelIntelligenceStore(this.db)
     } catch (error) { this.db.close(); throw error }
   }
   assertRepository(id: string): void { if (id !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH') }

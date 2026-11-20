@@ -16,6 +16,66 @@ import type { SessionStore } from './store'
 import type { SessionInput, SessionRow, CoverageReasons, EventRow } from './types'
 import { projectLiveSessions, projectLiveUsage, type LiveSessionQuery, type LiveSessionToolName } from './entire-live'
 import type { LiveSessionTarget } from './target'
+import { extractAuthorizedEntireSessionMetadata, extractAuthorizedTokenUsage } from './model-intelligence-inventory'
+import type { ModelMetadataInput, UsageFactInput } from './model-intelligence-store'
+
+function recordEntireSessionMetadata(
+  store: SessionStore,
+  sessionId: string,
+  raw: unknown,
+  version: string,
+  sourceSurface: 'entire_session_list' | 'entire_session_info',
+  client: string,
+  assertCurrent: () => void
+): void {
+  if (!store.modelIntelligence) return
+  const meta = extractAuthorizedEntireSessionMetadata(raw, version)
+  if (!meta) return
+  const modelFacts: ModelMetadataInput[] = [{
+    scope: 'session',
+    scopeId: 'session',
+    ordinal: 0,
+    sourceSurface,
+    sourceVersion: version,
+    observability: meta.model ? 'reported' : 'unknown',
+    provider: 'entire',
+    client,
+    ...(meta.model ? { model: meta.model } : {}),
+    ...(meta.turnsCount !== undefined ? { turnCount: meta.turnsCount } : {}),
+    ...(meta.pendingTurnsCount !== undefined ? { pendingTurnCount: meta.pendingTurnsCount } : {}),
+    coverageStatus: meta.model && meta.tokenUsage ? 'COMPLETE' : meta.model || meta.turnsCount !== undefined ? 'PARTIAL' : 'UNAVAILABLE',
+    ...(meta.tokenUsage
+      ? {}
+      : { unavailableReason: meta.providerVersion === '0.12.2' ? 'ENTIRE_0_12_2_NO_SESSION_TOKENS' : 'TOKEN_USAGE_NOT_IN_JSON' }),
+    unknownFieldPaths: meta.unknownFields.benignPaths
+  }]
+  const usageFacts: UsageFactInput[] = meta.tokenUsage
+    ? [{
+        usageScope: 'session_total',
+        scopeId: 'session',
+        ordinal: 0,
+        sourceSurface,
+        sourceVersion: version,
+        observability: 'reported',
+        ...(meta.model ? { model: meta.model } : {}),
+        ...(meta.tokenUsage.input !== undefined ? { inputTokens: meta.tokenUsage.input } : {}),
+        ...(meta.tokenUsage.output !== undefined ? { outputTokens: meta.tokenUsage.output } : {}),
+        ...(meta.tokenUsage.cacheRead !== undefined ? { cacheReadTokens: meta.tokenUsage.cacheRead } : {}),
+        ...(meta.tokenUsage.cacheWrite !== undefined ? { cacheWriteTokens: meta.tokenUsage.cacheWrite } : {}),
+        ...(meta.tokenUsage.reasoningOutput !== undefined ? { reasoningOutputTokens: meta.tokenUsage.reasoningOutput } : {}),
+        ...(meta.tokenUsage.total !== undefined ? { totalTokens: meta.tokenUsage.total } : {}),
+        ...(meta.tokenUsage.apiCalls !== undefined ? { apiCalls: meta.tokenUsage.apiCalls } : {}),
+        coverageStatus: 'COMPLETE'
+      }]
+    : []
+  store.modelIntelligence.recordFacts(sessionId, { modelFacts, usageFacts }, assertCurrent)
+}
+
+function intOrUndef(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const n = Number(value)
+  return Number.isSafeInteger(n) && n >= 0 ? n : undefined
+}
 
 interface ProviderConfig { enabled: true; repositoryId: string; executable: string; sha256: string; version: string }
 export interface EntireDiagnostic {
@@ -337,6 +397,7 @@ export class EntireProvider {
           startedAt: date(value.started_at), endedAt: terminal ? date(value.ended_at) : undefined,
           coverage: 'UNAVAILABLE', importState: 'METADATA_ONLY', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 }, sourceDigest: digest(JSON.stringify({ id: value.session_id, status: value.status, ended: value.ended_at })), sourceBytes: 0 }
         if (known) {
+          recordEntireSessionMetadata(store, known.id, value, config.version, 'entire_session_info', known.agent, () => this.assertWithinDeadline())
           return await this.indexReferences(store, known, metadata, config, root)
         }
         const existing = store.byProvider(value.session_id, 'entire', metadata.agent)
@@ -384,6 +445,7 @@ export class EntireProvider {
         const result = existing ? { sessionId: existing.id } : store.ingest({ providerSessionId: value.session_id, providerVersion: config.version, agent,
           state: terminal ? 'ENDED' : value.status.toUpperCase() === 'ACTIVE' ? 'ACTIVE' : 'UNKNOWN', startedAt: date(value.started_at), endedAt: terminal ? date(value.ended_at) : undefined,
           importState: 'METADATA_ONLY', coverage: 'PARTIAL', sourceDigest: digest(JSON.stringify([value.session_id, agent, value.status, value.ended_at])), sourceBytes: 0 }, [], () => this.assertWithinDeadline())
+        recordEntireSessionMetadata(store, result.sessionId, value, config.version, 'entire_session_list', agent, () => this.assertWithinDeadline())
         if (!existing) imported++
         if (this.targetIdentity) store.observeWorktree(result.sessionId, this.targetIdentity, () => this.assertWithinDeadline())
       } catch (error) { failure = error instanceof Error ? error : new Error('PROVIDER_UNAVAILABLE') }
@@ -409,12 +471,133 @@ export class EntireProvider {
     let pending: ReferencedEvent[] = []
     const flush = () => { if (pending.length) { store.references.append(runId, pending); pending = [] } }
     let identityObserved = agent === 'antigravity'
+    const transcriptModelFacts: ModelMetadataInput[] = []
+    const transcriptUsageFacts: UsageFactInput[] = []
+    let activeModel: string | undefined
+    let activeEffort: string | undefined
+    let turnOrdinal = 0
+    const transcriptSurface = agent === 'codex'
+      ? 'entire_transcript_codex'
+      : agent === 'claude-code'
+        ? 'entire_transcript_claude_code'
+        : 'entire_transcript_antigravity'
     const parser = new EntireTranscriptStream(record => {
       const id = record.metadata['payload/id'] ?? record.metadata.thread_id ?? record.metadata.sessionId
       if (id && id !== known.providerSessionId) throw new Error('SOURCE_IDENTITY_CONFLICT')
       if (id === known.providerSessionId) identityObserved = true
       const cwd = record.metadata['payload/cwd'] ?? record.metadata.cwd
       if (cwd && (!isAbsolute(cwd) || realpathSync(cwd) !== root)) throw new Error('SOURCE_IDENTITY_CONFLICT')
+      const m = record.metadata
+      if (agent === 'codex' && m.type === 'turn_context') {
+        activeModel = m['payload/model'] ?? activeModel
+        activeEffort = m['payload/effort'] ?? m['payload/reasoning_effort'] ?? activeEffort
+        if (activeModel || activeEffort) {
+          turnOrdinal++
+          transcriptModelFacts.push({
+            scope: 'turn',
+            scopeId: `turn:${record.position}`,
+            ordinal: record.position,
+            sourceSurface: transcriptSurface,
+            sourceVersion: config.version,
+            observability: 'requested',
+            provider: 'entire',
+            client: agent,
+            ...(activeModel ? { model: activeModel } : {}),
+            ...(activeEffort ? { effort: activeEffort } : {}),
+            coverageStatus: 'COMPLETE'
+          })
+        }
+      } else if (agent === 'codex' && m.type === 'event_msg' && m['payload/type'] === 'token_count') {
+        const lastUsage = extractAuthorizedTokenUsage({
+          input_tokens: intOrUndef(m['payload/info/last_token_usage/input_tokens']),
+          cached_input_tokens: intOrUndef(m['payload/info/last_token_usage/cached_input_tokens']),
+          output_tokens: intOrUndef(m['payload/info/last_token_usage/output_tokens']),
+          reasoning_output_tokens: intOrUndef(m['payload/info/last_token_usage/reasoning_output_tokens']),
+          total_tokens: intOrUndef(m['payload/info/last_token_usage/total_tokens'])
+        })
+        if (lastUsage) {
+          transcriptUsageFacts.push({
+            usageScope: 'call_delta',
+            scopeId: `call:${record.position}`,
+            ordinal: record.position,
+            sourceSurface: transcriptSurface,
+            sourceVersion: config.version,
+            observability: 'reported',
+            ...(activeModel ? { model: activeModel } : {}),
+            ...(activeEffort ? { effort: activeEffort } : {}),
+            ...(lastUsage.input !== undefined ? { inputTokens: lastUsage.input } : {}),
+            ...(lastUsage.output !== undefined ? { outputTokens: lastUsage.output } : {}),
+            ...(lastUsage.cacheRead !== undefined ? { cacheReadTokens: lastUsage.cacheRead } : {}),
+            ...(lastUsage.reasoningOutput !== undefined ? { reasoningOutputTokens: lastUsage.reasoningOutput } : {}),
+            ...(lastUsage.total !== undefined ? { totalTokens: lastUsage.total } : {}),
+            coverageStatus: 'COMPLETE'
+          })
+        }
+        const totalUsage = extractAuthorizedTokenUsage({
+          input_tokens: intOrUndef(m['payload/info/total_token_usage/input_tokens']),
+          cached_input_tokens: intOrUndef(m['payload/info/total_token_usage/cached_input_tokens']),
+          output_tokens: intOrUndef(m['payload/info/total_token_usage/output_tokens']),
+          reasoning_output_tokens: intOrUndef(m['payload/info/total_token_usage/reasoning_output_tokens']),
+          total_tokens: intOrUndef(m['payload/info/total_token_usage/total_tokens'])
+        })
+        if (totalUsage) {
+          transcriptUsageFacts.push({
+            usageScope: 'session_cumulative',
+            scopeId: `cumulative:${record.position}`,
+            ordinal: record.position,
+            sourceSurface: transcriptSurface,
+            sourceVersion: config.version,
+            observability: 'reported',
+            ...(activeModel ? { model: activeModel } : {}),
+            ...(activeEffort ? { effort: activeEffort } : {}),
+            ...(totalUsage.input !== undefined ? { inputTokens: totalUsage.input } : {}),
+            ...(totalUsage.output !== undefined ? { outputTokens: totalUsage.output } : {}),
+            ...(totalUsage.cacheRead !== undefined ? { cacheReadTokens: totalUsage.cacheRead } : {}),
+            ...(totalUsage.reasoningOutput !== undefined ? { reasoningOutputTokens: totalUsage.reasoningOutput } : {}),
+            ...(totalUsage.total !== undefined ? { totalTokens: totalUsage.total } : {}),
+            coverageStatus: 'COMPLETE'
+          })
+        }
+      } else if (agent === 'claude-code' && m.type === 'assistant' && (m['message/model'] || m['message/usage/input_tokens'] !== undefined)) {
+        const claudeModel = m['message/model']
+        if (claudeModel) {
+          turnOrdinal++
+          transcriptModelFacts.push({
+            scope: 'call',
+            scopeId: `call:${record.position}`,
+            ordinal: record.position,
+            sourceSurface: transcriptSurface,
+            sourceVersion: config.version,
+            observability: 'reported',
+            provider: 'entire',
+            client: agent,
+            model: claudeModel,
+            coverageStatus: 'COMPLETE'
+          })
+        }
+        const claudeUsage = extractAuthorizedTokenUsage({
+          input_tokens: intOrUndef(m['message/usage/input_tokens']),
+          output_tokens: intOrUndef(m['message/usage/output_tokens']),
+          cache_read_input_tokens: intOrUndef(m['message/usage/cache_read_input_tokens']),
+          cache_creation_input_tokens: intOrUndef(m['message/usage/cache_creation_input_tokens'])
+        })
+        if (claudeUsage) {
+          transcriptUsageFacts.push({
+            usageScope: 'call_delta',
+            scopeId: `call:${record.position}`,
+            ordinal: record.position,
+            sourceSurface: transcriptSurface,
+            sourceVersion: config.version,
+            observability: 'reported',
+            ...(claudeModel ? { model: claudeModel } : {}),
+            ...(claudeUsage.input !== undefined ? { inputTokens: claudeUsage.input } : {}),
+            ...(claudeUsage.output !== undefined ? { outputTokens: claudeUsage.output } : {}),
+            ...(claudeUsage.cacheRead !== undefined ? { cacheReadTokens: claudeUsage.cacheRead } : {}),
+            ...(claudeUsage.cacheWrite !== undefined ? { cacheWriteTokens: claudeUsage.cacheWrite } : {}),
+            coverageStatus: 'COMPLETE'
+          })
+        }
+      }
       pending.push(...normalizeEntireRecord(agent, record, (id, tool) => store.references.tool(runId, id, tool)))
       if (pending.length >= 256) flush()
     }, undefined, () => this.assertWithinDeadline())
@@ -434,6 +617,13 @@ export class EntireProvider {
       const finalConfig = await this.preflight(false, true)
       if (finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version || finalConfig.executable !== config.executable) throw new Error('PROVIDER_VERSION_MISMATCH')
       const result = store.references.commit(runId, parsed.sourceDigest, parsed.sourceBytes, () => this.assertWithinDeadline(), parsed.coverage)
+      if (store.modelIntelligence && (transcriptModelFacts.length || transcriptUsageFacts.length)) {
+        store.modelIntelligence.recordFacts(
+          known.id,
+          { modelFacts: transcriptModelFacts, usageFacts: transcriptUsageFacts },
+          () => this.assertWithinDeadline()
+        )
+      }
       if (this.targetIdentity) store.observeWorktree(result.sessionId, this.targetIdentity, () => this.assertWithinDeadline())
       return { ...result, imported: 1, provider: 'entire', importState: 'TRANSCRIPT_REFERENCED', coverage: 'COMPLETE', transcriptImported: false, sourceBytes: parsed.sourceBytes, peakScalarBytes: parsed.peakScalarBytes, sourceCoverage: 'SOURCE_VERIFIED' }
     } catch (error) { store.references.discard(runId); throw error }

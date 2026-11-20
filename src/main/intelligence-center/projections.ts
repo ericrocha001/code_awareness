@@ -1089,6 +1089,67 @@ async function buildModelProjection(
   input: InspectIntelligenceEvidenceInput,
   resolvedSession?: ResolvedSessionRef
 ) {
+  if (resolvedSession?.sessionId && !input.target.entireSession) {
+    const inspected = await callSessionPort(ports, 'inspect_agent_session', {
+      sessionId: resolvedSession.sessionId,
+      view: 'FOCAL'
+    })
+    const mi = inspected.ok && inspected.data.modelIntelligence && typeof inspected.data.modelIntelligence === 'object'
+      ? (inspected.data.modelIntelligence as Record<string, unknown>)
+      : undefined
+    const models = Array.isArray(mi?.models) ? mi.models.filter((m): m is string => typeof m === 'string') : []
+    const efforts = Array.isArray(mi?.efforts) ? mi.efforts.filter((e): e is string => typeof e === 'string') : []
+    const providers = Array.isArray(mi?.providers) ? mi.providers.filter((p): p is string => typeof p === 'string') : []
+    const clients = Array.isArray(mi?.clients) ? mi.clients.filter((c): c is string => typeof c === 'string') : []
+    const primaryUsage = mi?.primaryUsage && typeof mi.primaryUsage === 'object'
+      ? (mi.primaryUsage as Record<string, unknown>)
+      : undefined
+    const unavailableReasons = Array.isArray(mi?.unavailableReasons)
+      ? mi.unavailableReasons.filter((r): r is string => typeof r === 'string')
+      : []
+
+    if (mi && (models.length > 0 || (primaryUsage && primaryUsage.scope !== 'unavailable'))) {
+      const localGaps = new Set<string>(unavailableReasons)
+      if (efforts.length === 0) localGaps.add('EFFORT_UNAVAILABLE')
+      if (!primaryUsage || primaryUsage.scope === 'unavailable') localGaps.add('TOKEN_USAGE_UNAVAILABLE')
+      const supportState = models.length > 0 && efforts.length > 0
+        ? 'SUPPORTED'
+        : models.length > 0
+          ? 'SESSION_LEVEL_ONLY'
+          : 'PARTIAL_PENDING_METADATA'
+      return {
+        supportState,
+        dependencyRefs: ['artifact-fafc5616-794d-4e71-9c9f-238e4750f00d'],
+        persistedModelIntelligence: mi,
+        sessionLevelModel: models[0]
+          ? {
+              class: 'OBSERVADO',
+              granularity: efforts.length > 0 ? 'TURN_OR_SESSION' : 'SESSION_LEVEL',
+              model: models[0],
+              models,
+              ...(efforts.length ? { efforts } : {}),
+              provider: providers[0] ?? 'entire',
+              ...(clients[0] ? { client: clients[0] } : {})
+            }
+          : null,
+        perCallModels: efforts.length > 0 ? models : null,
+        reportedUsage: primaryUsage && primaryUsage.scope !== 'unavailable'
+          ? {
+              class: 'OBSERVADO',
+              dataSource: 'SESSION_STORE_PERSISTED',
+              granularity: primaryUsage.scope,
+              coverage: mi.coverageStatus ?? 'PARTIAL',
+              billingCoverage: 'UNAVAILABLE',
+              metrics: primaryUsage,
+              ...(Array.isArray(mi.checkpointUsage) && mi.checkpointUsage.length ? { checkpointUsage: mi.checkpointUsage } : {}),
+              ...(Array.isArray(mi.subagentUsage) && mi.subagentUsage.length ? { subagentUsage: mi.subagentUsage } : {})
+            }
+          : null,
+        gaps: [...localGaps]
+      }
+    }
+  }
+
   const gaps = new Set<string>(['PER_CALL_MODEL_UNAVAILABLE', 'EFFORT_UNAVAILABLE'])
   let entireTarget = input.target.entireSession
 
@@ -1351,7 +1412,7 @@ export async function inspectIntelligenceEvidence(
       scope: { repositoryId: ports.repositoryId, target: input.target },
       coverage: {
         model: modelProjection.supportState,
-        perCall: 'UNAVAILABLE',
+        perCall: modelProjection.perCallModels ? 'SUPPORTED' : 'UNAVAILABLE',
         ...(graphSummary ? { graph: graphSummary.coverage } : {})
       },
       evidence: modelProjection,
