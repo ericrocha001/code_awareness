@@ -1,5 +1,6 @@
 import type { ValidationSource } from '../validation-execution/validation-source'
 import type { ProviderAcceptanceSummary } from '../../shared/validation/test-output-receipt.cjs'
+import type { AuthenticatedSessionWitness, DeliveryAnchor } from '../../shared/types/delivery-context-types'
 
 export type { ProviderAcceptanceSummary }
 
@@ -36,6 +37,8 @@ export interface CommandProfile {
   receipt?: { id: string; digest: string; trust: 'EXECUTOR_REPORTED'; association: 'RUN_CONFIGURED' | 'POST_RUN_DECLARED'; acceptance?: ProviderAcceptanceSummary }
   source?: ValidationSource
   checkout?: { repositoryId: string; worktreeId: string; generation: string; head: string; issuer: 'VALIDATION_EXECUTION'; runId: string }
+  deliveryContext?: DeliveryAnchor
+  sessionWitness?: AuthenticatedSessionWitness
   command: string
   args?: string[]
   cwd?: string

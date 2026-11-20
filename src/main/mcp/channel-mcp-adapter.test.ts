@@ -8,6 +8,7 @@ import { createEfficiencyFixture } from '../core/context/context-efficiency-fixt
 import { serializeDiscovery, serializeRelationships, serializeInspectFiles, serializeReadCode, serializeReferences, serializeSymbolDependencies, serializeSymbolHierarchy } from '../core/context/context-navigation-serializer'
 import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { CODE_NAVIGATION_MCP_TOOLS as contextNavigationMcpTools } from './code-navigation-mcp'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 function createNavigation(): ContextNavigationPort {
   return {
@@ -362,5 +363,71 @@ describe('ChannelMcpAdapter', () => {
     const rejectedInternalId = await adapter.callTool('get_symbol_dependencies', { sourceTargetIds: ['0000000000000001'] })
     expect(rejectedInternalId).toMatchObject({ isError: true })
     expect(textContent(rejectedInternalId.content[0])).toMatch(/^INVALID_TARGET:/)
+  })
+
+  it('propagates authenticated deliveryContext automatically across publish_artifact, update_artifact, start_validation and record_validation_proof without editorial YAML mutation', async () => {
+    const request = { bindingArtifactId: 'artifact-execution-branch-' + '1'.repeat(64), bindingRevision: 1, planArtifactId: 'artifact-11111111-1111-4111-8111-111111111111', planRevision: 1, executionId: 'execution-A' }
+    const snapshot = { repositoryId: 'repo-1', worktreeId: 'a'.repeat(64), worktreeGeneration: '4'.repeat(64), branchRef: 'refs/heads/feat', branchGeneration: '5'.repeat(64), branchRevision: '6'.repeat(64), fingerprint: '7'.repeat(64), head: 'b'.repeat(40) }
+    const anchor = { ...request, schemaVersion: 1 as const, repositoryId: 'repo-1', planDigest: '2'.repeat(64), bindingDigest: '3'.repeat(64), classification: 'AUTHENTICATED_EXECUTION_CONTEXT' as const, snapshot }
+    const continuum = {
+      repositoryId: 'repo-1',
+      prepareDeliveryContext: vi.fn(async () => anchor),
+      publish: vi.fn((rawMarkdown: string, _fields?: unknown, _authority?: unknown, prepared?: unknown) => ({ success: true, artifactId: 'artifact-out', revision: 1, updatedAt: '2026-11-19T00:00:00Z', rawMarkdown, prepared })),
+      updateAgent: vi.fn(async () => ({ success: true, artifactId: 'artifact-out', revision: 2, updatedAt: '2026-11-19T00:00:01Z', state: 'PERSISTED' })),
+      update: vi.fn()
+    }
+    const ledger = { recordProof: vi.fn((input: any) => ({ proofId: 'proof-1', recordedAt: '2026-11-19T00:00:02Z', status: input.status, ...input })) }
+    const validationExecution = { start: vi.fn(async (input: any) => ({ runId: 'run-1', status: 'RUNNING', cwd: '/repo', source: { version: 1 }, input })), listProfiles: () => [], wait: vi.fn(), getActiveRunId: () => null }
+    const adapter = new ChannelMcpAdapter({
+      projectId: 'repo-1',
+      repoRoot: '/repo',
+      navigation: bindProjectNavigation(createNavigation(), '/repo'),
+      continuum: continuum as any,
+      gitOperations: { deliverySnapshot: vi.fn(async () => snapshot) } as any,
+      validationExecution: validationExecution as any
+    }, undefined, undefined, ledger as any)
+    const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', () => true), 'repo-1', () => true, 'a'.repeat(64), { deliveryContext: request })
+
+    const pub = await adapter.callTool('publish_artifact', { rawMarkdown: '---\nname: Doc\nkind: TECHNICAL_SPEC\n---\nBody' }, undefined, authority)
+    expect(pub.isError).toBeUndefined()
+    expect(continuum.prepareDeliveryContext).toHaveBeenCalledTimes(1)
+    expect(continuum.publish).toHaveBeenCalledWith('---\nname: Doc\nkind: TECHNICAL_SPEC\n---\nBody', expect.any(Object), authority, anchor)
+
+    const upd = await adapter.callTool('update_artifact', { artifactId: 'artifact-out', expectedRevision: 1, rawMarkdown: '---\nname: Doc\nkind: TECHNICAL_SPEC\n---\nBody v2' }, undefined, authority)
+    expect(upd.isError).toBeUndefined()
+    expect(continuum.updateAgent).toHaveBeenCalledWith(authority, 'artifact-out', 1, '---\nname: Doc\nkind: TECHNICAL_SPEC\n---\nBody v2', {}, undefined, expect.any(Function))
+
+    const proof = await adapter.callTool('record_validation_proof', {
+      kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
+      startedAt: '2026-11-19T00:00:00Z', finishedAt: '2026-11-19T00:00:01Z', durationMs: 1000, scope: ['x'], summary: 'ok'
+    }, undefined, authority)
+    expect(proof.isError).toBeUndefined()
+    expect(ledger.recordProof).toHaveBeenCalledWith(expect.objectContaining({
+      evidenceFor: [request.planArtifactId],
+      commandProfile: expect.objectContaining({ deliveryContext: anchor })
+    }))
+
+    const explicitProof = await adapter.callTool('record_validation_proof', {
+      kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
+      startedAt: '2026-11-19T00:00:00Z', finishedAt: '2026-11-19T00:00:01Z', durationMs: 1000, scope: ['x'], summary: 'ok', evidenceFor: ['explicit-target']
+    }, undefined, authority)
+    expect(explicitProof.isError).toBeUndefined()
+    expect(ledger.recordProof).toHaveBeenLastCalledWith(expect.objectContaining({
+      evidenceFor: ['explicit-target'],
+      commandProfile: expect.objectContaining({ deliveryContext: anchor })
+    }))
+
+    const val = await adapter.callTool('start_validation', { profileId: 'typecheck', producer: 'TESTER' }, undefined, authority)
+    expect(val.isError).toBeUndefined()
+    expect(validationExecution.start).toHaveBeenCalledWith(expect.objectContaining({ deliveryContext: anchor }))
+
+    const badAuthority = authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', () => true), 'repo-1', () => true, 'a'.repeat(64), { deliveryContextError: 'DELIVERY_CONTEXT_MALFORMED' })
+    const badPub = await adapter.callTool('publish_artifact', { rawMarkdown: '---\nname: Bad\nkind: TECHNICAL_SPEC\n---\nBody' }, undefined, badAuthority)
+    expect(badPub.isError).toBe(true)
+    expect(textContent(badPub.content[0])).toBe('DELIVERY_CONTEXT_INVALID')
+    expect(continuum.publish).toHaveBeenCalledTimes(1)
+    const badVal = await adapter.callTool('start_validation', { profileId: 'typecheck', producer: 'TESTER' }, undefined, badAuthority)
+    expect(badVal.isError).toBe(true)
+    expect(validationExecution.start).toHaveBeenCalledTimes(1)
   })
 })

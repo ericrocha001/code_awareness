@@ -254,3 +254,24 @@ it('does not bind an externally created PR after an uncertain governed POST', as
   expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toEqual([])
   expect(prepareDelivery).toHaveBeenCalledTimes(1)
 })
+
+it('propagates defaultDeliveryContext automatically and rejects divergence or malformed managed scope before effect', async () => {
+  const f = fixture(), anchor = deliveryAnchorFixture()
+  const { schemaVersion, repositoryId, planDigest, bindingDigest, classification, snapshot, ...deliveryContext } = anchor
+  const prepareDelivery = vi.fn(async () => anchor)
+  const created = await f.build().create(input, { ...f.execution, prepareDelivery, defaultDeliveryContext: deliveryContext, defaultWorktreeId: input.worktreeId })
+  expect(created).toMatchObject({ status: 'CREATED' })
+  expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toMatchObject([{ operationId: input.operationId, pullRequest: 23, anchor }])
+
+  const fConflict = fixture()
+  await expect(fConflict.build().create({ ...input, deliveryContext: { ...deliveryContext, executionId: 'execution-OTHER' } }, {
+    ...fConflict.execution, prepareDelivery, defaultDeliveryContext: deliveryContext
+  })).rejects.toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID' })
+  expect(fConflict.approve).not.toHaveBeenCalled()
+  expect(fConflict.api.createPullRequest).not.toHaveBeenCalled()
+
+  await expect(fConflict.build().create(input, {
+    ...fConflict.execution, prepareDelivery, deliveryContextError: 'DELIVERY_CONTEXT_MALFORMED'
+  })).rejects.toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID' })
+  expect(fConflict.api.createPullRequest).not.toHaveBeenCalled()
+})

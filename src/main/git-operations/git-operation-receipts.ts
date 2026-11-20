@@ -80,7 +80,17 @@ export class GitOperationReceipts {
     if (result.isError && !safeFailures.has(String(value.code))) return operationalFailure({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId, retryability: 'NOT_SAFE', recommendedAction: 'RECONCILE_OPERATION' })
     let deliveryVerified = false
     if (deliveryContext && prepareDelivery && !result.isError) {
-      try { const after = await prepareDelivery(); deliveryVerified = sameDeliveryScope(deliveryContext, after) && after.snapshot.head === value.sha } catch {}
+      try {
+        const after = await prepareDelivery()
+        const headMatches = operation === 'commit_git_changes'
+          ? after.snapshot.head === value.sha
+          : operation === 'mutate_worktree' && args.action === 'COMMIT'
+            ? after.snapshot.head === value.head
+            : operation === 'publish_worktree'
+              ? after.snapshot.head === value.pushedHead
+              : true
+        deliveryVerified = sameDeliveryScope(deliveryContext, after) && headMatches
+      } catch {}
     }
     const completed = { ...receipt, ...(deliveryContext ? { deliveryVerified } : {}), status: result.isError ? 'FAILED' as const : 'COMPLETED' as const, result: encodeGitReceiptResult(result), completedAt: new Date().toISOString() }
     try { await this.git.completeOperationReceipt(this.root, completed, prepared.sha) }

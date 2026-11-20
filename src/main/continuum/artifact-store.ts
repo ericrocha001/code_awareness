@@ -1,5 +1,5 @@
 import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
-import { PublicationReceipts } from './publication-receipts'
+import { PublicationReceipts, type PublicationReceiptContext } from './publication-receipts'
 import { PublicationAssociations } from './publication-associations'
 import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
@@ -61,16 +61,17 @@ export class ArtifactStore {
       provenance: JSON.parse(row.provenance_json) as Artifact['provenance'], contentHash: row.content_hash } : null
   }
   readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
-  createPublished(input: CreateArtifactInput, requestDigest: string) {
+  publicationDeliveryPage(after?: string, limit?: number) { return this.publicationReceipts.deliveryPage(after, limit) }
+  createPublished(input: CreateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext) {
     return this.db.transaction(() => {
       const artifact = this.createInsideTransaction(input)
-      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest) }
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest, receiptContext) }
     }).immediate()
   }
-  updatePublished(input: UpdateArtifactInput, requestDigest: string) {
+  updatePublished(input: UpdateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext) {
     return this.db.transaction(() => {
       const artifact = this.update(input)
-      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest, receiptContext) }
     }).immediate()
   }
   repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string) {

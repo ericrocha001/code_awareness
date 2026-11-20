@@ -8,7 +8,49 @@ import { ChannelActivityMonitor } from './channel-activity-monitor'
 import type { ChannelTraceSink } from '../../shared/types/channel-types'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
-import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent, type AgentAuthorityScope } from '../continuum/agent-authority'
+import { authenticatedSessionWitness, deliveryContextRequest } from '../../shared/types/delivery-context-types'
+
+function parseHeaderJson(value: string | string[] | undefined): { present: boolean; ok: true; value?: unknown } | { present: true; ok: false } {
+  if (value === undefined) return { present: false, ok: true }
+  if (typeof value !== 'string' || !value.trim()) return { present: true, ok: false }
+  try { return { present: true, ok: true, value: JSON.parse(value) } } catch { return { present: true, ok: false } }
+}
+
+function parseAgentScope(headers: import('node:http').IncomingHttpHeaders): { worktreeId?: string; scope?: AgentAuthorityScope } {
+  let deliveryContextError: string | undefined
+  let deliveryContext: import('../../shared/types/delivery-context-types').DeliveryContextRequest | undefined
+  let worktreeId: string | undefined
+  let sessionWitness: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness | undefined
+
+  const rawDelivery = parseHeaderJson(headers['x-code-awareness-delivery-context'])
+  if (rawDelivery.present) {
+    if (!rawDelivery.ok) deliveryContextError = 'DELIVERY_CONTEXT_MALFORMED'
+    else {
+      const parsed = deliveryContextRequest.safeParse(rawDelivery.value)
+      if (!parsed.success) deliveryContextError = 'DELIVERY_CONTEXT_MALFORMED'
+      else deliveryContext = parsed.data
+    }
+  }
+
+  const rawWorktree = headers['x-code-awareness-worktree']
+  if (rawWorktree !== undefined) {
+    if (typeof rawWorktree === 'string' && /^[a-f0-9]{64}$/.test(rawWorktree)) worktreeId = rawWorktree
+    else deliveryContextError ??= 'WORKTREE_SCOPE_INVALID'
+  }
+
+  const rawWitness = parseHeaderJson(headers['x-code-awareness-session-witness'])
+  if (rawWitness.present) {
+    const parsed = rawWitness.ok ? authenticatedSessionWitness.safeParse(rawWitness.value) : null
+    if (parsed?.success) sessionWitness = parsed.data
+    else deliveryContextError ??= 'SESSION_WITNESS_INVALID'
+  }
+
+  const scope = deliveryContext || deliveryContextError || sessionWitness
+    ? { ...(deliveryContext ? { deliveryContext } : {}), ...(deliveryContextError ? { deliveryContextError } : {}), ...(sessionWitness ? { sessionWitness } : {}) }
+    : undefined
+  return { ...(worktreeId ? { worktreeId } : {}), ...(scope ? { scope } : {}) }
+}
 
 export type McpLifecycleState =
   | { status: 'STOPPED' | 'STARTING' | 'STOPPING'; available: false }
@@ -92,7 +134,8 @@ export class McpLifecycle {
         const isActive = () => this.state.status === 'RUNNING' && this.endpointGeneration === generation && connected()
         if (!headers['x-code-awareness-binding'] || headers['x-code-awareness-binding'] !== generation || headers['x-code-awareness-instance'] !== this.instanceId || headers['x-code-awareness-project'] !== context.projectId || !isActive()) return undefined
         if (!context.continuum?.repositoryId) return undefined
-        return authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', isActive), context.continuum.repositoryId, isActive)
+        const parsedScope = parseAgentScope(headers)
+        return authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', isActive), context.continuum.repositoryId, isActive, parsedScope.worktreeId, parsedScope.scope)
       })
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))

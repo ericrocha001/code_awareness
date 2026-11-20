@@ -36,7 +36,7 @@ export class GitWorktreeValidation {
     return existsSync(join(common, 'code-awareness-validation-locks', id + '.lock'))
   }
 
-  async start(id: string, input: { profileId: string; targets?: string[]; evidenceFor?: string[] }) {
+  async start(id: string, input: { profileId: string; targets?: string[]; evidenceFor?: string[]; deliveryContext?: import('../../shared/types/delivery-context-types').DeliveryAnchor }) {
     if (this.executions.size >= 100) throw new Error('WORKTREE_VALIDATION_CAPACITY')
     const { record, common } = await this.checkout(id)
     if (!record.head) throw new Error('WORKTREE_BRANCH_REQUIRED')
