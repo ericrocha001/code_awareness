@@ -67,6 +67,7 @@ describe('System Health MCP — get_system_health tool', () => {
       'get_system_health',
       'get_runtime_identity',
       'get_channel_usage',
+      'get_evidence_evaluation_contract',
     ])
     const healthTool = tools.find((t) => t.name === 'get_system_health')!
     expect(healthTool.description).toContain('Inspect the operational health')
