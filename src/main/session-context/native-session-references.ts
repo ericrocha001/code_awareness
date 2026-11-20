@@ -2,8 +2,8 @@ import type Database from 'better-sqlite3'
 import { digest } from './privacy'
 import type { NativeSourceEventType } from './native-source-events'
 
-export const NATIVE_CODEX_NORMALIZER = 'native-codex-v2'
-export const NATIVE_ANTIGRAVITY_NORMALIZER = 'native-antigravity-v2'
+export const NATIVE_CODEX_NORMALIZER = 'native-codex-v3'
+export const NATIVE_ANTIGRAVITY_NORMALIZER = 'native-antigravity-v3'
 
 export interface NativeTurnSummary {
   id: string
@@ -240,6 +240,10 @@ export class NativeSessionReferences {
         PRIMARY KEY (nativeKey, revision, turnId)
       );
       CREATE INDEX IF NOT EXISTS native_ref_turns_order ON native_reference_turns(nativeKey, revision, ordinal);
+      CREATE TABLE IF NOT EXISTS native_reference_revisions (
+        nativeKey TEXT PRIMARY KEY,
+        lastRevision INTEGER NOT NULL
+      );
     `)
     this.available = true
   }
@@ -297,10 +301,14 @@ export class NativeSessionReferences {
 
   nextRevision(nativeKey: string): number {
     if (!this.available) return 1
+    const hasRevTable = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_revisions'").get()
+    const rev = hasRevTable
+      ? this.db.prepare('SELECT lastRevision FROM native_reference_revisions WHERE nativeKey=?').get(nativeKey) as { lastRevision: number } | undefined
+      : undefined
     const src = this.db.prepare('SELECT revision FROM native_reference_sources WHERE nativeKey=?').get(nativeKey) as { revision: number } | undefined
     const cp = this.db.prepare('SELECT revision FROM native_reference_checkpoints WHERE nativeKey=?').get(nativeKey) as { revision: number } | undefined
     const ev = this.db.prepare('SELECT MAX(revision) AS r FROM native_reference_events WHERE nativeKey=?').get(nativeKey) as { r: number | null } | undefined
-    return Math.max(src?.revision ?? 0, cp?.revision ?? 0, ev?.r ?? 0) + 1
+    return Math.max(rev?.lastRevision ?? 0, src?.revision ?? 0, cp?.revision ?? 0, ev?.r ?? 0) + 1
   }
 
   startFreshCheckpoint(input: {
@@ -329,6 +337,7 @@ export class NativeSessionReferences {
         stateJson: input.stateJson,
         updatedAt: now
       }
+      this.db.prepare('INSERT OR REPLACE INTO native_reference_revisions (nativeKey, lastRevision) VALUES (?,?)').run(input.nativeKey, revision)
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(input.nativeKey)
       this.db.prepare(`DELETE FROM native_reference_events WHERE nativeKey=? AND revision NOT IN (
         SELECT revision FROM native_reference_sources WHERE nativeKey=?
@@ -336,65 +345,6 @@ export class NativeSessionReferences {
       this.db.prepare(`DELETE FROM native_reference_turns WHERE nativeKey=? AND revision NOT IN (
         SELECT revision FROM native_reference_sources WHERE nativeKey=?
       )`).run(input.nativeKey, input.nativeKey)
-      this.db.prepare(`
-        INSERT OR REPLACE INTO native_reference_checkpoints
-        (nativeKey, revision, locatorHash, normalizer, fileIdentity, prefixDigest, nextOffset, tailDigest, sourceBytes, stateJson, updatedAt)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      `).run(
-        cp.nativeKey, cp.revision, cp.locatorHash, cp.normalizer, cp.fileIdentity, cp.prefixDigest,
-        cp.nextOffset, cp.tailDigest, cp.sourceBytes, cp.stateJson, cp.updatedAt
-      )
-      return cp
-    }).immediate()
-  }
-
-  startAppendCheckpoint(input: {
-    nativeKey: string
-    baseRevision: number
-    locatorHash: string
-    normalizer: string
-    fileIdentity: string
-    prefixDigest: string
-    nextOffset: number
-    tailDigest: string
-    sourceBytes: number
-    stateJson: string
-  }): NativeIndexingCheckpoint {
-    this.assertWritable()
-    return this.db.transaction(() => {
-      const revision = this.nextRevision(input.nativeKey)
-      const now = new Date().toISOString()
-      this.db.prepare(`DELETE FROM native_reference_events WHERE nativeKey=? AND revision NOT IN (
-        SELECT revision FROM native_reference_sources WHERE nativeKey=?
-      )`).run(input.nativeKey, input.nativeKey)
-      this.db.prepare(`DELETE FROM native_reference_turns WHERE nativeKey=? AND revision NOT IN (
-        SELECT revision FROM native_reference_sources WHERE nativeKey=?
-      )`).run(input.nativeKey, input.nativeKey)
-      this.db.prepare(`
-        INSERT INTO native_reference_events
-        (nativeKey, revision, seq, ordinal, eventId, type, timestamp, timestampMs, tool, turnId, status, pairing, errorKind, bytes, payloadDigest, sanitized, lineStart, lineEnd, partIndex)
-        SELECT nativeKey, ?, seq, ordinal, eventId, type, timestamp, timestampMs, tool, turnId, status, pairing, errorKind, bytes, payloadDigest, sanitized, lineStart, lineEnd, partIndex
-        FROM native_reference_events WHERE nativeKey=? AND revision=?
-      `).run(revision, input.nativeKey, input.baseRevision)
-      this.db.prepare(`
-        INSERT INTO native_reference_turns
-        (nativeKey, revision, ordinal, turnId, firstTime, lastTime, eventCount, typesJson)
-        SELECT nativeKey, ?, ordinal, turnId, firstTime, lastTime, eventCount, typesJson
-        FROM native_reference_turns WHERE nativeKey=? AND revision=?
-      `).run(revision, input.nativeKey, input.baseRevision)
-      const cp: NativeIndexingCheckpoint = {
-        nativeKey: input.nativeKey,
-        revision,
-        locatorHash: input.locatorHash,
-        normalizer: input.normalizer,
-        fileIdentity: input.fileIdentity,
-        prefixDigest: input.prefixDigest,
-        nextOffset: input.nextOffset,
-        tailDigest: input.tailDigest,
-        sourceBytes: input.sourceBytes,
-        stateJson: input.stateJson,
-        updatedAt: now
-      }
       this.db.prepare(`
         INSERT OR REPLACE INTO native_reference_checkpoints
         (nativeKey, revision, locatorHash, normalizer, fileIdentity, prefixDigest, nextOffset, tailDigest, sourceBytes, stateJson, updatedAt)

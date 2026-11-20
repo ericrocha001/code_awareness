@@ -516,7 +516,8 @@ export function stepAntigravityAppSourceIndex(options: {
     openHandle: () => openAntigravitySourceHandle({
       storePath, repositoryId, nativeHash, sourceSessionId, locatorDigest, worktreeRoot, registryVerifiedOrigin, assertCurrent
     }),
-    makeEventId: (ordinal, part, payloadDigest) => nativeDigest(JSON.stringify(['antigravity', sourceSessionId, ordinal, part, payloadDigest])),
+    makeEventId: (ordinal, part, payloadDigest, snapshotIdentity) =>
+      nativeDigest(JSON.stringify([NATIVE_ANTIGRAVITY_NORMALIZER, sourceSessionId, snapshotIdentity, ordinal, part, payloadDigest])),
     processRecord: (rawRecord, lineStart, lineEnd, acc: StepAccumulator) => {
       acc.state.ordinal++
       const ordinal = acc.state.ordinal

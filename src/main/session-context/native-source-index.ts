@@ -1,5 +1,4 @@
 import { closeSync, fstatSync, lstatSync, openSync, readSync, constants, type BigIntStats } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { digest, sanitize, utf8Prefix } from './privacy'
 import {
   toNativeEventMeta,
@@ -14,8 +13,6 @@ import type { NativeSourceEventType } from './native-source-events'
 
 export const NATIVE_LINE_MAX_BYTES = 512 * 1024
 export const NATIVE_IO_CHUNK_BYTES = 64 * 1024
-export const NATIVE_PREFIX_WINDOW = 4096
-export const NATIVE_TAIL_WINDOW = 512
 export const DEFAULT_NATIVE_STEP_BYTES = 2 * 1024 * 1024
 export const DEFAULT_NATIVE_STEP_LINES = 10_000
 export const DEFAULT_NATIVE_ONDEMAND_BYTES = 512 * 1024
@@ -26,6 +23,7 @@ export interface NativeStepBudget {
   maxBytes?: number
   maxLines?: number
   deadlineMs?: number
+  stepMs?: number
   onDemandMaxBytes?: number
 }
 
@@ -72,11 +70,6 @@ export function fileIdentityOf(s: BigIntStats): string {
   return [s.dev, s.ino, s.size, s.mtimeNs, s.ctimeNs].join(':')
 }
 
-export function sameFileDeviceInode(a: string, b: string): boolean {
-  const pa = a.split(':'), pb = b.split(':')
-  return pa.length >= 2 && pb.length >= 2 && pa[0] === pb[0] && pa[1] === pb[1]
-}
-
 export function openNoFollowReadOnly(filePath: string): number {
   return openSync(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
 }
@@ -92,50 +85,6 @@ export function readFdExactRange(fd: number, start: number, length: number, stal
     filled += read
   }
   return buf
-}
-
-export function digestFdRange(fd: number, start: number, length: number, staleError = 'SOURCE_REVISION_CHANGED'): string {
-  if (length <= 0) return digest('')
-  const hash = createHash('sha256')
-  const buf = Buffer.allocUnsafe(Math.min(length, NATIVE_IO_CHUNK_BYTES))
-  let pos = 0
-  while (pos < length) {
-    const toRead = Math.min(buf.length, length - pos)
-    const n = readSync(fd, buf, 0, toRead, start + pos)
-    if (n <= 0) throw new Error(staleError)
-    hash.update(buf.subarray(0, n))
-    pos += n
-  }
-  return hash.digest('hex')
-}
-
-export function computePrefixTailDigests(fd: number, indexedOffset: number, staleError = 'SOURCE_REVISION_CHANGED'): {
-  prefixDigest: string
-  tailDigest: string
-} {
-  const prefixDigest = digestFdRange(fd, 0, Math.min(indexedOffset, NATIVE_PREFIX_WINDOW), staleError)
-  const tailStart = Math.max(0, indexedOffset - NATIVE_TAIL_WINDOW)
-  const tailDigest = indexedOffset > 0 ? digestFdRange(fd, tailStart, indexedOffset - tailStart, staleError) : digest('')
-  return { prefixDigest, tailDigest }
-}
-
-export function verifyAppendContinuity(
-  fd: number,
-  fileSize: number,
-  prefixDigest: string,
-  tailOffset: number,
-  tailDigest: string,
-  staleError = 'SOURCE_REVISION_CHANGED'
-): 'EXACT' | 'APPENDED' | 'DRIFT' {
-  if (tailOffset < 0 || tailOffset > fileSize) return 'DRIFT'
-  const currentPrefix = digestFdRange(fd, 0, Math.min(tailOffset, NATIVE_PREFIX_WINDOW), staleError)
-  if (currentPrefix !== prefixDigest) return 'DRIFT'
-  if (tailOffset > 0) {
-    const tailStart = Math.max(0, tailOffset - NATIVE_TAIL_WINDOW)
-    const currentTail = digestFdRange(fd, tailStart, tailOffset - tailStart, staleError)
-    if (currentTail !== tailDigest) return 'DRIFT'
-  }
-  return fileSize === tailOffset ? 'EXACT' : 'APPENDED'
 }
 
 export interface StepAccumulator {
@@ -319,40 +268,6 @@ export function buildSummaryFromState(meta: {
   }
 }
 
-export function stateFromSummary(summary: NativeSourceRecordSummary): NativeIndexerState {
-  const typeCounts: Record<string, number> = {}
-  for (const entry of summary.sourceTypeCounts) typeCounts[entry.type] = entry.count
-  const toolStats: Record<string, number> = {}
-  for (const entry of summary.sourceTools) toolStats[entry.tool] = entry.count
-  const openCalls = JSON.parse(summary.openCallsJson || '{}') as Record<string, NativeIndexedDiagnosticRef>
-  const openIds = new Set(Object.values(openCalls).map(o => o.eventId))
-  return {
-    ordinal: summary.lastOrdinal,
-    seq: summary.eventCount,
-    omittedRecords: summary.omittedRecords,
-    ...(summary.currentTurnId ? { currentTurnId: summary.currentTurnId } : {}),
-    typeCounts,
-    toolStats,
-    attemptCounts: {
-      total: summary.attemptSummary.total,
-      success: summary.attemptSummary.success,
-      failure: summary.attemptSummary.failure,
-      refusal: summary.attemptSummary.refusal,
-      dangling: summary.attemptSummary.dangling,
-      unknown: summary.attemptSummary.unknown
-    },
-    attemptCoverage: summary.attemptCoverage,
-    errors: [...summary.errors],
-    totalErrors: summary.errors.length + summary.omittedErrors,
-    openCalls,
-    unmatchedDangling: summary.danglingCalls.filter(d => !openIds.has(d.eventId)),
-    turns: {},
-    turnOrder: summary.turnCount,
-    timestampedEvents: summary.timeCoverage.timestampedEvents,
-    missingTimestamps: summary.timeCoverage.missingTimestamps
-  }
-}
-
 export interface NativeIndexedSourceHandle {
   fd: number
   path: string
@@ -401,7 +316,7 @@ export function runNativeReferenceStep(options: {
   assertCurrent: () => void
   openHandle: () => NativeIndexedSourceHandle
   processRecord: (record: unknown, lineStart: number, lineEnd: number, acc: StepAccumulator) => void
-  makeEventId: (ordinal: number, part: number, payloadDigest: string) => string
+  makeEventId: (ordinal: number, part: number, payloadDigest: string, snapshotIdentity: string) => string
   onReady?: (ready: { summary: NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
 }): NativeReferenceStepResult {
   const {
@@ -414,106 +329,86 @@ export function runNativeReferenceStep(options: {
   const closeOnce = () => { if (!closed) { closed = true; closeSync(handle.fd) } }
   try {
     const existing = refs.getSummary(nativeKey)
-    if (
+    const existingExact = !!(
       existing &&
       existing.locatorHash === handle.locatorHash &&
       existing.normalizer === normalizer &&
-      sameFileDeviceInode(existing.fileIdentity, handle.identity)
-    ) {
-      const continuity = verifyAppendContinuity(
-        handle.fd, handle.sizeBytes, existing.prefixDigest, existing.tailOffset, existing.tailDigest, staleError
-      )
-      if (continuity === 'EXACT' && existing.fileIdentity === handle.identity) {
-        onReady?.({ summary: existing, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
-        verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
-        closeOnce()
-        handle.verifyAfterClose?.()
-        return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint }
+      existing.fileIdentity === handle.identity &&
+      existing.sourceBytes === handle.sizeBytes
+    )
+    if (existingExact && existing) {
+      if (onReady) {
+        onReady({ summary: existing, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
       }
-      if (continuity === 'DRIFT' && mode !== 'READ_ONLY') {
-        refs.invalidate(nativeKey)
-      }
-    } else if (existing && mode !== 'READ_ONLY') {
-      refs.invalidate(nativeKey)
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      closeOnce()
+      handle.verifyAfterClose?.()
+      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint }
     }
 
     if (mode === 'READ_ONLY') {
+      const cp = refs.getCheckpoint(nativeKey)
+      const checkpointExact = !!(
+        cp &&
+        cp.locatorHash === handle.locatorHash &&
+        cp.normalizer === normalizer &&
+        cp.fileIdentity === handle.identity &&
+        cp.sourceBytes === handle.sizeBytes &&
+        cp.nextOffset <= handle.sizeBytes
+      )
       return {
         status: 'INDEXING_PENDING',
         nativeKey,
-        indexedBytes: existing?.indexedBytes ?? 0,
+        indexedBytes: checkpointExact ? cp!.nextOffset : 0,
         totalBytes: handle.sizeBytes,
-        indexedEvents: existing?.eventCount ?? 0,
+        indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).seq : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'READ_ONLY_STORE'
       }
     }
 
-    const freshExisting = refs.getSummary(nativeKey)
+    if (existing) {
+      refs.invalidate(nativeKey)
+    }
+
     let checkpoint = refs.getCheckpoint(nativeKey)
     const checkpointValid = !!(
       checkpoint &&
       checkpoint.locatorHash === handle.locatorHash &&
       checkpoint.normalizer === normalizer &&
-      sameFileDeviceInode(checkpoint.fileIdentity, handle.identity) &&
-      verifyAppendContinuity(handle.fd, handle.sizeBytes, checkpoint.prefixDigest, checkpoint.nextOffset, checkpoint.tailDigest, staleError) !== 'DRIFT'
+      checkpoint.fileIdentity === handle.identity &&
+      checkpoint.sourceBytes === handle.sizeBytes &&
+      checkpoint.nextOffset <= handle.sizeBytes
     )
-    if (checkpoint && !checkpointValid) checkpoint = undefined
+    if (checkpoint && !checkpointValid) {
+      refs.invalidate(nativeKey)
+      checkpoint = undefined
+    }
 
-    const canAppendFromReady = !!(
-      !checkpoint &&
-      freshExisting &&
-      freshExisting.locatorHash === handle.locatorHash &&
-      freshExisting.normalizer === normalizer &&
-      sameFileDeviceInode(freshExisting.fileIdentity, handle.identity) &&
-      verifyAppendContinuity(handle.fd, handle.sizeBytes, freshExisting.prefixDigest, freshExisting.tailOffset, freshExisting.tailDigest, staleError) === 'APPENDED'
-    )
-
-    const remainingBytes = checkpoint
-      ? handle.sizeBytes - checkpoint.nextOffset
-      : canAppendFromReady
-        ? handle.sizeBytes - freshExisting!.tailOffset
-        : handle.sizeBytes
+    const remainingBytes = checkpoint ? handle.sizeBytes - checkpoint.nextOffset : handle.sizeBytes
     const onDemandCap = stepBudget?.onDemandMaxBytes ?? DEFAULT_NATIVE_ONDEMAND_BYTES
     if (mode === 'ON_DEMAND' && remainingBytes > onDemandCap) {
       return {
         status: 'INDEXING_PENDING',
         nativeKey,
-        indexedBytes: checkpoint ? checkpoint.nextOffset : canAppendFromReady ? freshExisting!.tailOffset : 0,
+        indexedBytes: checkpoint ? checkpoint.nextOffset : 0,
         totalBytes: handle.sizeBytes,
-        indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).seq : canAppendFromReady ? freshExisting!.eventCount : 0,
+        indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).seq : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'SOURCE_REQUIRES_INDEXING'
       }
     }
 
-    const initialPrefixDigest = digestFdRange(handle.fd, 0, Math.min(handle.sizeBytes, NATIVE_PREFIX_WINDOW), staleError)
     if (!checkpoint) {
-      if (canAppendFromReady && freshExisting) {
-        const resumeState = stateFromSummary(freshExisting)
-        checkpoint = refs.startAppendCheckpoint({
-          nativeKey,
-          baseRevision: freshExisting.revision,
-          locatorHash: handle.locatorHash,
-          normalizer,
-          fileIdentity: handle.identity,
-          prefixDigest: freshExisting.prefixDigest,
-          nextOffset: freshExisting.tailOffset,
-          tailDigest: freshExisting.tailDigest,
-          sourceBytes: handle.sizeBytes,
-          stateJson: JSON.stringify(resumeState)
-        })
-      } else {
-        checkpoint = refs.startFreshCheckpoint({
-          nativeKey,
-          locatorHash: handle.locatorHash,
-          normalizer,
-          fileIdentity: handle.identity,
-          prefixDigest: initialPrefixDigest,
-          sourceBytes: handle.sizeBytes,
-          stateJson: JSON.stringify(createInitialIndexerState(attemptCoverage))
-        })
-      }
+      checkpoint = refs.startFreshCheckpoint({
+        nativeKey,
+        locatorHash: handle.locatorHash,
+        normalizer,
+        fileIdentity: handle.identity,
+        prefixDigest: '',
+        sourceBytes: handle.sizeBytes,
+        stateJson: JSON.stringify(createInitialIndexerState(attemptCoverage))
+      })
     }
 
     const state = JSON.parse(checkpoint.stateJson) as NativeIndexerState
@@ -523,13 +418,16 @@ export function runNativeReferenceStep(options: {
       events: [],
       pairUpdates: [],
       dirtyTurns: new Set<string>(),
-      makeEventId
+      makeEventId: (ordinal, part, payloadDigest) => makeEventId(ordinal, part, payloadDigest, handle.identity)
     }
 
+    const streamDeadline = stepBudget?.stepMs !== undefined
+      ? (stepBudget.deadlineMs !== undefined ? Math.min(stepBudget.deadlineMs, Date.now() + stepBudget.stepMs) : Date.now() + stepBudget.stepMs)
+      : stepBudget?.deadlineMs
     const effectiveStepBudget: NativeStepBudget = {
       maxBytes: stepBudget?.maxBytes ?? (mode === 'ON_DEMAND' ? Math.max(onDemandCap, DEFAULT_NATIVE_STEP_BYTES) : DEFAULT_NATIVE_STEP_BYTES),
       maxLines: stepBudget?.maxLines ?? DEFAULT_NATIVE_STEP_LINES,
-      ...(stepBudget?.deadlineMs !== undefined ? { deadlineMs: stepBudget.deadlineMs } : {})
+      ...(streamDeadline !== undefined ? { deadlineMs: streamDeadline } : {})
     }
 
     let stepOut: { done: boolean; nextOffset: number; processedBytes: number; processedLines: number }
@@ -543,13 +441,12 @@ export function runNativeReferenceStep(options: {
         assertCurrent,
         onRecord: (record, lineStart, lineEnd) => processRecord(record, lineStart, lineEnd, acc)
       })
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      handle.verifyAfterClose?.()
     } catch (error) {
       refs.invalidate(nativeKey)
       throw error
     }
-
-    verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
-    const digests = computePrefixTailDigests(handle.fd, stepOut.nextOffset, staleError)
 
     if (stepOut.done && (!state.ordinal || !state.seq)) {
       closeOnce()
@@ -571,55 +468,64 @@ export function runNativeReferenceStep(options: {
     })
     state.turns = {}
 
-    refs.saveChunk({
-      nativeKey,
-      revision: checkpoint.revision,
-      events: acc.events,
-      pairUpdates: acc.pairUpdates,
-      turns: turnRows,
-      nextOffset: stepOut.nextOffset,
-      tailDigest: digests.tailDigest,
-      sourceBytes: handle.sizeBytes,
-      fileIdentity: handle.identity,
-      stateJson: JSON.stringify(state)
-    })
+    try {
+      refs.saveChunk({
+        nativeKey,
+        revision: checkpoint.revision,
+        events: acc.events,
+        pairUpdates: acc.pairUpdates,
+        turns: turnRows,
+        nextOffset: stepOut.nextOffset,
+        tailDigest: '',
+        sourceBytes: handle.sizeBytes,
+        fileIdentity: handle.identity,
+        stateJson: JSON.stringify(state)
+      })
 
-    if (!stepOut.done) {
+      if (!stepOut.done) {
+        verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+        closeOnce()
+        handle.verifyAfterClose?.()
+        return {
+          status: 'INDEXING_PENDING',
+          nativeKey,
+          indexedBytes: stepOut.nextOffset,
+          totalBytes: handle.sizeBytes,
+          indexedEvents: state.seq,
+          liveFingerprint: handle.liveFingerprint,
+          reason: 'STEP_BUDGET_REACHED'
+        }
+      }
+
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      handle.verifyAfterClose?.()
+
+      const summary = refs.promote(buildSummaryFromState({
+        nativeKey,
+        provider,
+        repositoryId,
+        worktreeId,
+        generation,
+        sourceSessionId,
+        locatorHash: handle.locatorHash,
+        normalizer,
+        revision: checkpoint.revision,
+        fileIdentity: handle.identity,
+        prefixDigest: '',
+        tailOffset: stepOut.nextOffset,
+        tailDigest: '',
+        sourceBytes: handle.sizeBytes,
+        sourceCoverage
+      }, state))
+      onReady?.({ summary, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       closeOnce()
       handle.verifyAfterClose?.()
-      return {
-        status: 'INDEXING_PENDING',
-        nativeKey,
-        indexedBytes: stepOut.nextOffset,
-        totalBytes: handle.sizeBytes,
-        indexedEvents: state.seq,
-        liveFingerprint: handle.liveFingerprint,
-        reason: 'STEP_BUDGET_REACHED'
-      }
+      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
+    } catch (error) {
+      refs.invalidate(nativeKey)
+      throw error
     }
-
-    const summary = refs.promote(buildSummaryFromState({
-      nativeKey,
-      provider,
-      repositoryId,
-      worktreeId,
-      generation,
-      sourceSessionId,
-      locatorHash: handle.locatorHash,
-      normalizer,
-      revision: checkpoint.revision,
-      fileIdentity: handle.identity,
-      prefixDigest: digests.prefixDigest,
-      tailOffset: stepOut.nextOffset,
-      tailDigest: digests.tailDigest,
-      sourceBytes: handle.sizeBytes,
-      sourceCoverage
-    }, state))
-    onReady?.({ summary, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
-    verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
-    closeOnce()
-    handle.verifyAfterClose?.()
-    return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
   } finally {
     closeOnce()
   }

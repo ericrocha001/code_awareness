@@ -115,13 +115,14 @@ it('U2 indexes and navigates >8 MiB / >512 Codex sessions incrementally without 
   expect(listed.data.sessions).toHaveLength(1)
   const deepen = listed.data.sessions[0].deepen.arguments
 
-  // Before indexing, large session (>512 KiB) returns INDEXING_PENDING without loading body
+  // Before indexing, large session (>512 KiB) returns INDEXING_PENDING without loading body or fake READY revision
   const beforeIdx = await f.call('inspect_agent_session', deepen)
   expect(beforeIdx.isError, JSON.stringify(beforeIdx.data)).toBe(false)
   expect(beforeIdx.data.indexingState).toBe('INDEXING_PENDING')
+  expect(beforeIdx.data.revision).toBe(0)
   expect(beforeIdx.data.next.tool).toBe('refresh_agent_sessions')
 
-  const pendingEvents = await f.call('list_agent_session_events', { ...deepen, expectedRevision: beforeIdx.data.revision, limit: 15 })
+  const pendingEvents = await f.call('list_agent_session_events', { ...deepen, limit: 15 })
   expect(pendingEvents.isError).toBe(true)
   expect(pendingEvents.data.code).toBe('INDEXING_PENDING')
   expect(pendingEvents.data.next.tool).toBe('refresh_agent_sessions')
@@ -244,8 +245,15 @@ it('U2 indexes and navigates >8 MiB / >512 Codex sessions incrementally without 
   expect(conflict.isError).toBe(true)
   expect(conflict.data.code).toBe('REVISION_CONFLICT')
 
-  const refreshAppend = await f.call('refresh_agent_sessions', beforeIdx.data.next.arguments)
-  expect(refreshAppend.isError).toBe(false)
+  let refreshAppend: any
+  for (let step = 0; step < 20; step++) {
+    const res = await f.call('refresh_agent_sessions', beforeIdx.data.next.arguments)
+    expect(res.isError).toBe(false)
+    if (res.data.state === 'READY') {
+      refreshAppend = res
+      break
+    }
+  }
   expect(refreshAppend.data.state).toBe('READY')
   expect(refreshAppend.data.indexedEvents).toBe(599)
 
@@ -270,7 +278,7 @@ it('U2 indexes and navigates >8 MiB / >512 Codex sessions incrementally without 
   const revoked = await f.call('inspect_agent_session', deepen)
   expect(revoked.isError).toBe(true)
   expect(revoked.data.code).toBe('SOURCE_NOT_AUTHORIZED')
-}, 120_000)
+}, 180_000)
 
 it('U2 indexes >16,384 Antigravity records with multi-part read, readOnly cross-repo queries, and legacy v8 schema compatibility', async () => {
   const f = setupWorkerEnv('repo-addr-ag')
@@ -318,7 +326,7 @@ it('U2 indexes >16,384 Antigravity records with multi-part read, readOnly cross-
     nativeSession: { provider: 'antigravity-native' as const, id: convHash, ...f.target }
   }
   let agReady: any
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 15; i++) {
     const res = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: convId })
     expect(res.isError).toBe(false)
     if (res.data.state === 'READY') {
@@ -404,5 +412,196 @@ it('U2 indexes >16,384 Antigravity records with multi-part read, readOnly cross-
     expect(data.reason).toBe('READ_ONLY_STORE')
   } finally {
     roLegacy.close()
+  }
+}, 60_000)
+
+it('U2 enforces exact snapshot identity continuity, rejects interior+append tampering, handles small <4096 chunks, invalidates v2 indexes lazily, and guards mid-scan mutations', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'u2-integrity-'))
+  cleanup.push(() => safeRemove(base))
+  const root = join(base, 'repo')
+  mkdirSync(join(root, '.git'), { recursive: true })
+  writeFileSync(join(root, '.git/HEAD'), 'ref: refs/heads/main\n')
+  const storePath = sessionStorePath(base, 'repo-integrity')
+  const store = new SessionStore(storePath, 'repo-integrity')
+  cleanup.push(() => store.close())
+
+  const target = { worktreeId: nativeDigest('wt:integrity'), generation: nativeDigest('gen:integrity') }
+  const live = [{ ...target, root, fingerprint: sourceFingerprint(root) }]
+  const profile = join(base, 'codex-integrity')
+  const sessionUuid = '01a1e000-0000-7000-8000-000000000955'
+  const uuidDay = new Date(Number.parseInt(sessionUuid.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+  const rolloutDir = join(profile, 'sessions', ...uuidDay)
+  mkdirSync(rolloutDir, { recursive: true })
+  const accHash = nativeDigest(JSON.stringify(['int-u', 'int-a']))
+  const configPath = join(dirname(storePath), 'session-context.provider.json')
+  writeFileSync(configPath, JSON.stringify({
+    repositoryId: 'repo-integrity',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash } }
+  }))
+
+  const nativeHash = nativeDigest(JSON.stringify(['repo-integrity', 'codex', sessionUuid]))
+  const nativeSession = { provider: 'codex-native' as const, id: nativeHash, ...target }
+  const deepen = { repositoryId: 'repo-integrity', sourceSessionId: sessionUuid, nativeSession }
+
+  // Small fixture (~9 KB) crossing 4096 prefix and 512 tail windows cleanly
+  const buildLines = (middleTag: string, includeCallOutput = false) => {
+    const out: string[] = [
+      JSON.stringify({
+        timestamp: '2026-11-19T10:00:00Z',
+        type: 'session_meta',
+        payload: {
+          id: sessionUuid, session_id: sessionUuid, account_scoped: true,
+          creator_user_id: 'int-u', creator_account_id: 'int-a',
+          cwd: root, runtime_workspace_roots: [root], cli_version: '0.169.0-alpha.11.1'
+        }
+      }),
+      JSON.stringify({ timestamp: '2026-11-19T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-1', cwd: root } }),
+      // >4096 bytes prefix block before interior region
+      ...Array.from({ length: 10 }, (_, i) => JSON.stringify({
+        timestamp: '2026-11-19T10:00:02Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `prefix-${i}:${'a'.repeat(450)}` }] }
+      })),
+      // Interior region past 4096 bytes (including an attempt)
+      JSON.stringify({ timestamp: '2026-11-19T10:01:00Z', type: 'response_item', payload: { type: 'function_call', name: 'interior_tool', call_id: 'call-int', arguments: '{}' } }),
+      JSON.stringify({ timestamp: '2026-11-19T10:01:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: middleTag }] } }),
+      // >512 bytes unchanged tail region
+      ...Array.from({ length: 2 }, (_, i) => JSON.stringify({
+        timestamp: '2026-11-19T10:02:00Z',
+        type: 'response_item',
+        payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `tail-${i}:${'z'.repeat(300)}` }] }
+      }))
+    ]
+    if (includeCallOutput) {
+      out.push(JSON.stringify({ timestamp: '2026-11-19T10:03:00Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'call-int', output: 'Exit code: 0\nok' } }))
+    }
+    return out.join('\n') + '\n'
+  }
+
+  const rolloutPath = join(rolloutDir, `rollout-2026-11-19T10-00-00-${sessionUuid}.jsonl`)
+  writeFileSync(rolloutPath, buildLines('INTERIOR_V1', false))
+  expect(readFileSync(rolloutPath).length).toBeGreaterThan(5000)
+
+  const callTool = async (name: Parameters<typeof executeSessionTool>[2], args: unknown, budget?: { maxBytes?: number; maxLines?: number; onDemandMaxBytes?: number }, assertCurrent = () => {}) => {
+    const res = await executeSessionTool(
+      store, {}, name, args, assertCurrent, target, live, undefined, root,
+      undefined, undefined, undefined, undefined, undefined, false, undefined, undefined, budget
+    )
+    return { isError: !!res.isError, data: JSON.parse((res.content[0] as { text: string }).text) }
+  }
+
+  // (b) Intact snapshot with first chunk < 4096 bytes resumes across checkpoints cleanly
+  const smallChunk = { maxBytes: 1800, maxLines: 100, onDemandMaxBytes: 0 }
+  const step1 = await callTool('refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, smallChunk)
+  expect(step1.isError).toBe(false)
+  expect(step1.data.state).toBe('INDEXING_PENDING')
+  expect(step1.data.indexedBytes).toBeLessThan(4096)
+
+  const step2 = await callTool('refresh_agent_sessions', step1.data.next.arguments, smallChunk)
+  expect(step2.isError).toBe(false)
+  expect(step2.data.state).toBe('INDEXING_PENDING')
+  expect(step2.data.indexedBytes).toBeGreaterThan(step1.data.indexedBytes)
+
+  let ready1: any
+  for (let i = 0; i < 10; i++) {
+    const res = await callTool('refresh_agent_sessions', step1.data.next.arguments, smallChunk)
+    if (res.data.state === 'READY') { ready1 = res.data; break }
+  }
+  expect(ready1.state).toBe('READY')
+
+  const listV1 = await callTool('list_agent_session_events', { ...deepen, expectedRevision: ready1.revision, limit: 5 }, { onDemandMaxBytes: 100_000 })
+  expect(listV1.isError).toBe(false)
+  expect(listV1.data.nextCursor).toBeDefined()
+  const listAllV1 = await callTool('list_agent_session_events', { ...deepen, expectedRevision: ready1.revision, limit: 15 }, { onDemandMaxBytes: 100_000 })
+  const interiorEv1 = listAllV1.data.events.find((e: any) => e.ordinal === 14)
+  expect(interiorEv1).toBeDefined()
+  const readV1 = await callTool('read_agent_session_event', { ...deepen, expectedRevision: ready1.revision, eventId: interiorEv1.eventId }, { onDemandMaxBytes: 100_000 })
+  expect(readV1.data.content).toBe('INTERIOR_V1')
+
+  // (a1) Interior alteration + append AFTER READY (preserving exact 4096-byte prefix and 512-byte tail)
+  // Must NOT reuse old READY or append tail; old revision, cursor, and eventId must be rejected
+  writeFileSync(rolloutPath, buildLines('INTERIOR_TAMPERED_V2', true))
+  const staleRevRead = await callTool('read_agent_session_event', { ...deepen, expectedRevision: ready1.revision, eventId: interiorEv1.eventId }, { onDemandMaxBytes: 100_000 })
+  expect(staleRevRead.isError).toBe(true)
+  expect(staleRevRead.data.code).toBe('REVISION_CONFLICT')
+
+  const staleCursorList = await callTool('list_agent_session_events', { ...deepen, cursor: listV1.data.nextCursor, limit: 15 }, { onDemandMaxBytes: 100_000 })
+  expect(staleCursorList.isError).toBe(true)
+
+  const inspectV2 = await callTool('inspect_agent_session', deepen, { onDemandMaxBytes: 100_000 })
+  expect(inspectV2.isError).toBe(false)
+  expect(inspectV2.data.revision).not.toBe(ready1.revision)
+  expect(inspectV2.data.attemptSummary.dangling).toBe(0)
+  expect(inspectV2.data.attemptSummary.success).toBe(1)
+
+  const oldEventIdOnNewRev = await callTool('read_agent_session_event', { ...deepen, expectedRevision: inspectV2.data.revision, eventId: interiorEv1.eventId }, { onDemandMaxBytes: 100_000 })
+  expect(oldEventIdOnNewRev.isError).toBe(true)
+  expect(oldEventIdOnNewRev.data.code).toBe('SOURCE_EVENT_UNAVAILABLE')
+
+  const newQuery = await callTool('list_agent_session_events', { ...deepen, expectedRevision: inspectV2.data.revision, query: 'INTERIOR_TAMPERED_V2', limit: 10 }, { onDemandMaxBytes: 100_000 })
+  expect(newQuery.data.events).toHaveLength(1)
+
+  // (a2) Interior alteration + append BETWEEN incomplete checkpoint steps
+  writeFileSync(rolloutPath, buildLines('INTERIOR_MID_STAGE1', false))
+  const midStep1 = await callTool('refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxBytes: 2500, maxLines: 100 })
+  expect(midStep1.data.state).toBe('INDEXING_PENDING')
+  writeFileSync(rolloutPath, buildLines('INTERIOR_MID_STEP_V3', true))
+  let rebuiltV3: any
+  for (let i = 0; i < 10; i++) {
+    const res = await callTool('refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxBytes: 2500, maxLines: 100 })
+    if (res.data.state === 'READY') { rebuiltV3 = res.data; break }
+  }
+  expect(rebuiltV3.state).toBe('READY')
+  const qOldMid = await callTool('list_agent_session_events', { ...deepen, expectedRevision: rebuiltV3.revision, query: 'INTERIOR_MID_STAGE1', limit: 10 }, { onDemandMaxBytes: 100_000 })
+  expect(qOldMid.data.events).toHaveLength(0)
+  const qNewMid = await callTool('list_agent_session_events', { ...deepen, expectedRevision: rebuiltV3.revision, query: 'INTERIOR_MID_STEP_V3', limit: 10 }, { onDemandMaxBytes: 100_000 })
+  expect(qNewMid.data.events).toHaveLength(1)
+
+  // (c1) Legacy v2 normalizer rows are never served silently or written in READ_ONLY, and are lazily rebuilt under v3
+  const v2Raw = new Database(storePath)
+  v2Raw.prepare("UPDATE native_reference_sources SET normalizer = 'native-codex-v2'").run()
+  v2Raw.close()
+
+  const roStore = new SessionStore(storePath, 'repo-integrity', true)
+  try {
+    const roPending = await executeSessionTool(roStore, {}, 'inspect_agent_session', deepen, () => {}, target, live, undefined, root)
+    const roData = JSON.parse((roPending.content[0] as { text: string }).text)
+    expect(roData.indexingState).toBe('INDEXING_PENDING')
+    expect(roData.reason).toBe('READ_ONLY_STORE')
+
+    const roStaleRev = await executeSessionTool(roStore, {}, 'list_agent_session_events', { ...deepen, expectedRevision: rebuiltV3.revision, limit: 5 }, () => {}, target, live, undefined, root)
+    expect(roStaleRev.isError).toBe(true)
+    expect(JSON.parse((roStaleRev.content[0] as { text: string }).text).code).toBe('REVISION_CONFLICT')
+  } finally {
+    roStore.close()
+  }
+
+  // Writable refresh lazily replaces only this session's v2 index with v3 without global migration
+  const rebuiltFromV2 = await callTool('refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxBytes: 100_000, maxLines: 100 })
+  expect(rebuiltFromV2.data.state).toBe('READY')
+  expect(rebuiltFromV2.data.revision).not.toBe(rebuiltV3.revision)
+
+  // (c2) Mid-scan file mutation never promotes incoherent staging; returns actionable SOURCE_STALE / INDEXING_PENDING cleanly
+  writeFileSync(rolloutPath, buildLines('INTERIOR_PRE_RACE', false))
+  let asserts = 0
+  let mutations = 0
+  const mutatingRes = await callTool('refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxBytes: 2500, maxLines: 100 }, () => {
+    asserts++
+    if ((asserts === 3 || asserts === 7) && mutations < 2) {
+      mutations++
+      appendFileSync(rolloutPath, JSON.stringify({ timestamp: '2026-11-19T10:09:00Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `race-${mutations}` }] } }) + '\n')
+    }
+  })
+  expect(mutations).toBe(2)
+  expect(mutatingRes.isError).toBe(false)
+  expect(mutatingRes.data.state).toBe('INDEXING_PENDING')
+  expect(mutatingRes.data.reason).toBe('SOURCE_STALE')
+  expect(mutatingRes.data.next.tool).toBe('refresh_agent_sessions')
+
+  const cpCheck = new Database(storePath, { readonly: true })
+  try {
+    expect((cpCheck.prepare('SELECT COUNT(*) AS c FROM native_reference_checkpoints').get() as { c: number }).c).toBe(0)
+  } finally {
+    cpCheck.close()
   }
 }, 60_000)
