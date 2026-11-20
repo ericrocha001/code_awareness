@@ -313,6 +313,10 @@ declare global {
 
       toggleDevTools: () => Promise<{ success: boolean }>
 
+      getDevSyncStatus: () => Promise<import('../../main/dev-sync/dev-sync-types').DevSyncAvailability>
+
+      requestDevSync: () => Promise<import('../../main/dev-sync/dev-sync-types').DevSyncResult>
+
       // ─── Banco de Dados (Code Checkpoints) ───────────────────────────
       initializeDatabase: (repoPath: string) => Promise<{ success: boolean; error?: string }>
       insertAction: (action: Omit<ActionLog, 'id'>) => Promise<{ success: boolean; error?: string }>

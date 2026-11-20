@@ -17,6 +17,9 @@ import { registerTagHandlers } from './ipc/tag-handler'
 import { registerDatabaseHandlers } from './ipc/database-handler'
 import { registerCampaignHandlers } from './ipc/campaign-handler'
 import { registerDevToolsHandlers } from './ipc/devtools-handler'
+import { registerDevSyncHandlers } from './ipc/dev-sync-handler'
+import { DevSyncService } from './dev-sync/dev-sync-service'
+import { DevSyncSupervisorClient } from './dev-sync/dev-sync-supervisor-client'
 import { registerDeepLinkHandlers } from './ipc/deeplink-handler'
 import { registerDashHandlers } from './ipc/dash-handler'
 import { setPendingDeepLink, emitDeepLinkToRenderer } from './core/deeplink-manager'
@@ -206,6 +209,26 @@ const runtimeRestart = new RuntimeRestartController(
   new EnvironmentRestartSupervisorClient(),
   () => app.quit()
 )
+const devSyncSupervisor = new DevSyncSupervisorClient()
+const devSyncService = new DevSyncService({
+  runtimeIdentity: runtimeIdentityProvider,
+  supervisor: devSyncSupervisor,
+  gitService: new GitService(),
+  requestShutdown: () => app.quit(),
+  isPackaged: () => app.isPackaged
+})
+registerDevSyncHandlers(devSyncService, runtimeIdentityProvider)
+runtimeIdentityProvider.sourceOriginReady.then(async () => {
+  if (devSyncSupervisor.isAvailable()) {
+    const payload = runtimeIdentityProvider.getIdentityPayload()
+    await devSyncSupervisor.announceReady({
+      instanceId: runtimeIdentityProvider.getInstanceId(),
+      startupHead: payload.sourceOrigin.worktree?.head ?? '',
+      sourceOrigin: payload.sourceOrigin,
+      freshness: payload.freshness
+    }).catch(() => {})
+  }
+}).catch(() => {})
 let activeValidationExecution: ValidationExecution | null = null
 let activeCliExecution: CliExecutionService | null = null
 let activeSessionContext: SessionContextClient | undefined
@@ -839,6 +862,7 @@ app.whenReady().then(async () => {
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart,
+      devSyncService,
       webExtensionManager: extensionManagerService
     })
   })

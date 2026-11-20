@@ -52,6 +52,8 @@ import { DIAGNOSTIC_SOURCE_TOOLS, executeDiagnosticSourceTool } from '../diagnos
 import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnostic-source-access'
 import { REQUEST_RUNTIME_RESTART_TOOL, executeRequestRuntimeRestart } from '../runtime-restart/runtime-restart-mcp'
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
+import { REQUEST_DEV_SYNC_TOOL, executeRequestDevSync } from '../dev-sync/dev-sync-mcp'
+import type { DevSyncService } from '../dev-sync/dev-sync-service'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
 import {
   AcademyMcpSkillsProvider,
@@ -125,6 +127,7 @@ export class ChannelMcpAdapter {
   private readonly validationExecution: ValidationExecution | undefined
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
   private readonly runtimeRestart: RuntimeRestartController | undefined
+  private readonly devSyncService: DevSyncService | undefined
   private readonly gitOperations: GitOperationsService | undefined
   private readonly githubContext?: Pick<McpProjectContext, 'githubIntegration' | 'repoRoot' | 'githubPrIsActive'>
   private readonly academy: AcademyService | undefined
@@ -189,6 +192,7 @@ export class ChannelMcpAdapter {
       this.validationExecution = context.validationExecution
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
       this.runtimeRestart = context.runtimeRestart
+      this.devSyncService = context.devSyncService
       this.gitOperations = context.gitOperations
       this.githubContext = { githubIntegration: context.githubIntegration, repoRoot: context.repoRoot, githubPrIsActive: context.githubPrIsActive }
       this.repositoryFileIngress = context.repositoryFileIngress
@@ -218,6 +222,7 @@ export class ChannelMcpAdapter {
       this.validationExecution = undefined
       this.diagnosticSourceAccess = undefined
       this.runtimeRestart = undefined
+      this.devSyncService = undefined
       this.academy = academy
     } else {
       this.navigation = navigation as ProjectContextNavigation
@@ -233,6 +238,7 @@ export class ChannelMcpAdapter {
       this.validationExecution = undefined
       this.diagnosticSourceAccess = undefined
       this.runtimeRestart = undefined
+      this.devSyncService = undefined
       this.academy = academy
     }
     this.academySkills = this.academy
@@ -326,6 +332,7 @@ export class ChannelMcpAdapter {
     if (this.sessionContext) tools.push(...SESSION_CONTEXT_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
+    if (this.devSyncService) tools.push(REQUEST_DEV_SYNC_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
     if (this.githubContext?.githubIntegration) tools.push(INSPECT_PULL_REQUEST_MERGEABILITY_TOOL)
     if (this.githubContext?.githubIntegration) tools.push(...GITHUB_PR_TOOLS.filter(tool => tool.name === 'create_pull_request' ? this.githubContext!.githubIntegration!.canCreatePullRequests?.() && !!this.githubContext!.githubPrIsActive : ['merge_pull_request', 'close_pull_request'].includes(tool.name) ? this.githubContext!.githubIntegration!.canIntegratePullRequests?.() && !!this.githubContext!.githubPrIsActive : true))
@@ -428,7 +435,7 @@ export class ChannelMcpAdapter {
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
     if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
-    if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
+    if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name || name === REQUEST_DEV_SYNC_TOOL.name) return 'Runtime Identity/Restart'
     if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) return 'Web Extension Manager'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
     return undefined
@@ -553,6 +560,12 @@ export class ChannelMcpAdapter {
       return this.runtimeRestart
         ? executeRequestRuntimeRestart(this.runtimeRestart, args)
         : { content: [{ type: 'text', text: 'RUNTIME_RESTART_UNAVAILABLE' }], isError: true }
+    }
+
+    if (name === 'request_dev_sync') {
+      return this.devSyncService
+        ? executeRequestDevSync(this.devSyncService, args, authority, this.repositoryId ?? undefined)
+        : { content: [{ type: 'text', text: 'DEV_SYNC_UNAVAILABLE' }], isError: true }
     }
 
     if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) {
