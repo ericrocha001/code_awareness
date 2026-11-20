@@ -124,8 +124,11 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
       : authority?.worktreeId && resolveDelivery ? () => resolveDelivery(authority.worktreeId)
       : undefined
     const receiptOptions = authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : undefined
-    return !deliveryResolver ? await service.executeReceipted(operationId, name, values, mutate, undefined, receiptOptions)
-      : await service.executeReceipted(operationId, name, values, mutate, deliveryResolver, receiptOptions)
+    if (receiptOptions) {
+      return await service.executeReceipted(operationId, name, values, mutate, deliveryResolver, receiptOptions)
+    }
+    return !deliveryResolver ? await service.executeReceipted(operationId, name, values, mutate)
+      : await service.executeReceipted(operationId, name, values, mutate, deliveryResolver)
   }
   catch (caught) {
     const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED', 'DELIVERY_CONTEXT_INVALID', 'DELIVERY_CONTEXT_CONFLICT', 'DELIVERY_CONTEXT_REVOKED', 'DELIVERY_CONTEXT_STALE', 'AGENT_UNAUTHORIZED', 'REPOSITORY_MISMATCH'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
