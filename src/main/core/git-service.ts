@@ -358,10 +358,62 @@ export class GitService implements FileListingPort {
   async operationReceiptPage(root: string, after = '', limit = 20) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20 || after && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(after)) throw new Error('INVALID_ARGUMENT')
     const prefix = 'refs/code-awareness/operation-receipts/'
-    const ids = (await this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)', prefix], root)).trim().split('\n').filter(ref => ref.startsWith(prefix)).map(ref => ref.slice(prefix.length)).filter(id => id > after)
-    const receipts = []
-    for (const id of ids.slice(0, limit)) { const value = await this.readOperationReceipt(root, id); if (value) receipts.push(value) }
-    return { receipts, ...(ids.length > limit ? { nextCursor: ids[limit - 1] } : {}) }
+    const raw = (await this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname) %(objectname)', prefix], root)).trim()
+    const entries = raw
+      ? raw.split('\n')
+        .map((line) => {
+          const space = line.indexOf(' ')
+          if (space <= prefix.length) return null
+          const ref = line.slice(0, space)
+          const sha = line.slice(space + 1).trim()
+          return ref.startsWith(prefix) && /^[a-f0-9]{40,64}$/.test(sha) ? { id: ref.slice(prefix.length), sha } : null
+        })
+        .filter((item): item is { id: string; sha: string } => item !== null && item.id > after)
+      : []
+    const selected = entries.slice(0, limit)
+    const receipts: Array<{ receipt: GitOperationReceipt; sha: string }> = []
+    if (selected.length) {
+      const batch = await this.runGitBytes(['cat-file', '--batch'], root, {
+        input: selected.map((item) => item.sha).join('\n') + '\n',
+        env: this.localReadEnvironment(),
+        maxOutputBytes: 4 * 1024 * 1024
+      })
+      const blobs = this.parseCatFileBatch(batch)
+      for (const item of selected) {
+        const payload = blobs.get(item.sha)
+        if (!payload) continue
+        try {
+          const receipt = JSON.parse(payload) as GitOperationReceipt
+          if (receipt && receipt.operationId === item.id && ['PREPARED', 'COMPLETED', 'FAILED'].includes(receipt.status)) {
+            receipts.push({ receipt, sha: item.sha })
+          }
+        } catch {
+          // Isolate malformed receipt blobs so healthy receipts on the same page still load.
+        }
+      }
+    }
+    return { receipts, ...(entries.length > limit ? { nextCursor: entries[limit - 1].id } : {}) }
+  }
+
+  private parseCatFileBatch(output: Buffer): Map<string, string> {
+    const objects = new Map<string, string>()
+    let offset = 0
+    while (offset < output.length) {
+      const lineEnd = output.indexOf(10, offset)
+      if (lineEnd < 0) break
+      const header = output.subarray(offset, lineEnd).toString('utf8').replace(/\r$/, '')
+      offset = lineEnd + 1
+      const parts = header.split(' ')
+      const sha = parts[0]
+      if (parts[1] === 'missing' || parts.length < 3) continue
+      const size = Number(parts[2])
+      if (!Number.isSafeInteger(size) || size < 0 || offset + size > output.length) break
+      if (parts[1] === 'blob' && sha) objects.set(sha, output.subarray(offset, offset + size).toString('utf8'))
+      offset += size
+      if (output[offset] === 13) offset++
+      if (output[offset] === 10) offset++
+    }
+    return objects
   }
   async prepareOperationReceipt(root: string, receipt: GitOperationReceipt): Promise<{ created: boolean; receipt: GitOperationReceipt; sha: string }> {
     const gitDir = await this.getCommonDirectory(root)

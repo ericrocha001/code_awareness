@@ -10,15 +10,19 @@ import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
 import { GitOperationReceipts, gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 import { executeGitOperationsTool } from '../git-operations/git-operations-mcp'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { GitOperationsService } from '../git-operations/git-operations-service'
+import { GitLocalAdapter } from '../git-operations/local-adapter'
+import { GitHubLocalAdapter } from '../github/local-adapter'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { SessionStore, sessionStorePath } from './store'
 import { registrySources, handoffTargets } from './registry-sources'
 import { executeSessionTool } from './mcp'
 import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding } from './native-hooks'
+import { correlateNativeArtifact } from './native-artifact-correlation'
 import { startCaptureFixture } from './fixtures/native-capture-fixture'
 import { nativeObservationBatch } from './native-hook-ingestion'
+import { stampNativeCapture } from './native-capture-window'
 import { correlateNativeGit } from './native-git-correlation'
 import Database from 'better-sqlite3'
 const cleanup: (() => Promise<void>)[] = []
@@ -309,3 +313,297 @@ it('returns deliveryContext from bindExecutionBranch and projects Continuum publ
     expect.objectContaining({ evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: proof.proofId })
   ]))
 }, 60000)
+
+it('propagates active execution identity automatically through LocalChannel Git, GitHub and Continuum adapters without manual deliveryContext', async () => {
+  const f = await fixture()
+  const rawPlan = '---\nname: U2 Local Plan\ndescription: U2 E2E fixture\nkind: EXECUTABLE_PLAN\n---\nPRIVATE_U2_PLAN'
+  const u2Plan = f.service.publish(rawPlan)
+  const booted = await f.service.bootstrapExecution({ planArtifactId: u2Plan.artifactId, expectedPlanRevision: 1 }, f.observe)
+  expect(booted.executionId).toMatch(/^exec-/)
+
+  const operations = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  const session = {
+    getActiveService: () => f.service,
+    getActiveSession: () => ({ repositoryId: 'fixture', repositoryPath: f.root })
+  } as any
+  const principal = authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true)
+  const context = { connected: () => true, principal }
+
+  const treeSnapshot = await f.observe()
+  writeFileSync(join(f.root, 'feature.txt'), 'u2 delivery')
+  const gitAdapter = new GitLocalAdapter(() => ({ repositoryId: 'fixture', repositoryPath: f.root, service: operations, isCurrent: () => true }), session)
+  await gitAdapter.operations.stage.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-stage-1',
+    mode: 'STAGE', paths: ['feature.txt'], expectedIndexRevision: (await operations.getState()).indexRevision,
+    expectedWorktreeRevision: (await operations.getState()).worktreeRevision
+  }, context)
+  const committed = await gitAdapter.operations.commit.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-commit-1',
+    message: 'u2 governed commit', expectedHead: (await operations.getState()).head,
+    expectedIndexRevision: (await operations.getState()).indexRevision
+  }, context) as { sha: string }
+
+  const commitReceipt = (await f.git.readOperationReceipt(f.root, 'u2-commit-1'))!.receipt
+  expect(commitReceipt.deliveryVerified).toBe(true)
+  expect(commitReceipt.deliveryContext?.executionId).toBe(booted.executionId)
+  expect(commitReceipt.deliveryContext?.planArtifactId).toBe(u2Plan.artifactId)
+
+  const receiptDirectory = join(f.root, '.git', 'pr-receipts-u2')
+  const prSummary = {
+    number: 202, url: 'https://github.com/owner/repo/pull/202', title: 'U2 PR', state: 'open' as const, draft: false,
+    head: { ref: 'main', repository: 'owner/repo', sha: committed.sha },
+    base: { ref: 'release', repository: 'owner/repo', sha: 'e'.repeat(40) },
+    mergeability: 'UNKNOWN' as const, mergedAt: null, observedAt: new Date().toISOString()
+  }
+  let prCreated = false
+  const ghIntegration = {
+    getPullRequestAccess: async () => ({ state: 'READY' }),
+    getPullRequestOperation: async () => ({ status: 'CREATED' }),
+    createPullRequest: async (_repoPath: string, prInput: any, execCtx: any) => {
+      const api = {
+        getPullRequestPermissions: async () => ({ create: true }),
+        getBranchSha: async (_repo: string, ref: string) => ref === 'main' ? committed.sha : 'e'.repeat(40),
+        listPullRequests: async () => ({ pullRequests: prCreated ? [prSummary] : [] }),
+        getPullRequest: async () => prSummary,
+        createPullRequest: async () => { prCreated = true; return prSummary }
+      }
+      return new GitHubPullRequests(api as any, async () => ({ repositoryId: 'fixture', repository: 'owner/repo' }), { receiptDirectory, approve: async () => true }).create(prInput, execCtx)
+    }
+  } as any
+  const ghAdapter = new GitHubLocalAdapter(() => ({ repositoryId: 'fixture', repositoryPath: f.root, integration: ghIntegration, gitOperations: operations, isCurrent: () => true }), session)
+  const prRes = await ghAdapter.operations.create_pr.execute({
+    repositoryId: 'fixture', worktreeId: treeSnapshot.worktreeId, operationId: 'u2-pr-1',
+    headBranch: 'main', baseBranch: 'release', expectedHeadSha: committed.sha, title: 'U2 PR', body: 'PRIVATE_U2_PR'
+  }, context) as { status: string }
+  expect(prRes.status).toBe('CREATED')
+  expect(pullRequestDeliveryPage(receiptDirectory, 'fixture').observations).toMatchObject([{
+    operationId: 'u2-pr-1', pullRequest: 202, headSha: committed.sha, anchor: { executionId: booted.executionId, planArtifactId: u2Plan.artifactId }
+  }])
+
+  const authority = authorizeArtifactAgent(principal, 'fixture', () => true, treeSnapshot.worktreeId)
+  const resolved = await f.service.resolveExecutionContext(authority, undefined, () => operations.deliverySnapshot(treeSnapshot.worktreeId))
+  const handoff = f.service.publish(`---\nname: U2 Handoff\ndescription: U2 handoff\nkind: IMPLEMENTATION_HANDOFF\nrelations:\n  - artifactId: ${u2Plan.artifactId}\n    kind: implements\n---\nBody`, {}, authority, resolved.anchor)
+  expect(handoff.publicationReceipt?.deliveryContext?.executionId).toBe(booted.executionId)
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u2.db')); cleanup.push(async () => ledger.close())
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: cursor => operations.deliveryProjectionPage(cursor),
+    github: {
+      deliveryRepository: async () => 'owner/repo',
+      commitPullRequests: async () => [202],
+      getPullRequest: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', pullRequest: prSummary }),
+      deliveryProjectionPage: (id: string, cursor?: string) => pullRequestDeliveryPage(receiptDirectory, id, cursor),
+      pullRequestCommits: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', headSha: committed.sha, commits: [{ sha: committed.sha }], nextPage: null })
+    } as any,
+    networkAllowed: () => true,
+    assertCurrent: () => {}
+  })
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+  const planGraph = sessions.registry.contextGraph({ kind: 'ARTIFACT', id: `${u2Plan.artifactId}:1` }, undefined, 4)
+  expect(planGraph.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'delivery-context', to: `COMMIT:fixture:${committed.sha}` }),
+    expect.objectContaining({ relation: 'delivery-context', to: 'PR:fixture:202' }),
+    expect.objectContaining({ relation: 'delivery-context', to: `ARTIFACT:fixture:${handoff.artifactId}:1` })
+  ]))
+  const commitGraph = sessions.registry.contextGraph({ kind: 'COMMIT', id: committed.sha }, undefined, 4)
+  expect(commitGraph.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'ARTIFACT', id: u2Plan.artifactId, revision: 1, key: `ARTIFACT:fixture:${u2Plan.artifactId}:1` }),
+    expect.objectContaining({ type: 'PR', id: '202', key: 'PR:fixture:202' })
+  ]))
+}, 120000)
+
+it('separates Antigravity contextual activation from verified causal proof, handles multi-session & delegated lineage, and enforces producerWitness', async () => {
+  const f = await fixture()
+  const agPlan = f.service.publish('---\nname: U3 Plan\ndescription: U3 Antigravity fixture\nkind: EXECUTABLE_PLAN\n---\nPRIVATE_U3')
+  const booted = await f.service.bootstrapExecution({ planArtifactId: agPlan.artifactId, expectedPlanRevision: 1 }, f.observe)
+  const snapshot = await f.observe()
+  const activation = {
+    activationId: booted.activationId!,
+    revision: booted.activationRevision!,
+    executionId: booted.executionId,
+    planArtifactId: agPlan.artifactId,
+    planRevision: 1,
+    bindingArtifactId: booted.artifactId,
+    bindingRevision: booted.revision,
+    scope: 'CHECKOUT_OBSERVED' as const
+  }
+
+  const spool = join(f.root, '.code-awareness/native-hooks/antigravity/spool')
+  prepareNativeSpool(spool)
+  const agBinding: NativeHookBinding = {
+    schema: 1, provider: 'antigravity', enabled: true, repositoryId: 'fixture',
+    worktreeId: snapshot.worktreeId, generation: snapshot.worktreeGeneration,
+    ...nativeGitIdentity(f.root), spool, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes'
+  }
+  mkdirSync(join(f.root, '.agents'), { recursive: true })
+  writeFileSync(join(f.root, '.agents/hooks.json'), '{}')
+  writeFileSync(join(f.root, '.code-awareness/native-hooks/antigravity/binding.json'), JSON.stringify(agBinding))
+
+  const path = sessionStorePath(join(f.root, '.git'), 'fixture')
+  const sessions = new SessionStore(path, 'fixture'); cleanup.push(async () => sessions.close())
+
+  const s1Raw = 'ag-session-1', s2Raw = 'ag-session-2'
+  const s1Id = nativeDigest(JSON.stringify(['fixture', 'antigravity', s1Raw]))
+  const s2Id = nativeDigest(JSON.stringify(['fixture', 'antigravity', s2Raw]))
+  const stamp = (ev: ReturnType<typeof normalizeNativeHook>) => stampNativeCapture(ev, agBinding)
+
+  const passiveStart = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBinding, new Date(), { activation }))
+  const passivePre = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'call-passive', name: agBinding.gitCommitTool, input: { operationId: 'op-passive' } } }, agBinding, new Date(), { activation }))
+  const passivePost = stamp(normalizeNativeHook({ conversationId: s1Raw, workspacePaths: [f.root], hookEventName: 'PostToolUse', toolCall: { id: 'call-passive', name: agBinding.gitCommitTool } }, agBinding, new Date(), { activation }))
+  for (const ev of [passiveStart, passivePre, passivePost]) sessions.registry.apply(nativeObservationBatch(ev), undefined)
+
+  expect(await correlateNativeGit(sessions.registry, agBinding, passivePre.invocationId!, f.git, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+  expect(await correlateNativeArtifact(sessions.registry, agBinding, passivePre.invocationId!, { readReceipt: async () => null, associate: async () => ({ state: 'VERIFIED', conflictingInvocationIds: [] }), invalidate: async () => {} } as any, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+
+  const execGraphPassive = sessions.registry.contextGraph({ kind: 'EXECUTION', id: booted.executionId }, undefined, 2)
+  expect(execGraphPassive.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'observed-in-execution', evidenceKind: 'EXECUTION_CONTEXT_OBSERVED', confidenceClass: 'OBSERVED' })
+  ]))
+  expect(execGraphPassive.edges.some(e => e.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
+
+  const delegatedStart = stamp(normalizeNativeHook({ conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBinding, new Date(), {
+    activation: { ...activation, scope: 'DELEGATED', parentSessionId: s1Id }
+  }))
+  sessions.registry.apply(nativeObservationBatch(delegatedStart), undefined)
+  const s2Graph = sessions.registry.contextGraph({ kind: 'SESSION', id: `antigravity-native:${s2Id}` }, undefined, 2)
+  expect(s2Graph.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ relation: 'delegated-from', evidenceKind: 'DELEGATED_SESSION_LINEAGE', to: `SESSION:fixture:antigravity-native:${s1Id}` }),
+    expect.objectContaining({ relation: 'observed-in-execution', to: `EXECUTION:fixture:${booted.executionId}` })
+  ]))
+
+  const ops = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  writeFileSync(join(f.root, 'ag-managed.txt'), 'managed u3 commit')
+  const authorityNoHeaderSpoof = authorizeArtifactAgent(authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true), 'fixture', () => true, snapshot.worktreeId, {
+    sessionWitness: { provider: 'antigravity', sessionId: s2Raw, invocationId: 'call-managed' }
+  })
+  const st0 = await ops.getState()
+  const stageRes = await executeGitOperationsTool(ops, 'stage_git_changes', {
+    operationId: 'ag-stage-1', mode: 'STAGE', paths: ['ag-managed.txt'], expectedIndexRevision: st0.indexRevision, expectedWorktreeRevision: st0.worktreeRevision
+  }, undefined, authorityNoHeaderSpoof)
+  expect(stageRes.isError).toBeFalsy()
+  const st = await ops.getState()
+  const commitArgs = { operationId: 'ag-managed-1', message: 'ag commit', expectedHead: st.head, expectedIndexRevision: st.indexRevision }
+  const commitRes = await executeGitOperationsTool(ops, 'commit_git_changes', commitArgs, req => f.service.prepareDeliveryContext(authorityNoHeaderSpoof, req, f.observe), authorityNoHeaderSpoof, () => f.observe().then(() => f.service.resolveExecutionContext(authorityNoHeaderSpoof, undefined, f.observe).then(r => r.anchor)))
+  expect(commitRes.isError).toBeFalsy()
+
+  const s2PreSpoof = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse',
+    toolCall: { id: 'call-unverified', name: agBinding.gitCommitTool, input: commitArgs }
+  }, agBinding, new Date(), { activation }))
+  sessions.registry.apply(nativeObservationBatch(s2PreSpoof), undefined)
+  expect(await correlateNativeGit(sessions.registry, agBinding, s2PreSpoof.invocationId!, f.git, () => {})).toBe('ANTIGRAVITY_CAUSAL_UNSUPPORTED')
+
+  const witness = { verifiedBy: 'MANAGED_RUNTIME' as const, sessionId: s2Id }
+  const s2PreManaged = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PreToolUse',
+    toolCall: { id: 'call-managed', name: agBinding.gitCommitTool, input: commitArgs }
+  }, agBinding, new Date(), { activation, producerWitness: witness }))
+  const s2PostManaged = stamp(normalizeNativeHook({
+    conversationId: s2Raw, workspacePaths: [f.root], hookEventName: 'PostToolUse',
+    toolCall: { id: 'call-managed', name: agBinding.gitCommitTool, input: commitArgs, response: commitRes }
+  }, agBinding, new Date(), { activation, producerWitness: witness }))
+  sessions.registry.apply(nativeObservationBatch(s2PreManaged), undefined)
+  sessions.registry.apply(nativeObservationBatch(s2PostManaged), undefined)
+  expect(await correlateNativeGit(sessions.registry, agBinding, s2PreManaged.invocationId!, f.git, () => {})).toBe('VERIFIED')
+}, 60000)
+
+it('batches receipt paging cleanly, isolates malformed blobs, avoids EOF wrap-around, protects global completeness on focal refresh and recovers alternative exact evidence without backfill', async () => {
+  const f = await fixture()
+  await f.service.bootstrapExecution({ planArtifactId: f.plan.artifactId, expectedPlanRevision: f.plan.revision }, f.observe)
+  const snapshot = await f.observe()
+  const operations = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true), 'fixture', () => true, snapshot.worktreeId)
+
+  const badPath = join(f.root, '.git', 'corrupt-receipt.json')
+  writeFileSync(badPath, '{malformed-json')
+  const corruptBlob = (await gitExec(f.root, ['hash-object', '-w', badPath])).trim()
+  await gitExec(f.root, ['update-ref', 'refs/code-awareness/operation-receipts/000-corrupt', corruptBlob])
+
+  const committedShas: string[] = []
+  for (const opId of ['u4-op-01', 'u4-op-02']) {
+    writeFileSync(join(f.root, `${opId}.txt`), opId)
+    const s0 = await operations.getState()
+    await executeGitOperationsTool(operations, 'stage_git_changes', {
+      operationId: `${opId}-stage`, mode: 'STAGE', paths: [`${opId}.txt`], expectedIndexRevision: s0.indexRevision, expectedWorktreeRevision: s0.worktreeRevision
+    }, undefined, authority)
+    const s1 = await operations.getState()
+    const res = await executeGitOperationsTool(operations, 'commit_git_changes', {
+      operationId: opId, message: opId, expectedHead: s1.head, expectedIndexRevision: s1.indexRevision
+    }, undefined, authority, () => f.observe().then(() => f.service.resolveExecutionContext(authority, undefined, f.observe).then(r => r.anchor)))
+    expect(res.isError).toBeFalsy()
+    committedShas.push(JSON.parse(res.content[0].text).sha)
+  }
+
+  const page1 = await f.git.operationReceiptPage(f.root, '', 2)
+  expect(page1.nextCursor).toBe('u4-op-01')
+  const page2 = await f.git.operationReceiptPage(f.root, page1.nextCursor)
+  expect(page2.receipts.map(r => r.receipt.operationId)).toEqual(expect.arrayContaining(['u4-op-01-stage', 'u4-op-02', 'u4-op-02-stage']))
+
+  const deliveries = await operations.deliveryProjectionPage()
+  expect(deliveries.observations.map(o => o.operationId)).toEqual(['u4-op-01', 'u4-op-02'])
+  expect(await operations.deliveryProjectionPage('zzz-after-tail')).toEqual({ observations: [], nextCursor: undefined })
+
+  await gitExec(f.root, ['commit', '--allow-empty', '-m', 'untracked historical commit'])
+  const externalSha = (await f.git.getCurrentCommitHash(f.root))!
+  const histPlan = f.service.publish('---\nname: Historical Plan\ndescription: Historical fixture\nkind: EXECUTABLE_PLAN\n---\nPlan body')
+  const histHandoff = f.service.publish(`---\nname: Historical Handoff\ndescription: Historical handoff\nkind: IMPLEMENTATION_HANDOFF\ncommitSha: ${externalSha}\nrelations:\n  - artifactId: ${histPlan.artifactId}\n    kind: implements\n---\nHandoff body`)
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u4.db')); cleanup.push(async () => ledger.close())
+  const proof = ledger.recordProof({
+    kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
+    startedAt: '2026-11-20T10:00:00Z', finishedAt: '2026-11-20T10:00:01Z', durationMs: 1000,
+    scope: ['u4'], summary: 'u4 proof', evidenceFor: [histPlan.artifactId]
+  })
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  let gitPageCalls = 0
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: async () => {
+      gitPageCalls++
+      return gitPageCalls === 1
+        ? { observations: [deliveries.observations[0]], nextCursor: 'u4-op-01' }
+        : { observations: [], nextCursor: undefined }
+    },
+    github: {
+      deliveryRepository: async () => 'owner/repo',
+      commitPullRequests: async (_root: string, sha: string) => sha === externalSha ? [162] : [],
+      getPullRequest: async () => ({
+        repositoryId: 'fixture', repository: 'owner/repo',
+        pullRequest: {
+          number: 162, url: 'https://github.com/owner/repo/pull/162', title: 'External PR #162', state: 'closed',
+          draft: false, head: { ref: 'feat', repository: 'owner/repo', sha: externalSha },
+          base: { ref: 'main', repository: 'owner/repo', sha: 'a'.repeat(40) }, mergeability: 'UNKNOWN',
+          mergedAt: '2026-11-20T09:00:00Z', lifecycle: 'MERGED', mergeCommitSha: externalSha, observedAt: '2026-11-20T09:01:00Z'
+        }
+      }),
+      pullRequestCommits: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', headSha: externalSha, commits: [{ sha: externalSha }], nextPage: null })
+    } as any,
+    networkAllowed: () => true,
+    assertCurrent: () => {}
+  })
+
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+  expect(sessions.registry.source('DELIVERY_GIT')?.status).toBe('PARTIAL')
+  expect(sessions.registry.source('DELIVERY_GIT')?.cursor).toBe('u4-op-01')
+
+  sessions.registry.applyAll(await read({ selector: { kind: 'COMMIT', id: externalSha }, cursors: sessions.registry.cursors() }), () => {})
+  expect(sessions.registry.source('DELIVERY_GIT')?.status).toBe('PARTIAL')
+  expect(sessions.registry.source('DELIVERY_GIT')?.cursor).toBe('u4-op-01')
+
+  const recovered = sessions.registry.contextGraph({ kind: 'COMMIT', id: externalSha }, undefined, 4)
+  expect(recovered.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'PR', id: '162' }),
+    expect.objectContaining({ type: 'ARTIFACT', id: histHandoff.artifactId }),
+    expect.objectContaining({ type: 'ARTIFACT', id: histPlan.artifactId }),
+    expect.objectContaining({ type: 'PROOF', id: proof.proofId })
+  ]))
+  expect(recovered.edges.some(e => e.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && (e.from.endsWith(externalSha) || e.to.endsWith(externalSha)))).toBe(false)
+}, 120000)

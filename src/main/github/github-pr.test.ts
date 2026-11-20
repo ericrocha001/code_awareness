@@ -275,3 +275,55 @@ it('propagates defaultDeliveryContext automatically and rejects divergence or ma
   })).rejects.toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID' })
   expect(fConflict.api.createPullRequest).not.toHaveBeenCalled()
 })
+
+it('persists canonical PR receipt without deliveryContext, recovers in-flight uncertain POST, and auto-resolves via resolveDelivery without duplicating existing PRs', async () => {
+  const { readFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const { hash } = await import('./github-pull-requests.js')
+
+  const fUnbound = fixture()
+  const unbound = await fUnbound.build().create(input, fUnbound.execution)
+  expect(unbound).toMatchObject({ status: 'CREATED', pullRequest: { number: 23 } })
+  const unboundReceipt = JSON.parse(readFileSync(join(fUnbound.receiptDirectory, hash(context.repositoryId), `${hash(input.operationId)}.json`), 'utf8'))
+  expect(unboundReceipt).toMatchObject({
+    status: 'COMPLETED',
+    deliveryStatus: 'UNBOUND',
+    operationId: input.operationId,
+    result: { number: 23, repository: 'owner/repo', headSha: sha }
+  })
+  expect(unboundReceipt.completedAt).toBeTruthy()
+  expect(pullRequestDeliveryPage(fUnbound.receiptDirectory, context.repositoryId).observations).toEqual([])
+
+  const fRecover = fixture(), anchor = deliveryAnchorFixture()
+  fRecover.api.createPullRequest.mockImplementation(async () => {
+    fRecover.setPulls([summary()])
+    throw new Error('CONNECTION_RESET_AFTER_POST')
+  })
+  const resolveDelivery = vi.fn(async () => anchor)
+  const recovered = await fRecover.build().create(input, { ...fRecover.execution, resolveDelivery })
+  expect(recovered).toMatchObject({ status: 'EXISTING_OPEN', replayed: true, pullRequest: { number: 23 } })
+  expect(pullRequestDeliveryPage(fRecover.receiptDirectory, context.repositoryId).observations).toMatchObject([{
+    operationId: input.operationId, pullRequest: 23, headSha: sha, anchor
+  }])
+
+  const fReplayCrash = fixture()
+  fReplayCrash.api.createPullRequest.mockImplementation(async () => {
+    fReplayCrash.setPulls([summary()])
+    return summary()
+  })
+  fReplayCrash.api.getPullRequest.mockRejectedValueOnce(new Error('POST_COMMIT_CRASH')).mockResolvedValue(summary())
+  fReplayCrash.api.listPullRequests.mockResolvedValueOnce({ pullRequests: [], nextCursor: undefined }).mockResolvedValueOnce({ pullRequests: [], nextCursor: undefined }).mockRejectedValueOnce(new Error('CRASH_BEFORE_RECONCILE'))
+  await expect(fReplayCrash.build().create(input, { ...fReplayCrash.execution, resolveDelivery: vi.fn(async () => anchor) })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' })
+  fReplayCrash.api.listPullRequests.mockResolvedValue({ pullRequests: [summary()], nextCursor: undefined })
+  const afterCrash = await fReplayCrash.build().create(input, { ...fReplayCrash.execution, resolveDelivery: vi.fn(async () => anchor) })
+  expect(afterCrash).toMatchObject({ status: 'EXISTING_OPEN', replayed: true, pullRequest: { number: 23 } })
+  expect(pullRequestDeliveryPage(fReplayCrash.receiptDirectory, context.repositoryId).observations).toMatchObject([{
+    operationId: input.operationId, pullRequest: 23
+  }])
+
+  const fPreExisting = fixture()
+  fPreExisting.setPulls([summary()])
+  const preExisting = await fPreExisting.build().create(input, { ...fPreExisting.execution, resolveDelivery: vi.fn(async () => anchor) })
+  expect(preExisting).toMatchObject({ status: 'EXISTING_OPEN', replayed: false })
+  expect(pullRequestDeliveryPage(fPreExisting.receiptDirectory, context.repositoryId).observations).toEqual([])
+})

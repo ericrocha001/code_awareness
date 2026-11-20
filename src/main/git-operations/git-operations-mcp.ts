@@ -7,6 +7,7 @@ import { DELIVERY_CONTEXT_SCHEMA, deliveryContextRequest, resolveEffectiveDelive
 import type { AgentAuthority } from '../continuum/agent-authority'
 
 export type PrepareScopedDelivery = (request: DeliveryContextRequest, worktreeId?: string) => Promise<DeliveryAnchor>
+export type ResolveOptionalDelivery = (worktreeId?: string) => Promise<DeliveryAnchor | undefined>
 
 const string = { type: 'string', minLength: 1 }
 const expectedHead = { type: ['string', 'null'], pattern: '^[a-f0-9]{40,64}$' }
@@ -73,7 +74,7 @@ function validate(schema: Record<string, any>, value: unknown): boolean {
   return false
 }
 
-export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareScopedDelivery, authority?: AgentAuthority): Promise<McpToolResult> {
+export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareScopedDelivery, authority?: AgentAuthority, resolveDelivery?: ResolveOptionalDelivery): Promise<McpToolResult> {
   const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
   if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   const { operationId, ...values } = args as Record<string, unknown>
@@ -88,7 +89,9 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
       return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID', ...(!resolved.ok ? { reason: resolved.reason } : { reason: 'WORKTREE_SCOPE_CONFLICT' }) }) }], isError: true }
     }
     const worktreeId = typeof values.worktreeId === 'string' ? values.worktreeId : undefined
-    const prepareScoped = resolved.request ? (prepareDelivery ? () => prepareDelivery(resolved.request!, worktreeId) : null) : undefined
+    const prepareScoped = resolved.request
+      ? (prepareDelivery ? () => prepareDelivery(resolved.request!, worktreeId) : null)
+      : (resolveDelivery && worktreeId ? () => resolveDelivery(worktreeId) : undefined)
     if (prepareScoped === null) return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID' }) }], isError: true }
     try {
       if (name === 'resolve_worktree_conflict') {
@@ -116,11 +119,19 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
     const useDelivery = name === 'commit_git_changes' ? resolved.request : undefined
     if (useDelivery && !prepareDelivery) return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
     const mutate = () => dispatchGitOperationsTool(service, name, mutation)
-    return !useDelivery ? await service.executeReceipted(operationId, name, values, mutate)
-      : await service.executeReceipted(operationId, name, values, mutate, () => prepareDelivery!(useDelivery, authority?.worktreeId))
+    const deliveryResolver = name !== 'commit_git_changes' ? undefined
+      : useDelivery ? () => prepareDelivery!(useDelivery, authority?.worktreeId)
+      : authority?.worktreeId && resolveDelivery ? () => resolveDelivery(authority.worktreeId)
+      : undefined
+    const receiptOptions = authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : undefined
+    if (receiptOptions) {
+      return await service.executeReceipted(operationId, name, values, mutate, deliveryResolver, receiptOptions)
+    }
+    return !deliveryResolver ? await service.executeReceipted(operationId, name, values, mutate)
+      : await service.executeReceipted(operationId, name, values, mutate, deliveryResolver)
   }
   catch (caught) {
-    const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED', 'DELIVERY_CONTEXT_INVALID', 'DELIVERY_CONTEXT_STALE', 'AGENT_UNAUTHORIZED', 'REPOSITORY_MISMATCH'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
+    const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED', 'DELIVERY_CONTEXT_INVALID', 'DELIVERY_CONTEXT_CONFLICT', 'DELIVERY_CONTEXT_REVOKED', 'DELIVERY_CONTEXT_STALE', 'AGENT_UNAUTHORIZED', 'REPOSITORY_MISMATCH'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
     return operationalFailure({ code, operationId, retryability: 'SAME_OPERATION_ID', retryAfterMs: 2000, recommendedAction: 'RECOVER_SAME_OPERATION' })
   }
 }

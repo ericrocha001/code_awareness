@@ -514,3 +514,36 @@ it('rejects PR composition if the authorized GitHub origin changes during the re
   const service = new GitHubIntegrationService({ clientId: 'fixture', appSlug: 'fixture' }, {} as any, { hasCredentials: () => true } as any, api as any, { findByPath: () => ({ id: 'repo' }) } as any, { getRemoteUrl: async () => remote } as any, {} as any)
   await expect(service.pullRequestCommits('/fixture', 90, commit)).rejects.toThrow('REMOTE_CONTEXT_CHANGED')
 })
+
+it('classifies DELIVERY_* / GITHUB / LEDGER failures with sanitized reasonCode and stage and tracks DELIVERY_CONTINUUM backlog without leaking messages', async () => {
+  const f = fixture(), source = sources(f, false)
+  const makeReader = (overrides: { git?: () => Promise<any>; pr?: () => Promise<any>; repoId?: string }) => registrySources({
+    repositoryId: 'repo',
+    root: f.base,
+    continuum: () => null,
+    ledger: source.ledger,
+    gitDeliveries: overrides.git,
+    github: { ...source.github, deliveryProjectionPage: overrides.pr } as any,
+    networkAllowed: () => false,
+    assertCurrent: () => {}
+  })
+
+  const staleBatches = await makeReader({ git: async () => { throw new Error('INVALID_CURSOR') } })({ cursors: { DELIVERY_GIT: 'bad' } })
+  expect(staleBatches.find(b => b.source === 'DELIVERY_GIT')).toMatchObject({ status: 'PARTIAL', cursor: '' })
+  expect(JSON.parse(staleBatches.find(b => b.source === 'DELIVERY_GIT:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'CURSOR_STALE', stage: 'DELIVERY_PAGE' })
+
+  const contractBatches = await makeReader({ git: async () => ({ bad: true }), pr: async () => { throw new Error('SOURCE_UNSUPPORTED') } })({ cursors: {} })
+  expect(contractBatches.find(b => b.source === 'DELIVERY_GIT')?.status).toBe('UNAVAILABLE')
+  expect(JSON.parse(contractBatches.find(b => b.source === 'DELIVERY_GIT:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'CONTRACT_STALE', stage: 'DELIVERY_PAGE' })
+  expect(contractBatches.find(b => b.source === 'DELIVERY_PR')?.status).toBe('UNSUPPORTED')
+  expect(JSON.parse(contractBatches.find(b => b.source === 'DELIVERY_PR:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'SOURCE_UNSUPPORTED', stage: 'DELIVERY_PAGE' })
+
+  const leakedBatches = await makeReader({ git: async () => { throw new Error('SECRET_PATH:/var/private/repo') } })({ cursors: {} })
+  expect(JSON.stringify(leakedBatches)).not.toContain('SECRET_PATH')
+  expect(JSON.parse(leakedBatches.find(b => b.source === 'DELIVERY_GIT:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'SOURCE_UNAVAILABLE', stage: 'DELIVERY_PAGE' })
+
+  f.store().registry.apply({ repositoryId: 'repo', source: 'DELIVERY_CONTINUUM', revision: 'p1', cursor: 'next-1', status: 'PARTIAL', edges: [] }, undefined)
+  expect(f.store().registry.reconciliationBacklog()).toMatchObject({ pending: true, drainable: true, sources: expect.arrayContaining(['DELIVERY_CONTINUUM']) })
+  f.store().registry.apply({ repositoryId: 'repo', source: 'DELIVERY_CONTINUUM', revision: 'sel', cursor: 'next-1', status: 'SELECTED_SCOPE', edges: [] }, 'p1')
+  expect(f.store().registry.source('DELIVERY_CONTINUUM')?.status).toBe('PARTIAL')
+})

@@ -2,7 +2,7 @@ import { existsSync, lstatSync, realpathSync } from 'node:fs'
 import { isAbsolute, resolve } from 'node:path'
 import {
   antigravityHookEvents, boundedFile, nativeEventType, nativeGapReason, nativeGitDirectories, nativeHookLimits, nativeWorktreeIdentity,
-  normalizeNativeHook, readNativeBinding, readScopedNativeBinding, recordNativeGap, resolveAntigravityPayloadIdentity, resolveNativeHookBinding,
+  normalizeNativeHook, readActiveHookActivation, readNativeBinding, readScopedNativeBinding, recordNativeGap, resolveAntigravityPayloadIdentity, resolveNativeHookBinding,
   sameNativePath, spoolNativeHook, type NativeGap, type NativeGapPhase, type NativeHookBinding, type NativeHookEvent, type NativeHookProvider
 } from './native-hooks'
 import { stampNativeCapture } from './native-capture-window'
@@ -306,11 +306,15 @@ function runHook() {
         parsed = true
         eventType = explicitEvent ?? nativeEventType(payload, binding.provider)
         phase = 'NORMALIZE'
+        const activation = readActiveHookActivation(profile, binding, process.env)
         const normalized = normalizeNativeHook(
           payload,
           binding,
           new Date(),
-          provider === 'antigravity' && explicitEvent ? { expectedEvent: explicitEvent } : undefined
+          {
+            ...(provider === 'antigravity' && explicitEvent ? { expectedEvent: explicitEvent } : {}),
+            ...(activation ? { activation } : {})
+          }
         )
         const envelope = stampNativeCapture(normalized, binding)
         tStamp = performance.now()
@@ -326,7 +330,9 @@ function runHook() {
         parsed = true
         eventType = nativeEventType(payload, binding.provider)
         phase = 'NORMALIZE'
-        const envelope = stampNativeCapture(normalizeNativeHook(payload, binding), binding)
+        const legacyProfile = process.env.CODE_AWARENESS_PROFILE || (distributed ? helperProfile().profile : undefined)
+        const activation = readActiveHookActivation(legacyProfile, binding, process.env)
+        const envelope = stampNativeCapture(normalizeNativeHook(payload, binding, new Date(), activation ? { activation } : undefined), binding)
         tStamp = performance.now()
         phase = 'WRITE'
         if (spoolNativeHook(envelope, binding.spool) === 'FULL') recordNativeGap(binding.spool, 'SPOOL_FULL', phase, eventType)

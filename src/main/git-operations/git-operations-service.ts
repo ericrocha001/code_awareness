@@ -166,16 +166,16 @@ export class GitOperationsService {
     return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
   }
   async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
-    let page = await this.git.operationReceiptPage(this.repoRoot, after)
-    if (after && page.receipts.length === 0) {
-      page = await this.git.operationReceiptPage(this.repoRoot, '')
-    }
+    const page = await this.git.operationReceiptPage(this.repoRoot, after)
     const observations: DeliveryProjectionPage['observations'] = []
     for (const { receipt, sha } of page.receipts) {
       const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
       if (receipt.deliveryVerified !== true || !parsed.success || receipt.status !== 'COMPLETED' || !['commit_git_changes', 'mutate_worktree'].includes(receipt.operation) || !receipt.result || receipt.result.isError) continue
       if (parsed.data.repositoryId !== this.coordinationIdentity?.repositoryId) continue
-      const result = JSON.parse(receipt.result.content[0].text)
+      const text = receipt.result.content?.[0]?.text
+      if (typeof text !== 'string') continue
+      let result: Record<string, unknown>
+      try { result = JSON.parse(text) as Record<string, unknown> } catch { continue }
       const commitSha = typeof result.sha === 'string' ? result.sha : result.head
       if (typeof commitSha !== 'string' || !/^[a-f0-9]{40}$/.test(commitSha) || result.parent !== parsed.data.snapshot.head) continue
       observations.push({ receiptId: sha, operationId: receipt.operationId, operation: receipt.operation as 'commit_git_changes' | 'mutate_worktree', argumentFingerprint: receipt.argumentFingerprint, anchor: parsed.data, commitSha })
@@ -191,9 +191,9 @@ export class GitOperationsService {
   }
   getBranchInventory() { return this.branchReader().inventory() }
   getBranchCommits(query: BranchHistoryQuery) { return this.branchReader().history(query) }
-  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<LegacyGitReceiptResult> {
+  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: { sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness }): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
-    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate, prepareDelivery)
+    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate, prepareDelivery, options)
     const changesTopology = ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'revert_git_commit', 'integrate_worktree', 'manage_worktree'].includes(name)
       || name === 'sync_git_remote' && args.action !== 'PUSH'
       || name === 'mutate_worktree' && ['COMMIT', 'CREATE_BRANCH'].includes(String(args.action))
@@ -295,7 +295,7 @@ export class GitOperationsService {
     } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_APPROVAL_FAILED') }
   }
 
-  async mutateWorktree(request: { action: 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH'; worktreeId: string; leaseId: string; leaseCredential: string; operationId: string; snapshot: WorktreeSnapshot; paths?: string[]; message?: string; branch?: string }, prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<McpToolResult> {
+  async mutateWorktree(request: { action: 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH'; worktreeId: string; leaseId: string; leaseCredential: string; operationId: string; snapshot: WorktreeSnapshot; paths?: string[]; message?: string; branch?: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<McpToolResult> {
     if (!this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
     const { leaseCredential, operationId, ...fingerprint } = request
     try {
@@ -349,7 +349,7 @@ export class GitOperationsService {
 
   private async scopedWorktreeMutation<T extends ScopedWorktreeRequest>(operation: string, request: T, intent: WorktreeIntent,
     effect: (observation: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>) => Promise<unknown>,
-    prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<McpToolResult> {
+    prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<McpToolResult> {
     if (!this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
     const { leaseCredential, operationId, ...values } = request
     const existing = await this.git.readOperationReceipt(this.repoRoot, operationId)
@@ -421,7 +421,7 @@ export class GitOperationsService {
     return { branch: state.branch, head: state.head, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision, operation: state.operation }
   }
 
-  async startWorktreeValidation(request: ScopedWorktreeRequest & { profileId: string; targets?: string[]; evidenceFor?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor>) {
+  async startWorktreeValidation(request: ScopedWorktreeRequest & { profileId: string; targets?: string[]; evidenceFor?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>) {
     const anchor = prepareDelivery ? await prepareDelivery() : undefined
     return this.scopedWorktreeMutation('start_worktree_validation', request, 'INTEGRATE', async (observed, scope, assertCurrent) => {
       if (!this.worktreeValidation) fail('WORKTREE_VALIDATION_UNAVAILABLE')
@@ -429,7 +429,8 @@ export class GitOperationsService {
       const selected = await this.selectWorktree(request.worktreeId)
       if (observed.snapshot.operation || (await selected.service.getChanges()).length) fail('DIRTY_WORKTREE')
       await assertCurrent()
-      return this.worktreeValidation!.start(request.worktreeId, { profileId: request.profileId, targets: request.targets, evidenceFor: request.evidenceFor, ...(anchor ? { deliveryContext: anchor } : {}) })
+      const evidenceFor = request.evidenceFor?.length ? request.evidenceFor : (anchor && request.targets?.length ? [anchor.planArtifactId] : request.evidenceFor)
+      return this.worktreeValidation!.start(request.worktreeId, { profileId: request.profileId, targets: request.targets, evidenceFor, ...(anchor ? { deliveryContext: anchor } : {}) })
     }, prepareDelivery)
   }
 
@@ -563,7 +564,7 @@ export class GitOperationsService {
     if (targetSnapshot && target && ownershipDigest(this.snapshot(await (await this.selectWorktree(target.worktreeId)).service.getState())) !== ownershipDigest(preview.target.snapshot)) fail('WORKTREE_PREVIEW_STALE')
   }
 
-  async integrateWorktree(request: ScopedWorktreeRequest & { action: 'APPLY' | 'PROMOTE'; previewId: string; integrationWorktreeId?: string; proofIds?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor>) {
+  async integrateWorktree(request: ScopedWorktreeRequest & { action: 'APPLY' | 'PROMOTE'; previewId: string; integrationWorktreeId?: string; proofIds?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>) {
     return this.scopedWorktreeMutation('integrate_worktree', request, 'INTEGRATE', async (observed, scope, assertCurrent) => {
       const preview = new GitWorktreeIntegration(observed.commonDirectory).get(request.previewId)
       const { record } = await this.selectWorktree(request.action === 'APPLY' ? request.worktreeId : request.integrationWorktreeId!)
@@ -599,7 +600,7 @@ export class GitOperationsService {
     }, prepareDelivery)
   }
 
-  async publishWorktree(request: ScopedWorktreeRequest & { branch: string; remote: string }, prepareDelivery?: () => Promise<DeliveryAnchor>) {
+  async publishWorktree(request: ScopedWorktreeRequest & { branch: string; remote: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>) {
     return this.scopedWorktreeMutation('publish_worktree', request, 'PUSH', async (observed, scope, assertCurrent) => {
       if (!scope.branches.includes(request.branch) || observed.snapshot.branch !== request.branch || !observed.snapshot.head) fail('WORKTREE_SCOPE_NOT_GRANTED')
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(request.remote) || !await this.git.getRemoteUrl(this.repoRoot, request.remote)) fail('REMOTE_NOT_FOUND')

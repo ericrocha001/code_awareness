@@ -147,21 +147,44 @@ async function run(command, args = [], options = {}) {
   let connection, registrationDiagnostic
   const diagnostics = []
   let before = null
-  const deliveryContext = options.deliveryContext !== undefined
+  let deliveryContext = options.deliveryContext !== undefined
     ? parseDeliveryContextInput(options.deliveryContext)
     : parseDeliveryContextInput(process.env.CODE_AWARENESS_DELIVERY_CONTEXT)
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
-  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR || deliveryContext)
+  const resolveExecution = options.resolveExecutionContext === true || process.env.CODE_AWARENESS_RESOLVE_EXECUTION === '1'
+  const workValidationAuthorized = Boolean(
+    deliveryContext ||
+    options.authorizeWorkValidation === true ||
+    process.env.CODE_AWARENESS_VALIDATION_AUTHORIZE_PLAN === '1' ||
+    association.evidenceFor?.length
+  )
+  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR || deliveryContext || resolveExecution || workValidationAuthorized)
   const shouldCaptureSource = !options.evidenceRoot && options.register !== false && (expectTests || requestedRegistration)
-  receipt.ledger = { association, identity: null, before: null, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
+  receipt.ledger = { association, identity: null, before: null, after: null, ...(deliveryContext ? { deliveryContext } : {}), ...(workValidationAuthorized ? { workValidationAuthorized: true } : {}) }
   receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
   if (shouldCaptureSource) {
-    try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
-    receipt.ledger = { association, identity: connection?.identity || null, before, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
+    try {
+      connection = await validationConnection(path.resolve(options.cwd || root), options.profile)
+      if (!deliveryContext && resolveExecution && connection.identity?.repositoryId && connection.identity?.worktreeId) {
+        try {
+          const { connect: connectChannel } = require('./local-agent/client.cjs')
+          const { readDescriptor } = require('./local-agent/discovery.cjs')
+          const descriptor = readDescriptor(options.profile, { directory: 'local-agent-channel', protocol: 'code-awareness-local/v1' })
+          const active = await connectChannel(descriptor, {
+            domain: 'continuum',
+            action: 'get_execution_context',
+            args: { repositoryId: connection.identity.repositoryId, worktreeId: connection.identity.worktreeId }
+          }, { timeoutMs: 2000 })
+          if (active?.deliveryContext) deliveryContext = active.deliveryContext
+        } catch (error) { diagnostics.push(publicError(error)) }
+      }
+      before = await connection.snapshot()
+    } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
+    receipt.ledger = { association, identity: connection?.identity || null, before, after: null, ...(deliveryContext ? { deliveryContext } : {}), ...(workValidationAuthorized ? { workValidationAuthorized: true } : {}) }
     save()
   }
   let child
@@ -179,9 +202,13 @@ async function run(command, args = [], options = {}) {
   const onTerm = () => abort('SIGTERM')
   const onAbort = () => abort('ABORT')
   const acceptancePath = path.join(directory, 'acceptance.json')
+  const propagatedEnv = (deliveryContext || resolveExecution) ? {
+    ...(deliveryContext ? { CODE_AWARENESS_DELIVERY_CONTEXT: JSON.stringify(deliveryContext) } : {}),
+    ...(connection?.identity?.worktreeId && !process.env.CODE_AWARENESS_WORKTREE_ID && !options.env?.CODE_AWARENESS_WORKTREE_ID ? { CODE_AWARENESS_WORKTREE_ID: connection.identity.worktreeId } : {})
+  } : {}
   try {
     child = spawn(command, args, {
-      cwd: receipt.cwd, env: { ...process.env, ...options.env, CODE_AWARENESS_TEST_CAPTURE: '1', CODE_AWARENESS_TEST_ACCEPTANCE_FILE: acceptancePath },
+      cwd: receipt.cwd, env: { ...process.env, ...propagatedEnv, ...options.env, CODE_AWARENESS_TEST_CAPTURE: '1', CODE_AWARENESS_TEST_ACCEPTANCE_FILE: acceptancePath },
       windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe']
     })
     receipt.pid = child.pid || null

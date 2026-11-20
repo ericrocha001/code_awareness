@@ -378,3 +378,45 @@ it('propagates verified deliveryContext through test-output.cjs and TestOutputLo
     cwd: f.root, profile: f.profile, deliveryContext: { ...request, executionId: 'other-execution' }
   })).rejects.toMatchObject({ code: 'RECEIPT_ASSOCIATION_CONFLICT' })
 }, 60000)
+
+it('resolves durable execution context automatically on governed checkouts while limiting evidenceFor to authorized work validation', async () => {
+  const f = fixture()
+  await f.start()
+  const request = {
+    bindingArtifactId: 'artifact-execution-branch-' + '1'.repeat(64),
+    bindingRevision: 1,
+    planArtifactId: 'artifact-22222222-2222-4222-8222-222222222222',
+    planRevision: 1,
+    executionId: 'execution-auto-validation'
+  }
+  const resolveExecutionContext = vi.fn(async (_authority: unknown, _explicit: unknown, observe: () => Promise<any>) => {
+    const snap = await observe()
+    return {
+      source: 'DURABLE_ACTIVATION' as const,
+      anchor: {
+        ...request, schemaVersion: 1, repositoryId: snap.repositoryId, planDigest: '2'.repeat(64), bindingDigest: '3'.repeat(64),
+        classification: 'AUTHENTICATED_EXECUTION_CONTEXT', snapshot: snap
+      }
+    }
+  })
+  vi.spyOn(f.session, 'getActiveService').mockReturnValue({ resolveExecutionContext } as any)
+
+  const incidental = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile })
+  expect(incidental.state).toBe('PASS')
+  const incidentalReg = await registerReceipt(incidental.id, { cwd: f.root, profile: f.profile })
+  expect(incidentalReg).toMatchObject({ state: 'PERSISTED', evidenceFor: [] })
+  const incidentalProof = f.ledger().getProof(incidentalReg.proofId)!
+  expect(incidentalProof.evidenceFor).toEqual([])
+  expect(incidentalProof.commandProfile?.deliveryContext).toMatchObject({ executionId: 'execution-auto-validation', planArtifactId: request.planArtifactId })
+
+  const authorized = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], {
+    cwd: f.root,
+    profile: f.profile,
+    authorizeWorkValidation: true
+  })
+  expect(authorized.state).toBe('PASS')
+  expect(authorized.registration).toMatchObject({ state: 'PERSISTED', evidenceFor: [request.planArtifactId] })
+  const authorizedProof = f.ledger().getProof(authorized.registration.proofId)!
+  expect(authorizedProof.evidenceFor).toEqual([request.planArtifactId])
+  expect(authorizedProof.commandProfile?.deliveryContext).toMatchObject({ executionId: 'execution-auto-validation', planArtifactId: request.planArtifactId })
+}, 60000)

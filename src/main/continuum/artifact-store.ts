@@ -12,7 +12,9 @@ import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-sugg
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import type { ExecutionActivationRecord, ExecutionActivationScopeKind, ExecutionActivationStatus, ExecutionIdentityRecord } from '../../shared/types/delivery-context-types'
+import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
 import { ArtifactNavigation } from './artifact-navigation'
 import type { StructureQuery, SectionQuery } from './artifact-structure'
 import { inspectWebP, mediaHash } from './visual-media'
@@ -57,8 +59,12 @@ export class ArtifactStore {
   indexedArtifact(artifactId: string) {
     const row = this.db.prepare('SELECT revision, metadata_json, provenance_json, content_hash FROM artifacts WHERE artifact_id=?').get(artifactId) as
       { revision: number; metadata_json: string; provenance_json: string; content_hash: string } | undefined
-    return row ? { revision: row.revision, metadata: JSON.parse(row.metadata_json) as Artifact['metadata'],
-      provenance: JSON.parse(row.provenance_json) as Artifact['provenance'], contentHash: row.content_hash } : null
+    if (!row) return null
+    const executionIdentity = this.getExecutionIdentity(artifactId)
+    const provenance = JSON.parse(row.provenance_json) as Artifact['provenance']
+    return { revision: row.revision, metadata: JSON.parse(row.metadata_json) as Artifact['metadata'],
+      provenance: executionIdentity ? { ...provenance, executionIdentity: executionIdentity as unknown as MetadataValue } : provenance,
+      contentHash: row.content_hash }
   }
   readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
   publicationDeliveryPage(after?: string, limit?: number) { return this.publicationReceipts.deliveryPage(after, limit) }
@@ -309,13 +315,66 @@ export class ArtifactStore {
         BEGIN SELECT RAISE(ABORT, 'Immutable media association'); END;
       CREATE TRIGGER IF NOT EXISTS media_no_delete BEFORE DELETE ON artifact_media
         BEGIN SELECT RAISE(ABORT, 'Immutable media association'); END;
+      CREATE TABLE IF NOT EXISTS execution_identities (
+        artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id),
+        execution_id TEXT NOT NULL,
+        assigned_revision INTEGER NOT NULL CHECK(assigned_revision >= 1),
+        source TEXT NOT NULL CHECK(source IN ('PLAN_METADATA', 'BACKEND_ASSIGNED')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS execution_identities_exec ON execution_identities(execution_id);
+      CREATE TABLE IF NOT EXISTS execution_activations (
+        activation_id TEXT PRIMARY KEY,
+        revision INTEGER NOT NULL CHECK(revision >= 1),
+        repository_id TEXT NOT NULL,
+        worktree_id TEXT NOT NULL,
+        worktree_generation TEXT NOT NULL,
+        branch_ref TEXT NOT NULL,
+        branch_generation TEXT NOT NULL,
+        execution_id TEXT NOT NULL,
+        plan_artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        plan_revision INTEGER NOT NULL CHECK(plan_revision >= 1),
+        plan_content_hash TEXT NOT NULL,
+        binding_artifact_id TEXT NOT NULL REFERENCES artifacts(artifact_id),
+        binding_revision INTEGER NOT NULL CHECK(binding_revision >= 1),
+        binding_content_hash TEXT NOT NULL,
+        scope_kind TEXT NOT NULL CHECK(scope_kind IN ('CHECKOUT', 'REMOTE_DELEGATED')),
+        status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'REVOKED', 'CLOSED')),
+        activated_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        revoked_at TEXT,
+        revoked_reason TEXT
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS execution_activations_active_worktree
+        ON execution_activations(worktree_id) WHERE status = 'ACTIVE';
+      CREATE INDEX IF NOT EXISTS execution_activations_exec
+        ON execution_activations(execution_id, status);
+      CREATE INDEX IF NOT EXISTS execution_activations_binding
+        ON execution_activations(binding_artifact_id, worktree_id);
     `)
   }
 
   private decode(row: ArtifactRow): Artifact {
+    const executionIdentity = this.getExecutionIdentity(row.artifact_id)
+    const provenance = JSON.parse(row.provenance_json) as Record<string, MetadataValue>
     return { artifactId: row.artifact_id, revision: row.revision, metadata: JSON.parse(row.metadata_json),
       createdAt: row.created_at, updatedAt: row.updated_at, rawMarkdown: row.raw_markdown,
-      contentHash: row.content_hash, provenance: JSON.parse(row.provenance_json) }
+      contentHash: row.content_hash,
+      provenance: executionIdentity ? { ...provenance, executionIdentity: executionIdentity as unknown as MetadataValue } : provenance }
+  }
+
+  getExecutionIdentity(artifactId: string): ExecutionIdentityRecord | null {
+    const row = this.db.prepare('SELECT execution_id, source, assigned_revision, created_at FROM execution_identities WHERE artifact_id = ?').get(artifactId) as
+      { execution_id: string; source: 'PLAN_METADATA' | 'BACKEND_ASSIGNED'; assigned_revision: number; created_at: string } | undefined
+    return row ? { executionId: row.execution_id, source: row.source, assignedRevision: row.assigned_revision, createdAt: row.created_at } : null
+  }
+
+  resolvePlanExecutionId(artifact: Artifact): string | undefined {
+    const identity = this.getExecutionIdentity(artifact.artifactId)
+    const declared = typeof artifact.metadata.executionId === 'string' && artifact.metadata.executionId.trim()
+      ? artifact.metadata.executionId.trim() : undefined
+    if (identity && declared && identity.executionId !== declared) throw new Error('EXECUTION_SOURCE_MISMATCH')
+    return identity?.executionId ?? declared
   }
 
   outline(artifact: Artifact): OutlineSection[] {
@@ -393,7 +452,7 @@ export class ArtifactStore {
     return this.db.transaction(() => {
       const metadata = input.metadata
       const source = this.get(String(metadata.sourceArtifactId))
-      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN' || source.metadata.executionId !== metadata.executionId || metadata.repositoryId !== this.repositoryId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN' || this.resolvePlanExecutionId(source) !== metadata.executionId || metadata.repositoryId !== this.repositoryId) throw new Error('EXECUTION_SOURCE_MISMATCH')
       const prior = this.get(input.artifactId)
       if (prior) {
         const keys = ['bindingRole', 'repositoryId', 'executionId', 'sourceArtifactId', 'branchRef', 'branchGeneration']
@@ -401,6 +460,167 @@ export class ArtifactStore {
         return prior
       }
       return this.createInsideTransaction({ ...input, provenance: { executionBranchBinding: true } })
+    }).immediate()
+  }
+
+  private decodeActivation(row: {
+    activation_id: string; revision: number; repository_id: string; worktree_id: string; worktree_generation: string
+    branch_ref: string; branch_generation: string; execution_id: string; plan_artifact_id: string; plan_revision: number
+    plan_content_hash: string; binding_artifact_id: string; binding_revision: number; binding_content_hash: string
+    scope_kind: ExecutionActivationScopeKind; status: ExecutionActivationStatus; activated_at: string; updated_at: string
+    revoked_at: string | null; revoked_reason: string | null
+  }): ExecutionActivationRecord {
+    return {
+      activationId: row.activation_id,
+      revision: row.revision,
+      repositoryId: row.repository_id,
+      worktreeId: row.worktree_id,
+      worktreeGeneration: row.worktree_generation,
+      branchRef: row.branch_ref,
+      branchGeneration: row.branch_generation,
+      executionId: row.execution_id,
+      planArtifactId: row.plan_artifact_id,
+      planRevision: row.plan_revision,
+      planContentHash: row.plan_content_hash,
+      bindingArtifactId: row.binding_artifact_id,
+      bindingRevision: row.binding_revision,
+      bindingContentHash: row.binding_content_hash,
+      scopeKind: row.scope_kind,
+      status: row.status,
+      activatedAt: row.activated_at,
+      updatedAt: row.updated_at,
+      ...(row.revoked_at ? { revokedAt: row.revoked_at } : {}),
+      ...(row.revoked_reason ? { revokedReason: row.revoked_reason } : {})
+    }
+  }
+
+  getActiveActivation(worktreeId: string): ExecutionActivationRecord | null {
+    const row = this.db.prepare("SELECT * FROM execution_activations WHERE worktree_id = ? AND status = 'ACTIVE'").get(worktreeId) as
+      Parameters<ArtifactStore['decodeActivation']>[0] | undefined
+    return row ? this.decodeActivation(row) : null
+  }
+
+  getActivationForBinding(bindingArtifactId: string, worktreeId: string): ExecutionActivationRecord | null {
+    const row = this.db.prepare('SELECT * FROM execution_activations WHERE binding_artifact_id = ? AND worktree_id = ? ORDER BY updated_at DESC, activation_id DESC LIMIT 1')
+      .get(bindingArtifactId, worktreeId) as Parameters<ArtifactStore['decodeActivation']>[0] | undefined
+    return row ? this.decodeActivation(row) : null
+  }
+
+  revokeActivation(input: {
+    worktreeId: string
+    worktreeGeneration?: string
+    executionId?: string
+    expectedActivationRevision?: number
+    status?: 'REVOKED' | 'CLOSED'
+    reason?: string
+  }): ExecutionActivationRecord {
+    return this.db.transaction(() => {
+      const row = this.db.prepare("SELECT * FROM execution_activations WHERE worktree_id = ? AND status = 'ACTIVE'").get(input.worktreeId) as
+        Parameters<ArtifactStore['decodeActivation']>[0] | undefined
+      if (!row) throw new Error('EXECUTION_ACTIVATION_NOT_FOUND')
+      if (row.repository_id !== this.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+      if (input.worktreeGeneration !== undefined && row.worktree_generation !== input.worktreeGeneration) throw new Error('WORKTREE_STALE')
+      if (input.executionId !== undefined && row.execution_id !== input.executionId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.expectedActivationRevision !== undefined && row.revision !== input.expectedActivationRevision) {
+        throw new Error(`REVISION_CONFLICT: activation is at revision ${row.revision}`)
+      }
+      const nextStatus: 'REVOKED' | 'CLOSED' = input.status === 'CLOSED' ? 'CLOSED' : 'REVOKED'
+      const now = new Date(Math.max(Date.now(), Date.parse(row.updated_at) + 1)).toISOString()
+      const reason = input.reason?.trim() || (nextStatus === 'CLOSED' ? 'EXECUTION_CLOSED' : 'EXECUTION_REVOKED')
+      const updated = this.db.prepare(`UPDATE execution_activations SET status = ?, revision = ?, updated_at = ?, revoked_at = ?, revoked_reason = ?
+        WHERE activation_id = ? AND revision = ? AND status = 'ACTIVE'`)
+        .run(nextStatus, row.revision + 1, now, now, reason, row.activation_id, row.revision)
+      if (updated.changes !== 1) throw new Error('REVISION_CONFLICT')
+      const after = this.db.prepare('SELECT * FROM execution_activations WHERE activation_id = ?').get(row.activation_id) as Parameters<ArtifactStore['decodeActivation']>[0]
+      return this.decodeActivation(after)
+    }).immediate()
+  }
+
+  bootstrapExecutionBinding(input: {
+    planArtifactId: string
+    expectedPlanRevision?: number
+    executionId?: string
+    snapshot: ExecutionBranchSnapshot
+    scopeKind?: ExecutionActivationScopeKind
+    activate?: boolean
+    expectedActivationRevision?: number
+    buildBinding: (executionId: string, plan: Artifact) => CreateArtifactInput
+  }): { plan: Artifact; binding: Artifact; executionId: string; activation?: ExecutionActivationRecord; reused: boolean } {
+    return this.db.transaction(() => {
+      const plan = this.get(input.planArtifactId)
+      if (!plan || plan.metadata.kind !== 'EXECUTABLE_PLAN') throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.snapshot.repositoryId !== this.repositoryId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.expectedPlanRevision !== undefined && plan.revision !== input.expectedPlanRevision) {
+        throw new ArtifactRevisionConflictError(plan.artifactId, plan.revision)
+      }
+      const existingIdentity = this.getExecutionIdentity(plan.artifactId)
+      const declared = typeof plan.metadata.executionId === 'string' && plan.metadata.executionId.trim()
+        ? plan.metadata.executionId.trim() : undefined
+      if (existingIdentity && declared && existingIdentity.executionId !== declared) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      const knownId = existingIdentity?.executionId ?? declared
+      if (input.executionId !== undefined && input.executionId !== knownId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.activate === false && !knownId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      const now = new Date().toISOString()
+      const executionId = knownId ?? ('exec-' + randomUUID())
+      if (!existingIdentity) {
+        this.db.prepare('INSERT INTO execution_identities(artifact_id, execution_id, assigned_revision, source, created_at) VALUES (?, ?, ?, ?, ?)')
+          .run(plan.artifactId, executionId, plan.revision, declared ? 'PLAN_METADATA' : 'BACKEND_ASSIGNED', now)
+      }
+      const bindingInput = input.buildBinding(executionId, plan)
+      if (bindingInput.metadata.repositoryId !== this.repositoryId || bindingInput.metadata.executionId !== executionId || bindingInput.metadata.sourceArtifactId !== plan.artifactId) {
+        throw new Error('EXECUTION_SOURCE_MISMATCH')
+      }
+      let binding = this.get(bindingInput.artifactId)
+      let bindingCreated = false
+      if (binding) {
+        const keys = ['bindingRole', 'repositoryId', 'executionId', 'sourceArtifactId', 'branchRef', 'branchGeneration']
+        if (binding.provenance.executionBranchBinding !== true || keys.some(key => binding!.metadata[key] !== bindingInput.metadata[key])) {
+          throw new Error('EXECUTION_BINDING_CONFLICT')
+        }
+      } else {
+        binding = this.createInsideTransaction({ ...bindingInput, provenance: { executionBranchBinding: true } })
+        bindingCreated = true
+      }
+      const resolvedPlan = this.get(plan.artifactId)!
+      if (input.activate === false) {
+        return { plan: resolvedPlan, binding, executionId, reused: !bindingCreated }
+      }
+      const active = this.db.prepare("SELECT * FROM execution_activations WHERE worktree_id = ? AND status = 'ACTIVE'")
+        .get(input.snapshot.worktreeId) as Parameters<ArtifactStore['decodeActivation']>[0] | undefined
+      if (active) {
+        if (active.execution_id !== executionId || active.plan_artifact_id !== plan.artifactId) {
+          throw new Error('EXECUTION_ACTIVATION_CONFLICT')
+        }
+        if (input.expectedActivationRevision !== undefined && active.revision !== input.expectedActivationRevision) {
+          throw new Error(`REVISION_CONFLICT: activation is at revision ${active.revision}`)
+        }
+        if (active.worktree_generation === input.snapshot.worktreeGeneration &&
+          active.branch_ref === input.snapshot.branchRef &&
+          active.branch_generation === input.snapshot.branchGeneration &&
+          active.plan_revision === plan.revision &&
+          active.plan_content_hash === plan.contentHash &&
+          active.binding_artifact_id === binding.artifactId &&
+          active.binding_revision === binding.revision) {
+          return { plan: resolvedPlan, binding, executionId, activation: this.decodeActivation(active), reused: true }
+        }
+        const revokedAt = new Date(Math.max(Date.now(), Date.parse(active.updated_at) + 1)).toISOString()
+        this.db.prepare("UPDATE execution_activations SET status = 'REVOKED', revision = ?, updated_at = ?, revoked_at = ?, revoked_reason = ? WHERE activation_id = ? AND revision = ?")
+          .run(active.revision + 1, revokedAt, revokedAt, 'SUPERSEDED_BY_CONTINUATION', active.activation_id, active.revision)
+      } else if (input.expectedActivationRevision !== undefined) {
+        throw new Error('EXECUTION_ACTIVATION_NOT_FOUND')
+      }
+      const activationId = 'act-' + randomUUID()
+      const scopeKind: ExecutionActivationScopeKind = input.scopeKind ?? 'CHECKOUT'
+      this.db.prepare(`INSERT INTO execution_activations(
+        activation_id, revision, repository_id, worktree_id, worktree_generation, branch_ref, branch_generation,
+        execution_id, plan_artifact_id, plan_revision, plan_content_hash, binding_artifact_id, binding_revision,
+        binding_content_hash, scope_kind, status, activated_at, updated_at, revoked_at, revoked_reason
+      ) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, NULL, NULL)`)
+        .run(activationId, this.repositoryId, input.snapshot.worktreeId, input.snapshot.worktreeGeneration,
+          input.snapshot.branchRef, input.snapshot.branchGeneration, executionId, plan.artifactId, plan.revision,
+          plan.contentHash, binding.artifactId, binding.revision, binding.contentHash, scopeKind, now, now)
+      const created = this.db.prepare('SELECT * FROM execution_activations WHERE activation_id = ?').get(activationId) as Parameters<ArtifactStore['decodeActivation']>[0]
+      return { plan: resolvedPlan, binding, executionId, activation: this.decodeActivation(created), reused: false }
     }).immediate()
   }
 
@@ -442,8 +662,13 @@ export class ArtifactStore {
       if (visual && input.metadata.kind !== 'VISUAL_REFERENCE') throw new Error('IMMUTABLE_VISUAL_KIND')
       const checked = this.validate(input, false, visual)
       if (visual) checked.metadata = { ...checked.metadata, media: current.metadata.media }
+      const existingIdentity = this.getExecutionIdentity(input.artifactId)
+      if (existingIdentity && checked.metadata.executionId !== undefined && checked.metadata.executionId !== existingIdentity.executionId) {
+        throw new Error('EXECUTION_SOURCE_MISMATCH')
+      }
+      const { executionIdentity: _omittedIdentity, ...currentProvenance } = current.provenance
       const artifact: Artifact = { ...current, metadata: checked.metadata, rawMarkdown: checked.rawMarkdown,
-        provenance: { ...current.provenance, ...input.provenance },
+        provenance: { ...currentProvenance, ...input.provenance },
         revision: current.revision + 1, updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString(),
         contentHash: computeContentHash(checked.rawMarkdown) }
       this.db.prepare(`UPDATE artifacts SET revision = ?, metadata_json = ?, name = ?, description = ?, kind = ?, status = ?,
@@ -452,7 +677,7 @@ export class ArtifactStore {
           artifact.metadata.kind, artifact.metadata.status ?? null, artifact.updatedAt, artifact.rawMarkdown,
           artifact.contentHash, JSON.stringify(artifact.provenance), artifact.artifactId, input.expectedRevision)
       this.writeIndexes(artifact)
-      return artifact
+      return existingIdentity ? { ...artifact, provenance: { ...artifact.provenance, executionIdentity: existingIdentity as unknown as MetadataValue } } : artifact
     }).immediate()
   }
   get(artifactId: string): Artifact | null {
@@ -465,7 +690,8 @@ export class ArtifactStore {
     if (!row) return null
     const artifact = JSON.parse(row.snapshot_json) as Artifact
     if (artifact.artifactId !== artifactId || artifact.revision !== revision || computeContentHash(artifact.rawMarkdown) !== artifact.contentHash) throw new Error('ARTIFACT_REVISION_INTEGRITY')
-    return artifact
+    const executionIdentity = this.getExecutionIdentity(artifactId)
+    return executionIdentity ? { ...artifact, provenance: { ...artifact.provenance, executionIdentity: executionIdentity as unknown as MetadataValue } } : artifact
   }
 
   list(filter: ListArtifactsFilter = {}, options: { kinds?: readonly string[] } = {}): ArtifactPage {
@@ -493,8 +719,13 @@ export class ArtifactStore {
       params.push(filter.query, filter.query)
     }
     for (const [key, value] of Object.entries(filter.metadata ?? {})) {
-      clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND value_json = ?)')
-      params.push(key, canonicalJson(normalizeMetadataValue(value)))
+      if (key === 'executionId' && typeof value === 'string') {
+        clauses.push('(a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND value_json = ?) OR a.artifact_id IN (SELECT artifact_id FROM execution_identities WHERE execution_id = ?))')
+        params.push(key, canonicalJson(normalizeMetadataValue(value)), value)
+      } else {
+        clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND value_json = ?)')
+        params.push(key, canonicalJson(normalizeMetadataValue(value)))
+      }
     }
     for (const [key, period] of Object.entries(filter.periods ?? {})) {
       clauses.push(`a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND metadata_year(value_json) = ?${period.month !== undefined ? ' AND metadata_month(value_json) = ?' : ''})`)
@@ -552,7 +783,14 @@ export class ArtifactStore {
       if (filter.metadataKeys?.length) {
         record.metadata = Object.create(null) as Record<string, MetadataValue>
         const find = this.db.prepare('SELECT value_json FROM artifact_metadata WHERE artifact_id = ? AND key = ?')
-        for (const key of filter.metadataKeys) { const value = find.get(row.artifact_id, key) as { value_json: string } | undefined; if (value) record.metadata[key] = JSON.parse(value.value_json) }
+        for (const key of filter.metadataKeys) {
+          const value = find.get(row.artifact_id, key) as { value_json: string } | undefined
+          if (value) record.metadata[key] = JSON.parse(value.value_json)
+          else if (key === 'executionId') {
+            const identity = this.getExecutionIdentity(row.artifact_id)
+            if (identity) record.metadata[key] = identity.executionId
+          }
+        }
       }
       return record
     })

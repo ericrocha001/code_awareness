@@ -44,7 +44,7 @@ import {
   executePublishArtifact,
   executeUpdateArtifact
 } from '../continuum/continuum-mcp'
-import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL, executeArtifactNavigation } from '../continuum/continuum-mcp'
+import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL, executeArtifactNavigation, WORKTREE_EXECUTION_TOOLS, executeWorktreeExecutionTool } from '../continuum/continuum-mcp'
 import type { IVisualContinuumService } from '../continuum/continuum-types'
 import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
@@ -326,6 +326,7 @@ export class ChannelMcpAdapter {
       )
     }
     if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
+    if (this.continuum?.bootstrapExecution && this.gitOperations) tools.push(...WORKTREE_EXECUTION_TOOLS)
     if (this.executionClosure && this.artifactReader) tools.push(ASSESS_EXECUTION_CLOSURE_TOOL)
     if (supportsContinuumAgent(this.continuum)) tools.push(...CONTINUUM_AGENT_TOOLS)
     if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
@@ -437,7 +438,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, ...WORKTREE_EXECUTION_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name || name === REQUEST_DEV_UPDATE_TOOL.name) return 'Runtime Identity/Restart'
     if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) return 'Web Extension Manager'
@@ -445,11 +446,26 @@ export class ChannelMcpAdapter {
     return undefined
   }
 
-  private async prepareDelivery(authority: AgentAuthority | undefined, request: DeliveryContextRequest, worktreeId?: string) {
-    if (!this.continuum?.prepareDeliveryContext || !this.gitOperations || authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+  private async prepareDelivery(authority: AgentAuthority | undefined, request?: DeliveryContextRequest, worktreeId?: string, options?: { optional?: boolean }): Promise<import('../../shared/types/delivery-context-types').DeliveryAnchor | undefined> {
+    if (authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
     if (authority?.worktreeId && worktreeId && authority.worktreeId !== worktreeId) throw new Error('DELIVERY_CONTEXT_CONFLICT')
     const targetWorktreeId = worktreeId ?? authority?.worktreeId
-    return this.continuum.prepareDeliveryContext(authority, request, () => this.gitOperations!.deliverySnapshot(targetWorktreeId))
+    if (!this.continuum || !this.gitOperations) {
+      if (options?.optional && !request) return undefined
+      throw new Error('DELIVERY_CONTEXT_INVALID')
+    }
+    const observe = () => this.gitOperations!.deliverySnapshot(targetWorktreeId)
+    if (this.continuum.resolveExecutionContext) {
+      const resolved = await this.continuum.resolveExecutionContext(authority, request, observe, { ...(targetWorktreeId ? { worktreeId: targetWorktreeId } : {}) })
+      if (!resolved.anchor && !options?.optional) throw new Error('DELIVERY_CONTEXT_MISSING')
+      return resolved.anchor
+    }
+    if (!request) {
+      if (options?.optional) return undefined
+      throw new Error('DELIVERY_CONTEXT_INVALID')
+    }
+    if (!this.continuum.prepareDeliveryContext) throw new Error('DELIVERY_CONTEXT_INVALID')
+    return this.continuum.prepareDeliveryContext(authority, request, observe)
   }
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
@@ -546,7 +562,12 @@ export class ChannelMcpAdapter {
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return this.runtimePreview ? executeRuntimePreviewTool(this.runtimePreview.service, name, args, () => { if (!this.runtimePreview?.isCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : { content: [{ type: 'text', text: JSON.stringify({ success: false, code: 'PREVIEW_UNAVAILABLE' }) }], isError: true }
     if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
       return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
-        prepareDelivery: (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId ?? authority?.worktreeId),
+        prepareDelivery: async (request, worktreeId) => {
+          const anchor = await this.prepareDelivery(authority, request, worktreeId ?? authority?.worktreeId, { optional: false })
+          if (!anchor) throw new Error('DELIVERY_CONTEXT_MISSING')
+          return anchor
+        },
+        resolveDelivery: (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId ?? authority?.worktreeId, { optional: true }),
         defaultDeliveryContext: authority?.deliveryContext,
         deliveryContextError: authority?.deliveryContextError,
         defaultWorktreeId: authority?.worktreeId,
@@ -567,7 +588,18 @@ export class ChannelMcpAdapter {
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }
     }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
-      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args, (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId), authority)
+      return this.gitOperations ? executeGitOperationsTool(
+        this.gitOperations,
+        name,
+        args,
+        async (request, worktreeId) => {
+          const anchor = await this.prepareDelivery(authority, request, worktreeId, { optional: false })
+          if (!anchor) throw new Error('DELIVERY_CONTEXT_MISSING')
+          return anchor
+        },
+        authority,
+        worktreeId => this.prepareDelivery(authority, undefined, worktreeId, { optional: true })
+      )
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }
     if (name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name && this.githubContext?.githubIntegration) {
@@ -580,7 +612,11 @@ export class ChannelMcpAdapter {
     }
     if (VALIDATION_EXECUTION_TOOLS.some((tool) => tool.name === name)) {
       return this.validationExecution
-        ? executeValidationTool(this.validationExecution, name, args, invocationContext?.deadlineAtMs, (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId), authority)
+        ? executeValidationTool(this.validationExecution, name, args, invocationContext?.deadlineAtMs, async (request, worktreeId) => {
+            const anchor = await this.prepareDelivery(authority, request, worktreeId, { optional: false })
+            if (!anchor) throw new Error('DELIVERY_CONTEXT_MISSING')
+            return anchor
+          }, authority)
         : { content: [{ type: 'text', text: 'VALIDATION_EXECUTION_UNAVAILABLE' }], isError: true }
     }
 
@@ -606,6 +642,10 @@ export class ChannelMcpAdapter {
       return executeWebExtensionManagerTool(this.webExtensionManager, name, args)
     }
 
+    if (WORKTREE_EXECUTION_TOOLS.some(tool => tool.name === name)) {
+      if (!this.continuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
+      return executeWorktreeExecutionTool(this.continuum, this.gitOperations, name, args, authority)
+    }
     if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {
       if (!supportsContinuumAgent(this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
       const observeDelivery = this.gitOperations ? () => this.gitOperations!.deliverySnapshot(authority?.worktreeId) : undefined
@@ -636,7 +676,13 @@ export class ChannelMcpAdapter {
         try {
           assertArtifactAgent(authority, this.continuum.repositoryId ?? '')
           if (authority.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
-          const anchor = authority.deliveryContext ? await this.prepareDelivery(authority, authority.deliveryContext, authority.worktreeId) : undefined
+          let anchor: import('../../shared/types/delivery-context-types').DeliveryAnchor | undefined
+          if (this.continuum.resolveExecutionContext) {
+            const observe = this.gitOperations ? () => this.gitOperations!.deliverySnapshot(authority.worktreeId) : undefined
+            anchor = (await this.continuum.resolveExecutionContext(authority, authority.deliveryContext, observe)).anchor
+          } else if (authority.deliveryContext) {
+            anchor = await this.prepareDelivery(authority, authority.deliveryContext, authority.worktreeId)
+          }
           return executePublishArtifact(this.continuum, args, authority, anchor)
         }
         catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] } }
