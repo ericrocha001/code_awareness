@@ -22,7 +22,11 @@ import { digest, sanitize } from './privacy'
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/)
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-const grant = z.object({ profile: z.string().max(4096).refine(isAbsolute), creatorAccountHash: sha }).strict()
+const grant = z.object({
+  profile: z.string().max(4096).refine(isAbsolute),
+  creatorAccountHash: sha,
+  allowLexicalIndex: z.boolean().optional()
+}).strict()
 const maxHeaderLine = 64 * 1024
 const maxDiscoveryDirs = 32
 const maxDiscoveryEntries = 256
@@ -61,7 +65,7 @@ function stripVerbatimPrefix(path: string): string {
 function readCodexGrantStatus(storePath: string, repositoryId: string):
   | { configured: false }
   | { configured: true; ok: false }
-  | { configured: true; ok: true; configPath: string; configText: string; profile: string; creatorAccountHash: string } {
+  | { configured: true; ok: true; configPath: string; configText: string; profile: string; creatorAccountHash: string; allowLexicalIndex: boolean } {
   const configDirectory = dirname(storePath), configPath = join(configDirectory, 'session-context.provider.json')
   let configText: string
   try {
@@ -83,7 +87,7 @@ function readCodexGrantStatus(storePath: string, repositoryId: string):
     assertProfilePath(profile, profile)
     if (!sameNativePath(resolve(profile), realpathSync.native(profile))) throw new Error('SOURCE_PATH_ESCAPE')
     assertUserOwned(profile)
-    return { configured: true, ok: true, configPath, configText, profile, creatorAccountHash }
+    return { configured: true, ok: true, configPath, configText, profile, creatorAccountHash, allowLexicalIndex: auth.data.allowLexicalIndex === true }
   } catch {
     return { configured: true, ok: false }
   }
@@ -103,7 +107,7 @@ function readCodexGrant(storePath: string, repositoryId: string) {
   assertProfilePath(profile, profile)
   if (!sameNativePath(resolve(profile), realpathSync.native(profile))) throw new Error('SOURCE_PATH_ESCAPE')
   assertUserOwned(profile)
-  return { configPath, configText, profile, creatorAccountHash }
+  return { configPath, configText, profile, creatorAccountHash, allowLexicalIndex: auth.data.allowLexicalIndex === true }
 }
 
 function checkCodexWorktreeRoots(item: Record<string, unknown>, root: string, profile: string): boolean {
@@ -382,7 +386,7 @@ export function openCodexSourceHandle(options: {
   if (!uuid.test(sourceSessionId) || nativeDigest(JSON.stringify([repositoryId, 'codex', sourceSessionId])) !== nativeHash) {
     throw new Error('SOURCE_IDENTITY_CONFLICT')
   }
-  const { configPath, configText, profile, creatorAccountHash } = readCodexGrant(storePath, repositoryId)
+  const { configPath, configText, profile, creatorAccountHash, allowLexicalIndex } = readCodexGrant(storePath, repositoryId)
   const path = exactRollout(profile, sourceSessionId)
   assertProfilePath(path, profile)
   if (!sameNativePath(path, realpathSync.native(path))) throw new Error('SOURCE_PATH_ESCAPE')
@@ -407,6 +411,7 @@ export function openCodexSourceHandle(options: {
       liveFingerprint: digest(identity),
       worktreeRootResolved: root,
       creatorAccountHash,
+      allowLexicalIndex,
       assertPath: () => assertProfilePath(path, profile),
       configUnchanged: () => boundedFile(configPath, 65536) === configText
     }

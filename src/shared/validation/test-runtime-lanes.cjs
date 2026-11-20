@@ -32,6 +32,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/session-context/native-addressability.test.ts',
   'src/main/session-context/context-economy.test.ts',
   'src/main/session-context/target.test.ts',
+  'src/main/session-context/session-navigation-index.test.ts',
   'src/main/session-context/selective-ingestion.test.ts',
   'src/main/session-context/cooperative-draining-and-origin.test.ts',
   'src/main/continuum/bundle-builder.test.ts',
