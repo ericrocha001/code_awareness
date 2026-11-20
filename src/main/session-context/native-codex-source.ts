@@ -462,7 +462,8 @@ export function stepCodexSourceIndex(options: {
       creatorAccountHash = h.creatorAccountHash
       return h
     },
-    makeEventId: (ordinal, part, payloadDigest) => digest(JSON.stringify(['codex', sourceSessionId, ordinal, part, payloadDigest])),
+    makeEventId: (ordinal, part, payloadDigest, snapshotIdentity) =>
+      digest(JSON.stringify([NATIVE_CODEX_NORMALIZER, sourceSessionId, snapshotIdentity, ordinal, part, payloadDigest])),
     processRecord: (rawRecord, lineStart, lineEnd, acc: StepAccumulator) => {
       const record = rawRecord as { type?: unknown; timestamp?: unknown; payload?: Record<string, unknown> } | null
       acc.state.ordinal++

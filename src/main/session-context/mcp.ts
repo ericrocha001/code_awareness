@@ -27,7 +27,7 @@ import { nativeBindingPath, nativeHookEvents, nativeHookProviders, readNativeBin
 import { discoverCodexSources, extractCodexRecordPart, stepCodexSourceIndex } from './native-codex-source'
 import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
 import { discoverAntigravityAppSources, extractAntigravityRecordPart, stepAntigravityAppSourceIndex } from './native-antigravity-app-source'
-import { toNativeEventMeta, type NativeEventFilter } from './native-session-references'
+import { NATIVE_ANTIGRAVITY_NORMALIZER, NATIVE_CODEX_NORMALIZER, toNativeEventMeta, type NativeEventFilter } from './native-session-references'
 import {
   DEFAULT_NATIVE_STEP_BYTES,
   DEFAULT_NATIVE_STEP_LINES,
@@ -307,6 +307,10 @@ function verifyNativeLiteralContext(
   return { app, observation, hookObserved, locators, registryVerifiedOrigin, baseRevision: observation?.revision ?? 0 }
 }
 
+function literalSnapshotRevision(baseRevision: number, normalizer: string, snapshotRevision: number, liveFingerprint: string): number {
+  return parseInt(digest(JSON.stringify([baseRevision, normalizer, snapshotRevision, liveFingerprint])).slice(0, 13), 16) || 1
+}
+
 function runNativeSessionIndexStep(
   store: SessionStore,
   request: { nativeSession: z.infer<typeof nativeSessionSelector>; sourceSessionId: string },
@@ -322,89 +326,132 @@ function runNativeSessionIndexStep(
     return { state: 'UNAVAILABLE' as const, repositoryId: store.repositoryId, nativeSession: request.nativeSession,
       sourceSessionId: request.sourceSessionId, reason: 'IDENTITY_MISMATCH', transcriptImported: false }
   }
+  const normalizer = app ? NATIVE_ANTIGRAVITY_NORMALIZER : NATIVE_CODEX_NORMALIZER
   const effectiveBudget: NativeStepBudget = stepBudget ?? {
     maxBytes: DEFAULT_NATIVE_STEP_BYTES,
     maxLines: DEFAULT_NATIVE_STEP_LINES,
-    deadlineMs: Date.now() + 2500
+    stepMs: 2500,
+    deadlineMs: Date.now() + 11_000
   }
-  try {
-    const stepResult = app
-      ? stepAntigravityAppSourceIndex({
-          refs: store.references.native,
-          storePath: store.path,
+  const runOnce = () => app
+    ? stepAntigravityAppSourceIndex({
+        refs: store.references.native,
+        storePath: store.path,
+        repositoryId: store.repositoryId,
+        worktreeId: target.worktreeId,
+        generation: target.generation,
+        nativeHash: request.nativeSession.id,
+        sourceSessionId: request.sourceSessionId,
+        ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}),
+        worktreeRoot: root,
+        registryVerifiedOrigin,
+        mode: store.references.native.isReadOnly ? 'READ_ONLY' : 'STEP',
+        stepBudget: effectiveBudget,
+        assertCurrent
+      })
+    : stepCodexSourceIndex({
+        refs: store.references.native,
+        storePath: store.path,
+        repositoryId: store.repositoryId,
+        worktreeId: target.worktreeId,
+        generation: target.generation,
+        worktreeRoot: root,
+        nativeHash: request.nativeSession.id,
+        sourceSessionId: request.sourceSessionId,
+        mode: store.references.native.isReadOnly ? 'READ_ONLY' : 'STEP',
+        stepBudget: effectiveBudget,
+        assertCurrent
+      })
+
+  const maxAttempts = 2
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    try {
+      const stepResult = runOnce()
+      if (stepResult.status === 'READY') {
+        const revision = literalSnapshotRevision(baseRevision, normalizer, stepResult.summary.revision, stepResult.liveFingerprint)
+        return {
+          state: 'READY' as const,
           repositoryId: store.repositoryId,
-          worktreeId: target.worktreeId,
-          generation: target.generation,
-          nativeHash: request.nativeSession.id,
+          nativeSession: request.nativeSession,
           sourceSessionId: request.sourceSessionId,
-          ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}),
-          worktreeRoot: root,
-          registryVerifiedOrigin,
-          mode: store.references.native.isReadOnly ? 'READ_ONLY' : 'STEP',
-          stepBudget: effectiveBudget,
-          assertCurrent
-        })
-      : stepCodexSourceIndex({
-          refs: store.references.native,
-          storePath: store.path,
-          repositoryId: store.repositoryId,
-          worktreeId: target.worktreeId,
-          generation: target.generation,
-          worktreeRoot: root,
-          nativeHash: request.nativeSession.id,
-          sourceSessionId: request.sourceSessionId,
-          mode: store.references.native.isReadOnly ? 'READ_ONLY' : 'STEP',
-          stepBudget: effectiveBudget,
-          assertCurrent
-        })
-    if (stepResult.status === 'READY') {
-      const revision = parseInt(digest(JSON.stringify([baseRevision, stepResult.liveFingerprint])).slice(0, 13), 16) || 1
+          revision,
+          indexedBytes: stepResult.summary.indexedBytes,
+          totalBytes: stepResult.summary.sourceBytes,
+          indexedEvents: stepResult.summary.eventCount,
+          turnCount: stepResult.summary.turnCount,
+          transcriptImported: false
+        }
+      }
       return {
-        state: 'READY' as const,
+        state: 'INDEXING_PENDING' as const,
         repositoryId: store.repositoryId,
         nativeSession: request.nativeSession,
         sourceSessionId: request.sourceSessionId,
-        revision,
-        indexedBytes: stepResult.summary.indexedBytes,
-        totalBytes: stepResult.summary.sourceBytes,
-        indexedEvents: stepResult.summary.eventCount,
-        turnCount: stepResult.summary.turnCount,
-        transcriptImported: false
+        indexedBytes: stepResult.indexedBytes,
+        totalBytes: stepResult.totalBytes,
+        indexedEvents: stepResult.indexedEvents,
+        reason: stepResult.reason,
+        transcriptImported: false,
+        next: {
+          tool: 'refresh_agent_sessions',
+          arguments: { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId }
+        }
       }
-    }
-    return {
-      state: 'INDEXING_PENDING' as const,
-      repositoryId: store.repositoryId,
-      nativeSession: request.nativeSession,
-      sourceSessionId: request.sourceSessionId,
-      indexedBytes: stepResult.indexedBytes,
-      totalBytes: stepResult.totalBytes,
-      indexedEvents: stepResult.indexedEvents,
-      reason: stepResult.reason,
-      transcriptImported: false,
-      next: {
-        tool: 'refresh_agent_sessions',
-        arguments: { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId }
+    } catch (error) {
+      const code = error instanceof Error ? error.message : 'SOURCE_UNAVAILABLE'
+      if (code === 'SOURCE_REVISION_CHANGED' || code === 'SOURCE_STALE') {
+        assertCurrent()
+        if (attempt + 1 < maxAttempts && (effectiveBudget.deadlineMs === undefined || Date.now() < effectiveBudget.deadlineMs)) {
+          continue
+        }
+        return {
+          state: 'INDEXING_PENDING' as const,
+          repositoryId: store.repositoryId,
+          nativeSession: request.nativeSession,
+          sourceSessionId: request.sourceSessionId,
+          indexedBytes: 0,
+          totalBytes: 0,
+          indexedEvents: 0,
+          reason: 'SOURCE_STALE' as const,
+          transcriptImported: false,
+          next: {
+            tool: 'refresh_agent_sessions',
+            arguments: { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId }
+          }
+        }
       }
-    }
-  } catch (error) {
-    const code = error instanceof Error ? error.message : 'SOURCE_UNAVAILABLE'
-    if (['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE',
-      'SOURCE_CONTENT_UNAVAILABLE', 'SOURCE_FORMAT_UNSUPPORTED', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_REVISION_CHANGED',
-      'SOURCE_PATH_ESCAPE', 'SOURCE_LIMIT_REACHED', 'STORE_READ_ONLY'].includes(code)) {
-      const resolvedReason = app && !locators.length && code === 'PROFILE_UNAVAILABLE'
-        ? antigravitySourceDiagnostic(store.path, store.repositoryId, request.nativeSession.id, request.sourceSessionId, assertCurrent)
-        : code
-      return {
-        state: 'UNAVAILABLE' as const,
-        repositoryId: store.repositoryId,
-        nativeSession: request.nativeSession,
-        sourceSessionId: request.sourceSessionId,
-        reason: resolvedReason,
-        transcriptImported: false
+      if (['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED',
+        'SOURCE_CONTENT_UNAVAILABLE', 'SOURCE_FORMAT_UNSUPPORTED', 'SOURCE_IDENTITY_CONFLICT',
+        'SOURCE_PATH_ESCAPE', 'SOURCE_LIMIT_REACHED', 'STORE_READ_ONLY'].includes(code)) {
+        const resolvedReason = app && !locators.length && code === 'PROFILE_UNAVAILABLE'
+          ? antigravitySourceDiagnostic(store.path, store.repositoryId, request.nativeSession.id, request.sourceSessionId, assertCurrent)
+          : code
+        return {
+          state: 'UNAVAILABLE' as const,
+          repositoryId: store.repositoryId,
+          nativeSession: request.nativeSession,
+          sourceSessionId: request.sourceSessionId,
+          reason: resolvedReason,
+          transcriptImported: false
+        }
       }
+      throw error
     }
-    throw error
+  }
+  return {
+    state: 'INDEXING_PENDING' as const,
+    repositoryId: store.repositoryId,
+    nativeSession: request.nativeSession,
+    sourceSessionId: request.sourceSessionId,
+    indexedBytes: 0,
+    totalBytes: 0,
+    indexedEvents: 0,
+    reason: 'SOURCE_STALE' as const,
+    transcriptImported: false,
+    next: {
+      tool: 'refresh_agent_sessions',
+      arguments: { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId }
+    }
   }
 }
 
@@ -446,10 +493,11 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   const captureCoverage = hookObserved ? 'HOOK_OBSERVED_AND_SOURCE_AVAILABLE' : 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE'
   const formatError = app ? 'FORMAT_UNSUPPORTED' : 'SOURCE_FORMAT_UNSUPPORTED'
   const staleError = app ? 'SOURCE_STALE' : 'SOURCE_REVISION_CHANGED'
+  const normalizer = app ? NATIVE_ANTIGRAVITY_NORMALIZER : NATIVE_CODEX_NORMALIZER
   const extractPart = app ? extractAntigravityRecordPart : extractCodexRecordPart
   const eventOptions = name === 'list_agent_session_events' ? query as z.infer<typeof nativeSessionEvents> : undefined
-  const makeScope = (revision: number) => ({
-    name, repositoryId: store.repositoryId, nativeSession, target, revision, accountHash,
+  const makeScope = (revision: number, snapshotRevision: number) => ({
+    name, repositoryId: store.repositoryId, nativeSession, target, revision, normalizer, snapshotRevision, accountHash,
     event: 'eventId' in query ? query.eventId : null,
     limit: 'limit' in query ? query.limit : null,
     mapView: 'mapView' in query ? query.mapView ?? null : null,
@@ -465,11 +513,11 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   let readyResponse: object | undefined
 
   const onReady = (ready: { summary: import('./native-session-references').NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => {
-    const rev = parseInt(digest(JSON.stringify([baseRevision, ready.liveFingerprint])).slice(0, 13), 16) || 1
+    const rev = literalSnapshotRevision(baseRevision, normalizer, ready.summary.revision, ready.liveFingerprint)
     if (expectedRevision !== undefined && rev !== expectedRevision) throw new Error('REVISION_CONFLICT')
     const needsFd = name === 'read_agent_session_event' || (name === 'list_agent_session_events' && !!eventOptions?.query && !eventOptions.file)
     if (!needsFd) return
-    const scope = makeScope(rev)
+    const scope = makeScope(rev, ready.summary.revision)
     const offset = store.offset(cursor, scope)
     const base = makeBase(rev, ready.summary.sourceCoverage)
     if (name === 'list_agent_session_events' && eventOptions?.query && 'limit' in query) {
@@ -532,20 +580,28 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     })
   }
 
-  const indexOutcome: NativeReferenceStepResult | { sourceDiagnostic: string } = (() => {
+  const indexOutcome: NativeReferenceStepResult | { sourceDiagnostic: string; stale?: boolean } = (() => {
     const mode = store.references.native.isReadOnly ? 'READ_ONLY' : 'ON_DEMAND'
     if (!app) {
-      return stepCodexSourceIndex({
-        refs: store.references.native,
-        ...source,
-        worktreeId: target.worktreeId,
-        generation: target.generation,
-        worktreeRoot: root,
-        mode,
-        stepBudget,
-        onReady,
-        assertCurrent
-      })
+      try {
+        return stepCodexSourceIndex({
+          refs: store.references.native,
+          ...source,
+          worktreeId: target.worktreeId,
+          generation: target.generation,
+          worktreeRoot: root,
+          mode,
+          stepBudget,
+          onReady,
+          assertCurrent
+        })
+      } catch (error) {
+        if (error instanceof Error && (error.message === 'SOURCE_REVISION_CHANGED' || error.message === 'SOURCE_STALE')) {
+          if (expectedRevision !== undefined) throw new Error('REVISION_CONFLICT')
+          return { sourceDiagnostic: 'SOURCE_STALE', stale: true }
+        }
+        throw error
+      }
     }
     if (locators.length > 1) throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: 'IDENTITY_MISMATCH' })
     try {
@@ -569,7 +625,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
           const ideDiag = antigravitySourceDiagnostic(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent)
           return { sourceDiagnostic: ideDiag === 'PROFILE_UNAVAILABLE' ? 'PROFILE_UNAVAILABLE' : ideDiag }
         }
-        return { sourceDiagnostic: error.message }
+        return { sourceDiagnostic: error.message, ...(error.message === 'SOURCE_STALE' ? { stale: true } : {}) }
       }
       throw error
     }
@@ -577,15 +633,15 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   if ('sourceDiagnostic' in indexOutcome) {
     const diagCoverage = hookObserved ? 'HOOK_OBSERVED_SOURCE_UNAVAILABLE' : 'NO_HOOK_AND_SOURCE_UNAVAILABLE'
     const diagIdentity = indexOutcome.sourceDiagnostic === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : hooklessBase.identityEvidence
+    const nextAction = indexOutcome.stale ? { next: { tool: 'refresh_agent_sessions', arguments: { nativeSession, sourceSessionId } } } : {}
     if (name === 'inspect_agent_session') {
       if (expectedRevision !== undefined && observation && expectedRevision !== observation.revision) throw new Error('REVISION_CONFLICT')
-      return { ...hooklessBase, contentAvailability: 'SOURCE_UNAVAILABLE', captureCoverage: diagCoverage, identityEvidence: diagIdentity, sourceDiagnostic: indexOutcome.sourceDiagnostic }
+      return { ...hooklessBase, contentAvailability: 'SOURCE_UNAVAILABLE', captureCoverage: diagCoverage, identityEvidence: diagIdentity, sourceDiagnostic: indexOutcome.sourceDiagnostic, ...nextAction }
     }
-    throw Object.assign(new Error('SOURCE_UNAVAILABLE'), { sourceDiagnostic: indexOutcome.sourceDiagnostic })
+    throw Object.assign(new Error(indexOutcome.stale ? 'SOURCE_STALE' : 'SOURCE_UNAVAILABLE'), { sourceDiagnostic: indexOutcome.sourceDiagnostic, ...nextAction })
   }
-  const revision = parseInt(digest(JSON.stringify([baseRevision, indexOutcome.liveFingerprint])).slice(0, 13), 16) || 1
-  if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
   if (indexOutcome.status === 'INDEXING_PENDING') {
+    if (expectedRevision !== undefined) throw new Error('REVISION_CONFLICT')
     const pendingNext = {
       tool: 'refresh_agent_sessions',
       arguments: { nativeSession, sourceSessionId }
@@ -593,7 +649,6 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     if (name === 'inspect_agent_session') {
       return {
         ...hooklessBase,
-        revision,
         indexingState: 'INDEXING_PENDING',
         contentAvailability: 'INDEXING_PENDING',
         indexedBytes: indexOutcome.indexedBytes,
@@ -611,10 +666,12 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       next: pendingNext
     })
   }
+  const revision = literalSnapshotRevision(baseRevision, normalizer, indexOutcome.summary.revision, indexOutcome.liveFingerprint)
+  if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
   if (readyResponse !== undefined) return readyResponse
 
   const summary = indexOutcome.summary
-  const scope = makeScope(revision)
+  const scope = makeScope(revision, summary.revision)
   const offset = store.offset(cursor, scope)
   const base = makeBase(revision, summary.sourceCoverage)
   if (name === 'inspect_agent_session') {
