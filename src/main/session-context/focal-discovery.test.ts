@@ -250,7 +250,7 @@ it('selects and pages native sessions in SQL before record projection, keeps tar
   expect(focalPage1.data.sessions[0].providerSessionId).toBe(sNew)
   expect(focalPage1.data.sessions[0].deepen).toEqual({
     tool: 'inspect_agent_session',
-    arguments: { repositoryId: 'repo', nativeSession: { provider: 'antigravity-native', id: sNew } }
+    arguments: { repositoryId: 'repo', nativeSession: { provider: 'antigravity-native', id: sNew, ...f.wt1 } }
   })
   expect(focalPage1.data.contextMap).toBeUndefined()
   expect(focalPage1.data.windows).toBeUndefined()
@@ -324,3 +324,49 @@ it('uses focal existence check in inspectExecutionOriginAlignment without callin
   expect(querySpy).not.toHaveBeenCalled()
   expect(recordSpy).not.toHaveBeenCalled()
 })
+
+it('addresses every persisted native observation past 256 by filter and cursor, emits a reusable selector, and refuses stale or ambiguous origins', async () => {
+  const f = setup()
+  const raw = 'long-session'
+  const at = (i: number) => new Date(Date.UTC(2026, 10, 17, 10, 0, i)).toISOString()
+  let sessionId = ''
+  for (let i = 0; i < 256; i++) sessionId = f.observeHook(raw, f.wt1, { provider: 'antigravity', observedAt: at(i), event: 'PreToolUse', invocationId: nativeDigest('inv' + i) })
+  const late = nativeDigest('inv-late')
+  f.observeHook(raw, f.wt1, { provider: 'antigravity', observedAt: at(300), event: 'PostToolUse', invocationId: late })
+  const call = async (name: any, args: object, target = f.wt1) => {
+    const res = await executeSessionTool(f.store, { refresh: async () => ({}) }, name, args, () => {}, target, [target] as any, undefined, f.continuum.dir)
+    return { isError: !!res.isError, data: JSON.parse((res.content[0] as { text: string }).text) }
+  }
+
+  const listed = await call('list_agent_sessions', { source: 'NATIVE_HOOK', view: 'FOCAL', agent: 'antigravity' })
+  expect(listed.data.sessions[0].deepen.arguments.nativeSession).toEqual({ provider: 'antigravity-native', id: sessionId, ...f.wt1 })
+  const map = await call('inspect_agent_session', listed.data.sessions[0].deepen.arguments)
+  expect(map.isError).toBe(false)
+  expect(map.data).toMatchObject({ observedEventCount: 257, origin: 'OBSERVED_WORKTREE', sourceCoverage: 'OBSERVED_EVENTS_ONLY' })
+  expect(map.data.hookEvents).toEqual([{ type: 'PreToolUse', count: 256 }, { type: 'PostToolUse', count: 1 }])
+
+  const nativeSession = listed.data.sessions[0].deepen.arguments.nativeSession
+  const filtered = await call('list_agent_session_events', { nativeSession, hookEvents: ['PostToolUse'] })
+  expect(filtered.data.events).toHaveLength(1)
+  expect(filtered.data.events[0]).toMatchObject({ type: 'PostToolUse', invocationId: late })
+
+  const first = await call('list_agent_session_events', { nativeSession, limit: 15 })
+  expect(first.data.events).toHaveLength(15)
+  expect(first.data.nextCursor).toEqual(expect.any(String))
+  f.observeHook(raw, f.wt1, { provider: 'antigravity', observedAt: at(301), event: 'PostToolUse', invocationId: nativeDigest('inv-after-cursor') })
+  const stale = await call('list_agent_session_events', { nativeSession, limit: 15, cursor: first.data.nextCursor })
+  expect(stale.data).toEqual({ code: 'CURSOR_STALE' })
+
+  f.observeHook(raw, f.wt2, { provider: 'antigravity', observedAt: at(400), event: 'PreToolUse', invocationId: nativeDigest('inv-wt2') })
+  const bareSelector = { provider: 'antigravity-native', id: sessionId }
+  const multiMap = await call('inspect_agent_session', { nativeSession: bareSelector })
+  expect(multiMap.data.origin).toBe('ORIGIN_UNVERIFIED')
+  expect(multiMap.data.events).toBeUndefined()
+  expect(multiMap.data.originSelection.arguments.mapView).toBe('ORIGINS')
+  const originsPage = await call('inspect_agent_session', { ...multiMap.data.originSelection.arguments, limit: 1 })
+  expect(originsPage.data.origins).toHaveLength(1)
+  expect(originsPage.data.nextCursor).toEqual(expect.any(String))
+  expect((await call('list_agent_session_events', { nativeSession: bareSelector })).data).toEqual({ code: 'ORIGIN_UNVERIFIED' })
+  const scoped = await call('list_agent_session_events', { nativeSession: { ...bareSelector, ...f.wt2 } }, f.wt2)
+  expect(scoped.data.events).toHaveLength(1)
+}, 30000)

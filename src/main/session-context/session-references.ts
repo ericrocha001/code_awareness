@@ -4,11 +4,14 @@ import type { EntireSource } from './entire-source'
 import type { ReferencedEvent, TranscriptField } from './entire-transcript'
 import { digest, sanitize, utf8Prefix } from './privacy'
 import { eventReference } from './event-reference'
+import { NativeSessionReferences } from './native-session-references'
 import type { Coverage } from './types'
 
 export interface ReferenceSource { locator: EntireSource; sourceDigest: string; sourceBytes: number; normalizer: string; revision: number }
 export class SessionReferences {
+  readonly native: NativeSessionReferences
   constructor(readonly db: Database.Database, readOnly = false) {
+    this.native = new NativeSessionReferences(db, readOnly)
     if (readOnly) return
     db.exec(`
       CREATE TABLE IF NOT EXISTS session_sources(sessionId TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,locator TEXT NOT NULL,sourceDigest TEXT NOT NULL,sourceBytes INTEGER NOT NULL,normalizer TEXT NOT NULL,revision INTEGER NOT NULL);

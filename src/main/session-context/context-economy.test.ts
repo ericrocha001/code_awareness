@@ -117,10 +117,10 @@ it('U5 proves focal investigation reduces canonical tokens and calls vs legacy w
   expect(store.diagnostics().payloadBytes).toBe(0)
 }, 30000)
 
-it('U5 keeps large Codex sources bounded with omittedSourceEvents, zero SQLite payload storage, and flat MCP schemas', async () => {
+it('U5 keeps large Codex sources bounded until refresh_agent_sessions indexes all events without SQLite payload storage and with flat MCP schemas', async () => {
   const { AjvJsonSchemaValidator } = await import('@modelcontextprotocol/sdk/validation/ajv')
   const ajv = new AjvJsonSchemaValidator()
-  for (const name of ['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event']) {
+  for (const name of ['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event', 'refresh_agent_sessions']) {
     const def = SESSION_CONTEXT_TOOLS.find(t => t.name === name)!
     const schema = def.inputSchema as { properties?: Record<string, object> }
     for (const prop of Object.values(schema.properties ?? {})) expect(prop).not.toHaveProperty('oneOf')
@@ -164,9 +164,21 @@ it('U5 keeps large Codex sources bounded with omittedSourceEvents, zero SQLite p
     sessionContext: { call: (name, args) => executeSessionTool(store, {}, name, args, () => {}, target, [{ ...target, root, fingerprint: 'fp' }], undefined, root) }
   })
   const listed = JSON.parse((await adapter.callTool('list_agent_sessions', target, undefined, authority).then(r => r.content[0] as { text: string })).text)
-  const inspected = JSON.parse((await adapter.callTool('inspect_agent_session', listed.sessions[0].deepen.arguments, undefined, authority).then(r => r.content[0] as { text: string })).text)
-  expect(inspected.sourceEventCount).toBe(512)
-  expect(inspected.omittedSourceEvents).toBe(88)
+  const deepen = listed.sessions[0].deepen.arguments
+  const pendingInspect = JSON.parse((await adapter.callTool('inspect_agent_session', deepen, undefined, authority).then(r => r.content[0] as { text: string })).text)
+  expect(pendingInspect.indexingState).toBe('INDEXING_PENDING')
+  expect(pendingInspect.next.tool).toBe('refresh_agent_sessions')
+
+  let refreshRes: any
+  do {
+    refreshRes = JSON.parse((await adapter.callTool('refresh_agent_sessions', pendingInspect.next.arguments, undefined, authority).then(r => r.content[0] as { text: string })).text)
+  } while (refreshRes.state === 'INDEXING_PENDING')
+  expect(refreshRes.state).toBe('READY')
+  expect(refreshRes.indexedEvents).toBe(600)
+
+  const inspected = JSON.parse((await adapter.callTool('inspect_agent_session', deepen, undefined, authority).then(r => r.content[0] as { text: string })).text)
+  expect(inspected.sourceEventCount).toBe(600)
+  expect(inspected.omittedSourceEvents).toBe(0)
   expect(store.count()).toBe(0)
   expect(store.diagnostics().payloadBytes).toBe(0)
 }, 30000)

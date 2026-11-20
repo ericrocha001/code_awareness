@@ -14,6 +14,8 @@ export interface NativeSessionFilter {
   worktreeId?: string; generation?: string; agent?: string; after?: string; before?: string
   artifactId?: string; executionId?: string; commitSha?: string; pullRequest?: number
 }
+export interface NativeObservationSelector { provider: 'codex-native' | 'antigravity-native'; id: string; worktreeId?: string; generation?: string }
+export interface NativeObservationFilter { hookEvents?: readonly string[]; turnId?: string; after?: string; before?: string }
 export interface NativeSessionPageOptions {
   offset?: number
   limit?: number
@@ -184,25 +186,84 @@ export class CheckpointRegistry {
     return rows.filter(row => this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)).map(row => this.nativeSession(row.externalId))
   }
 
-  nativeSessionObservations(selector: { provider: 'codex-native' | 'antigravity-native'; id: string; worktreeId?: string; generation?: string }, accountHash?: string) {
+  private nativeObservationSelection(selector: NativeObservationSelector, accountHash?: string) {
     const entity = { kind: 'SESSION' as const, id: selector.provider + ':' + selector.id }
     const key = this.key(entity)
     if (!this.visible(entity, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(key)) throw new Error('SESSION_UNAVAILABLE')
-    const target = selector.worktreeId ? this.key({ kind: 'WORKTREE', id: selector.worktreeId + ':' + selector.generation }) : null
-    const rows = this.db.prepare(`SELECT DISTINCT s.source,s.cursor FROM registry_edges e JOIN registry_sources s ON e.source=s.source
-      WHERE e.toId=? AND e.state='OBSERVED' AND s.status='COMPLETE' AND s.source LIKE 'NATIVE_HOOK:%'
-      AND (? IS NULL OR EXISTS (SELECT 1 FROM registry_edges w WHERE w.fromId=e.fromId AND w.toId=?
-        AND w.source=e.source AND w.state='OBSERVED'))
-      ORDER BY s.observedAt, s.source LIMIT 257`).all(key, target, target) as { source: string; cursor: string }[]
     const providerSource = selector.provider === 'codex-native' ? 'CODEX_NATIVE_HOOK' : 'ANTIGRAVITY_NATIVE_HOOK'
-    const events = rows.slice(0, 256).map(row => {
+    const params: string[] = [key]
+    let scoped = ''
+    if (selector.worktreeId) {
+      scoped = ` AND EXISTS (SELECT 1 FROM registry_edges w WHERE w.fromId=e.fromId AND w.toId=? AND w.source=e.source AND w.state='OBSERVED')`
+      params.push(this.key({ kind: 'WORKTREE', id: selector.worktreeId + ':' + selector.generation }))
+    }
+    const cte = `WITH obs AS (SELECT s.source AS source, CASE WHEN json_valid(s.cursor) THEN s.cursor ELSE '{}' END AS cursor, MAX(e.observedAt) AS edgeAt
+      FROM registry_edges e JOIN registry_sources s ON e.source=s.source
+      WHERE e.toId=? AND e.state='OBSERVED' AND s.status='COMPLETE' AND s.source LIKE 'NATIVE_HOOK:%'${scoped} GROUP BY s.source)`
+    return { cte, params, providerSource }
+  }
+
+  nativeObservationScope(selector: NativeObservationSelector, accountHash?: string) {
+    const { cte, params, providerSource } = this.nativeObservationSelection(selector, accountHash)
+    const aggregate = this.db.prepare(`${cte} SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN json_extract(cursor,'$.repositoryId')=? AND json_extract(cursor,'$.sessionId')=? AND json_extract(cursor,'$.source')=?
+        AND source='NATIVE_HOOK:'||json_extract(cursor,'$.eventId')
+        AND (? IS NULL OR (json_extract(cursor,'$.worktreeId')=? AND json_extract(cursor,'$.generation')=?)) THEN 0 ELSE 1 END),0) AS invalid,
+      MIN(json_extract(cursor,'$.observedAt')) AS firstObservedAt, MAX(json_extract(cursor,'$.observedAt')) AS lastObservedAt,
+      MIN(source) AS minSource, MAX(source) AS maxSource, MAX(edgeAt) AS maxEdgeAt,
+      COUNT(DISTINCT json_extract(cursor,'$.worktreeId')||':'||json_extract(cursor,'$.generation')) AS originCount FROM obs`)
+      .get(...params, this.repositoryId, selector.id, providerSource, selector.worktreeId ?? null, selector.worktreeId ?? null, selector.generation ?? null) as {
+        total: number; invalid: number; firstObservedAt: string | null; lastObservedAt: string | null; minSource: string | null; maxSource: string | null; maxEdgeAt: string | null; originCount: number }
+    if (aggregate.invalid) throw new Error('REGISTRY_INTEGRITY_FAILED')
+    const origins = (this.db.prepare(`${cte} SELECT DISTINCT json_extract(cursor,'$.worktreeId') AS worktreeId, json_extract(cursor,'$.generation') AS generation FROM obs ORDER BY 1,2 LIMIT 12`)
+      .all(...params) as WorktreeRef[])
+    const locators = (this.db.prepare(`${cte} SELECT DISTINCT json_extract(cursor,'$.appTranscriptDigest') AS digest FROM obs WHERE json_extract(cursor,'$.appTranscriptDigest') IS NOT NULL ORDER BY 1 LIMIT 2`)
+      .all(...params) as { digest: string }[]).map(row => row.digest)
+    const hookEvents = this.db.prepare(`${cte} SELECT json_extract(cursor,'$.event') AS type, COUNT(*) AS count FROM obs GROUP BY type ORDER BY MIN(json_extract(cursor,'$.observedAt')), type`)
+      .all(...params) as { type: string; count: number }[]
+    const turnCount = (this.db.prepare(`${cte} SELECT COUNT(DISTINCT json_extract(cursor,'$.turnId')) AS n FROM obs`).get(...params) as { n: number }).n
+    return { total: aggregate.total, origins, originCount: aggregate.originCount, locators, hookEvents, turnCount, firstObservedAt: aggregate.firstObservedAt, lastObservedAt: aggregate.lastObservedAt,
+      revision: digest(JSON.stringify([aggregate.total, aggregate.firstObservedAt, aggregate.lastObservedAt, aggregate.minSource, aggregate.maxSource, aggregate.maxEdgeAt, aggregate.originCount, 'OBS_V2'])) }
+  }
+
+  nativeObservationPage(selector: NativeObservationSelector, filter: NativeObservationFilter, offset: number, limit: number, accountHash?: string): { events: NativeHookEnvelope[]; more: boolean; filteredTotal?: number } {
+    const { cte, params, providerSource } = this.nativeObservationSelection(selector, accountHash)
+    const where: string[] = [], values: (string | number)[] = []
+    if (filter.hookEvents?.length) { where.push(`json_extract(cursor,'$.event') IN (${filter.hookEvents.map(() => '?').join(',')})`); values.push(...filter.hookEvents) }
+    if (filter.turnId) { where.push(`json_extract(cursor,'$.turnId')=?`); values.push(filter.turnId) }
+    for (const [key, op] of [['after', '>='], ['before', '<=']] as const) {
+      if (!filter[key]) continue
+      const ms = Date.parse(filter[key]!)
+      if (!Number.isFinite(ms)) return { events: [], more: false, filteredTotal: 0 }
+      where.push(`json_extract(cursor,'$.observedAt') ${op} ?`); values.push(new Date(ms).toISOString())
+    }
+    const clause = where.length ? ' WHERE ' + where.join(' AND ') : ''
+    const rows = this.db.prepare(`${cte} SELECT source, cursor FROM obs${clause} ORDER BY json_extract(cursor,'$.observedAt'), json_extract(cursor,'$.eventId') LIMIT ? OFFSET ?`)
+      .all(...params, ...values, limit + 1, offset) as { source: string; cursor: string }[]
+    const events = rows.slice(0, limit).map(row => {
       const event = parseNativeEnvelope(row.cursor)
-      if (event.repositoryId !== this.repositoryId || event.sessionId !== selector.id || event.source !== providerSource ||
-        row.source !== 'NATIVE_HOOK:' + event.eventId ||
-        target && (event.worktreeId !== selector.worktreeId || event.generation !== selector.generation)) throw new Error('REGISTRY_INTEGRITY_FAILED')
+      if (event.repositoryId !== this.repositoryId || event.sessionId !== selector.id || event.source !== providerSource || row.source !== 'NATIVE_HOOK:' + event.eventId ||
+        selector.worktreeId && (event.worktreeId !== selector.worktreeId || event.generation !== selector.generation)) throw new Error('REGISTRY_INTEGRITY_FAILED')
       return event
     })
-    return { events, bounded: rows.length > 256 }
+    const filteredTotal = !rows.length && offset > 0
+      ? (this.db.prepare(`${cte} SELECT COUNT(*) AS n FROM obs${clause}`).get(...params, ...values) as { n: number }).n : undefined
+    return { events, more: rows.length > limit, ...(filteredTotal !== undefined ? { filteredTotal } : {}) }
+  }
+
+  nativeObservationTurns(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {
+    const { cte, params } = this.nativeObservationSelection(selector, accountHash)
+    const rows = this.db.prepare(`${cte} SELECT json_extract(cursor,'$.turnId') AS id, MIN(json_extract(cursor,'$.observedAt')) AS firstObserved,
+      MAX(json_extract(cursor,'$.observedAt')) AS lastObserved, COUNT(*) AS eventCount FROM obs WHERE json_extract(cursor,'$.turnId') IS NOT NULL
+      GROUP BY id ORDER BY firstObserved, id LIMIT ? OFFSET ?`).all(...params, limit + 1, offset) as { id: string; firstObserved: string; lastObserved: string; eventCount: number }[]
+    return { turns: rows.slice(0, limit), more: rows.length > limit }
+  }
+
+  nativeObservationOrigins(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {
+    const { cte, params } = this.nativeObservationSelection(selector, accountHash)
+    const rows = this.db.prepare(`${cte} SELECT DISTINCT json_extract(cursor,'$.worktreeId') AS worktreeId, json_extract(cursor,'$.generation') AS generation
+      FROM obs ORDER BY 1,2 LIMIT ? OFFSET ?`).all(...params, limit + 1, offset) as WorktreeRef[]
+    return { origins: rows.slice(0, limit), more: rows.length > limit }
   }
 
   nativeDeliverySessions(selector: RegistryEntity, accountHash?: string) {
@@ -372,8 +433,9 @@ export class CheckpointRegistry {
     const localSessionId = entityRow?.localSessionId ?? null
     const aliasState = this.aliasStateFor(externalId, localSessionId)
     const isNative = provider === 'codex-native' || provider === 'antigravity-native'
+    const provenOrigin = priorityWorktree ?? (meta.worktrees.length === 1 ? meta.worktrees[0] : undefined)
     const deepen = isNative
-      ? { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider, id } } }
+      ? { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider, id, ...(provenOrigin ? { worktreeId: provenOrigin.worktreeId, generation: provenOrigin.generation } : {}) } } }
       : { tool: 'inspect_agent_session', arguments: { ...(localSessionId ? { sessionId: localSessionId } : { repositoryId: this.repositoryId }) } }
     return {
       provider, providerSessionId: id, agent,

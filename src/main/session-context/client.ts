@@ -261,7 +261,7 @@ export class SessionContextClient implements SessionContextPort {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
-      const timeoutMs = this.timeoutMs ?? (name === 'reconcile_checkpoint_registry' || name === 'list_agent_sessions' || name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'read_agent_session_event' ? 14_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
+      const timeoutMs = this.timeoutMs ?? (name === 'reconcile_checkpoint_registry' || name === 'list_agent_sessions' || name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'read_agent_session_event' ? 14_000 : name === 'refresh_agent_sessions' ? ((parseSessionRefresh(args).sessionId || parseSessionRefresh(args).nativeSession) ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
       const deadline = Date.now() + timeoutMs
       const request: Request = { resolve, deadline, phase: 'worker-recovery', selectionValidators: new Map(), isMaintenance: options.isMaintenance, timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
