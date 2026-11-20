@@ -61,7 +61,7 @@ function stripVerbatimPrefix(path: string): string {
   return process.platform === 'win32' && path.startsWith('\\\\?\\') ? path.slice(4) : path
 }
 
-function readAntigravityAppGrantStatus(storePath: string, repositoryId: string, nativeHash?: string):
+export function readAntigravityAppGrantStatus(storePath: string, repositoryId: string, nativeHash?: string):
   | { configured: false }
   | { configured: true; ok: false }
   | { configured: true; ok: true; grant: AntigravityAppGrant } {

@@ -147,20 +147,29 @@ export class SessionStore {
     return session
   }
   cursor(scope: unknown, offset: number): string {
-    const body = Buffer.from(JSON.stringify({ scope: digest(JSON.stringify(scope)), offset })).toString('base64url')
+    return this.cursorPayload(scope, { offset })
+  }
+  cursorPayload(scope: unknown, payload: Record<string, unknown>): string {
+    const body = Buffer.from(JSON.stringify({ scope: digest(JSON.stringify(scope)), ...payload })).toString('base64url')
     return body + '.' + createHmac('sha256', this.key).update(body).digest('base64url')
   }
-  offset(cursor: string | undefined, scope: unknown): number {
-    if (!cursor) return 0
+  readCursorPayload<T extends Record<string, unknown>>(cursor: string | undefined, scope: unknown): T | undefined {
+    if (!cursor) return undefined
     if (cursor.length > 512) throw new Error('CURSOR_STALE')
     const [body, signature, extra] = cursor.split('.')
     const expected = createHmac('sha256', this.key).update(body ?? '').digest('base64url')
     if (extra || !signature || signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw new Error('CURSOR_STALE')
     try {
-      const data = JSON.parse(Buffer.from(body, 'base64url').toString())
-      if (data.scope !== digest(JSON.stringify(scope)) || !Number.isSafeInteger(data.offset) || data.offset < 0) throw new Error()
-      return data.offset
+      const data = JSON.parse(Buffer.from(body, 'base64url').toString()) as { scope?: unknown } & T
+      if (data.scope !== digest(JSON.stringify(scope))) throw new Error()
+      return data
     } catch { throw new Error('CURSOR_STALE') }
+  }
+  offset(cursor: string | undefined, scope: unknown): number {
+    const data = this.readCursorPayload<{ offset?: unknown }>(cursor, scope)
+    if (!data) return 0
+    if (!Number.isSafeInteger(data.offset) || (data.offset as number) < 0) throw new Error('CURSOR_STALE')
+    return data.offset as number
   }
   sourceObservation(row: SessionRow): SourceObservation {
     return row.sourceObservation === '{}' ? { identity: 'UNKNOWN', streamTime: { timestampedRecords: 0, missingTimestamps: 0, invalidTimestamps: 0, windowRelation: 'UNAVAILABLE' } } : JSON.parse(row.sourceObservation)
@@ -365,6 +374,101 @@ export class SessionStore {
     }
     if (filter.file) { where.push('EXISTS (SELECT 1 FROM json_each(events.files) WHERE value = ?)'); params.push(filter.file) }
     return this.db.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY ordinal LIMIT ? OFFSET ?`).all(...params, limit, offset) as EventRow[]
+  }
+  private importedSessionScopeWhere(filter: { sessionId?: string; sessionIds?: string[]; worktreeId?: string; generation?: string; agent?: string }, accountHash?: string | null): { where: string[]; params: (string | number)[]; empty?: boolean } {
+    const where: string[] = [], params: (string | number)[] = []
+    if (filter.sessionId) { where.push('s.id = ?'); params.push(filter.sessionId) }
+    if (filter.sessionIds !== undefined) {
+      if (!filter.sessionIds.length) return { where, params, empty: true }
+      where.push(`s.id IN (${filter.sessionIds.map(() => '?').join(',')})`)
+      params.push(...filter.sessionIds)
+    }
+    if (accountHash === undefined) where.push("(s.provider<>'codex' OR (s.importState='METADATA_ONLY' AND s.eventCount=0 AND s.payloadBytes=0 AND EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=s.id AND json_extract(access.payload,'$.origin')='CODEX_APP_SERVER' AND json_extract(access.payload,'$.archived')=1)))")
+    if (accountHash !== undefined) { where.push("(s.provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=s.id AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
+    if (filter.worktreeId && filter.generation) {
+      const wtKey = this.registry.key({ kind: 'WORKTREE', id: `${filter.worktreeId}:${filter.generation}` })
+      where.push("(EXISTS (SELECT 1 FROM session_associations sa WHERE sa.sessionId=s.id AND json_extract(sa.payload,'$.worktreeId')=? AND json_extract(sa.payload,'$.generation')=?) OR EXISTS (SELECT 1 FROM registry_entities re JOIN registry_edges e ON (e.fromId=re.id OR e.toId=re.id) WHERE re.localSessionId=s.id AND e.state='OBSERVED' AND (e.fromId=? OR e.toId=?)))")
+      params.push(filter.worktreeId, filter.generation, wtKey, wtKey)
+    }
+    if (filter.agent) { where.push('s.agent = ?'); params.push(filter.agent) }
+    return { where, params }
+  }
+  importedSearchCoverage(filter: { sessionId?: string; sessionIds?: string[]; worktreeId?: string; generation?: string; agent?: string }, accountHash?: string | null): { totalSessions: number; referencedSessions: number; metadataOnlySessions: number; partialSessions: number; fileObserved: number } {
+    const scope = this.importedSessionScopeWhere(filter, accountHash)
+    if (scope.empty) return { totalSessions: 0, referencedSessions: 0, metadataOnlySessions: 0, partialSessions: 0, fileObserved: 0 }
+    const whereSql = scope.where.length ? `WHERE ${scope.where.join(' AND ')}` : ''
+    const row = this.db.prepare(`SELECT COUNT(*) AS total,
+      COALESCE(SUM(CASE WHEN s.importState = 'METADATA_ONLY' OR s.eventCount = 0 THEN 1 ELSE 0 END), 0) AS metadataOnly,
+      COALESCE(SUM(CASE WHEN s.importState = 'TRANSCRIPT_REFERENCED' AND s.eventCount > 0 THEN 1 ELSE 0 END), 0) AS referenced,
+      COALESCE(SUM(CASE WHEN s.coverage <> 'COMPLETE' THEN 1 ELSE 0 END), 0) AS partial
+      FROM sessions s ${whereSql}`).get(...scope.params) as { total: number; metadataOnly: number; referenced: number; partial: number }
+    const fileRow = row.referenced > 0
+      ? this.db.prepare(`SELECT COUNT(*) AS observed FROM events e JOIN sessions s ON s.id = e.sessionId ${whereSql ? whereSql + ' AND ' : 'WHERE '}json_array_length(e.files) > 0`).get(...scope.params) as { observed: number }
+      : { observed: 0 }
+    return { totalSessions: row.total, referencedSessions: row.referenced, metadataOnlySessions: row.metadataOnly, partialSessions: row.partial, fileObserved: fileRow.observed }
+  }
+  searchImportedEvents(
+    filter: { sessionId?: string; sessionIds?: string[]; worktreeId?: string; generation?: string; agent?: string; types?: string[]; tool?: string; isError?: boolean; file?: string; after?: string; before?: string },
+    offset: number,
+    limit: number,
+    accountHash?: string | null
+  ): {
+    events: Array<{ eventId: string; sessionId: string; sessionRevision: number; provider: string; agent: string; type: EventRow['type']; timestamp?: string; timestampMs?: number; tool?: string; nextOffset: number }>
+    more: boolean
+    examined: number
+  } {
+    const scope = this.importedSessionScopeWhere(filter, accountHash)
+    if (scope.empty) return { events: [], more: false, examined: 0 }
+    const where = [...scope.where], params = [...scope.params]
+    if (filter.types?.length) { where.push(`e.type IN (${filter.types.map(() => '?').join(',')})`); params.push(...filter.types) }
+    if (filter.tool) { where.push('e.tool = ?'); params.push(filter.tool) }
+    if (filter.isError === true) { where.push("(e.type = 'ERROR' OR e.success = 0)") }
+    else if (filter.isError === false) { where.push("(e.type <> 'ERROR' AND e.success = 1)") }
+    if (filter.file) { where.push('EXISTS (SELECT 1 FROM json_each(e.files) WHERE value = ?)'); params.push(filter.file) }
+    if (filter.after) {
+      const ms = Date.parse(filter.after)
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      where.push('e.timestamp IS NOT NULL AND julianday(e.timestamp) >= julianday(?)')
+      params.push(new Date(ms).toISOString())
+    }
+    if (filter.before) {
+      const ms = Date.parse(filter.before)
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      where.push('e.timestamp IS NOT NULL AND julianday(e.timestamp) <= julianday(?)')
+      params.push(new Date(ms).toISOString())
+    }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+    const rows = this.db.prepare(`
+      SELECT e.id AS eventId, s.id AS sessionId, s.revision AS sessionRevision, s.provider, s.providerSessionId, s.agent, e.type, e.timestamp, e.tool
+      FROM events e
+      JOIN sessions s ON s.id = e.sessionId
+      ${whereSql}
+      ORDER BY CASE WHEN e.timestamp IS NULL OR julianday(e.timestamp) IS NULL THEN 1 ELSE 0 END ASC, julianday(e.timestamp) ASC, s.id ASC, e.id ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit + 1, offset) as Array<{
+      eventId: string; sessionId: string; sessionRevision: number; provider: string; providerSessionId: string; agent: string; type: EventRow['type']; timestamp: string | null; tool: string | null
+    }>
+    const more = rows.length > limit
+    const candidateRows = rows.slice(0, limit)
+    const events: Array<{ eventId: string; sessionId: string; sessionRevision: number; provider: string; agent: string; type: EventRow['type']; timestamp?: string; timestampMs?: number; tool?: string; nextOffset: number }> = []
+    for (let i = 0; i < candidateRows.length; i++) {
+      const r = candidateRows[i]!
+      if (!this.registry.visible({ kind: 'SESSION', id: (r.provider ?? 'entire') + ':' + r.providerSessionId }, accountHash ?? undefined)) continue
+      const ms = r.timestamp ? Date.parse(r.timestamp) : NaN
+      events.push({
+        eventId: r.eventId,
+        sessionId: r.sessionId,
+        sessionRevision: r.sessionRevision,
+        provider: r.provider ?? 'entire',
+        agent: r.agent,
+        type: r.type,
+        ...(r.timestamp ? { timestamp: r.timestamp } : {}),
+        ...(Number.isFinite(ms) ? { timestampMs: ms } : {}),
+        ...(r.tool ? { tool: r.tool } : {}),
+        nextOffset: offset + i + 1
+      })
+    }
+    return { events, more, examined: candidateRows.length }
   }
   event(sessionId: string, id: string): EventRow & { text: string | null } {
     const legacy = !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_payloads'").get()

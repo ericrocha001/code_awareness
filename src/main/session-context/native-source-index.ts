@@ -327,7 +327,19 @@ export function runNativeReferenceStep(options: {
     normalizer, sourceCoverage, attemptCoverage, formatError, staleError,
     mode, stepBudget, assertCurrent, openHandle, processRecord, makeEventId, onReady
   } = options
-  const handle = openHandle()
+  let handle: NativeIndexedSourceHandle
+  try {
+    handle = openHandle()
+  } catch (error) {
+    if (!refs.isReadOnly && error instanceof Error && [
+      'SOURCE_NOT_AUTHORIZED', 'SOURCE_NOT_FOUND', 'SOURCE_UNAVAILABLE', 'PROFILE_UNAVAILABLE',
+      'IDENTITY_MISMATCH', 'ORIGIN_UNVERIFIED', 'SOURCE_IDENTITY_CONFLICT',
+      'SOURCE_FORMAT_UNSUPPORTED', 'FORMAT_UNSUPPORTED', 'SOURCE_PATH_ESCAPE'
+    ].includes(error.message)) {
+      refs.invalidate(nativeKey)
+    }
+    throw error
+  }
   let closed = false
   const closeOnce = () => { if (!closed) { closed = true; closeSync(handle.fd) } }
   try {
@@ -630,7 +642,7 @@ export function extractAndVerifyEventLiteral(options: {
   return { content, sanitized: content !== rawText }
 }
 
-export function findFtsMatchOffset(content: string, queryText: string): number | undefined {
+export function findFtsMatchOffset(content: string, queryText: string, mode: 'ALL_TERMS' | 'PHRASE' = 'ALL_TERMS'): number | undefined {
   const trimmed = queryText.trim()
   if (!trimmed) return undefined
   let db: Database.Database | undefined
@@ -640,7 +652,7 @@ export function findFtsMatchOffset(content: string, queryText: string): number |
     db.prepare('INSERT INTO mem_fts(rowid, body) VALUES (1, ?)').run(content)
     let matchExpr = `"${trimmed.replaceAll('"', '""')}"`
     let match = db.prepare("SELECT highlight(mem_fts, 0, char(1), char(2)) AS hl FROM mem_fts WHERE mem_fts MATCH ?").get(matchExpr) as { hl: string } | undefined
-    if (!match) {
+    if (!match && mode !== 'PHRASE') {
       const tokens = trimmed.split(/\s+/).map(t => t.replaceAll(/["*^:{}()]/g, '')).filter(Boolean)
       if (tokens.length) {
         matchExpr = tokens.map(t => `"${t}"`).join(' ')
@@ -673,12 +685,13 @@ export function readEventLiteralSlice(options: {
   nextCursor: (end: number) => string
   fits: (payload: object, budget: number, strict?: boolean) => boolean
   queryText?: string
+  mode?: 'ALL_TERMS' | 'PHRASE'
 }) {
-  const { content, sanitized, eventId, payloadDigest, offset, budget, base, nextCursor, fits, queryText } = options
+  const { content, sanitized, eventId, payloadDigest, offset, budget, base, nextCursor, fits, queryText, mode } = options
   const raw = Buffer.from(content)
   let effectiveOffset = offset
   if (effectiveOffset === 0 && queryText) {
-    const matchOffset = findFtsMatchOffset(content, queryText)
+    const matchOffset = findFtsMatchOffset(content, queryText, mode)
     if (matchOffset !== undefined) {
       let candidateStart = Math.max(0, matchOffset - 1024)
       while (candidateStart > 0 && (raw[candidateStart] & 0xc0) === 0x80) {

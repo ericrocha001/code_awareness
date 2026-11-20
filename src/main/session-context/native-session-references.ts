@@ -109,6 +109,7 @@ export interface NativeIndexedEventRow {
 }
 
 export interface NativeEventFilter {
+  eventId?: string
   types?: string[]
   tool?: string
   turnId?: string
@@ -125,6 +126,8 @@ export interface NativeCrossSessionFilter {
   generation?: string
   nativeKeys?: string[]
   provider?: 'codex' | 'antigravity'
+  providers?: Array<'codex' | 'antigravity'>
+  sourceSessionId?: string
   types?: string[]
   tool?: string
   status?: string
@@ -133,9 +136,10 @@ export interface NativeCrossSessionFilter {
   turnId?: string
   after?: string
   before?: string
+  query?: string
+  mode?: 'ALL_TERMS' | 'PHRASE'
   limit: number
   offset: number
-  rowids?: number[]
 }
 
 export interface NativeCrossSessionHit {
@@ -195,6 +199,7 @@ export function toNativeEventMeta(row: NativeIndexedEventRow) {
 
 export class NativeSessionReferences {
   readonly available: boolean
+  readonly ftsAvailable: boolean
   readonly isReadOnly: boolean
   constructor(private readonly db: Database.Database, private readonly readOnly = false) {
     this.isReadOnly = readOnly
@@ -203,8 +208,16 @@ export class NativeSessionReferences {
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_sources'"
       ).get()
       this.available = !!table
+      const ftsTable = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_fts'"
+      ).get()
+      const ftsMap = db.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_fts_map'"
+      ).get()
+      this.ftsAvailable = this.available && !!ftsTable && !!ftsMap
       return
     }
+    try { db.pragma('secure_delete = ON') } catch {}
     db.exec(`
       CREATE TABLE IF NOT EXISTS native_reference_sources (
         nativeKey TEXT PRIMARY KEY,
@@ -313,7 +326,9 @@ export class NativeSessionReferences {
         tokenize='unicode61 remove_diacritics 2'
       );
     `)
+    try { db.prepare("INSERT INTO native_reference_fts(native_reference_fts, rank) VALUES ('secure-delete', 1)").run() } catch {}
     this.available = true
+    this.ftsAvailable = true
   }
 
   private assertWritable(): void {
@@ -506,7 +521,7 @@ export class NativeSessionReferences {
           }
         }
       }
-      this.db.prepare(`
+      const cpUpdate = this.db.prepare(`
         UPDATE native_reference_checkpoints
         SET nextOffset=?, tailDigest=?, sourceBytes=?, fileIdentity=?, stateJson=?, updatedAt=?
         WHERE nativeKey=? AND revision=?
@@ -514,7 +529,30 @@ export class NativeSessionReferences {
         input.nextOffset, input.tailDigest, input.sourceBytes, input.fileIdentity, input.stateJson,
         new Date().toISOString(), input.nativeKey, input.revision
       )
+      if (cpUpdate.changes === 0) throw new Error('SOURCE_STALE')
     }).immediate()
+  }
+
+  private bumpIndexEpoch(): void {
+    this.db.prepare(`
+      INSERT INTO native_reference_revisions (nativeKey, lastRevision) VALUES ('$index_epoch', 1)
+      ON CONFLICT(nativeKey) DO UPDATE SET lastRevision = lastRevision + 1
+    `).run()
+  }
+
+  indexRevision(repositoryId: string): string {
+    if (!this.available) return 'UNAVAILABLE'
+    const hasRev = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_revisions'").get()
+    const epoch = hasRev
+      ? (this.db.prepare("SELECT lastRevision FROM native_reference_revisions WHERE nativeKey='$index_epoch'").get() as { lastRevision: number } | undefined)?.lastRevision ?? 0
+      : 0
+    const agg = this.db.prepare(
+      "SELECT COUNT(*) AS c, COALESCE(SUM(revision),0) AS s, COALESCE(MAX(updatedAt),'') AS m FROM native_reference_sources WHERE repositoryId=?"
+    ).get(repositoryId) as { c: number; s: number; m: string }
+    const ftsCount = this.ftsAvailable
+      ? (this.db.prepare('SELECT COUNT(*) AS c FROM native_reference_fts_map').get() as { c: number }).c
+      : 0
+    return digest(JSON.stringify([epoch, agg.c, agg.s, agg.m, ftsCount]))
   }
 
   promote(summary: NativeSourceRecordSummary): NativeSourceRecordSummary {
@@ -549,6 +587,7 @@ export class NativeSessionReferences {
         for (const r of staleFts) delFts.run(r.rowid)
         this.db.prepare('DELETE FROM native_reference_fts_map WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
       }
+      this.bumpIndexEpoch()
       return persisted
     }).immediate()
   }
@@ -556,6 +595,10 @@ export class NativeSessionReferences {
   invalidate(nativeKey: string): void {
     if (this.readOnly || !this.available) return
     this.db.transaction(() => {
+      const had = this.db.prepare('SELECT 1 FROM native_reference_sources WHERE nativeKey=? LIMIT 1').get(nativeKey)
+        || this.db.prepare('SELECT 1 FROM native_reference_checkpoints WHERE nativeKey=? LIMIT 1').get(nativeKey)
+        || this.db.prepare('SELECT 1 FROM native_reference_events WHERE nativeKey=? LIMIT 1').get(nativeKey)
+        || this.db.prepare('SELECT 1 FROM native_reference_fts_map WHERE nativeKey=? LIMIT 1').get(nativeKey)
       this.db.prepare('DELETE FROM native_reference_sources WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=?').run(nativeKey)
@@ -566,7 +609,108 @@ export class NativeSessionReferences {
         for (const r of ftsRows) delFts.run(r.rowid)
         this.db.prepare('DELETE FROM native_reference_fts_map WHERE nativeKey=?').run(nativeKey)
       }
+      if (had) this.bumpIndexEpoch()
     }).immediate()
+  }
+
+  purgeProvider(repositoryId: string, provider: 'codex' | 'antigravity'): number {
+    if (this.readOnly || !this.available) return 0
+    return this.db.transaction(() => {
+      const keys = this.db.prepare(`
+        SELECT nativeKey FROM native_reference_sources WHERE repositoryId=? AND provider=?
+        UNION
+        SELECT DISTINCT e.nativeKey FROM native_reference_events e
+        JOIN native_reference_sources s ON s.nativeKey=e.nativeKey
+        WHERE s.repositoryId=? AND s.provider=?
+      `).all(repositoryId, provider, repositoryId, provider) as Array<{ nativeKey: string }>
+      for (const { nativeKey } of keys) {
+        this.db.prepare('DELETE FROM native_reference_sources WHERE nativeKey=?').run(nativeKey)
+        this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(nativeKey)
+        this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=?').run(nativeKey)
+        this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=?').run(nativeKey)
+        if (this.ftsAvailable) {
+          const ftsRows = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=?').all(nativeKey) as Array<{ rowid: number }>
+          if (ftsRows.length) {
+            const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
+            for (const r of ftsRows) delFts.run(r.rowid)
+            this.db.prepare('DELETE FROM native_reference_fts_map WHERE nativeKey=?').run(nativeKey)
+          }
+        }
+      }
+      if (keys.length) this.bumpIndexEpoch()
+      return keys.length
+    }).immediate()
+  }
+
+  purgeProviderFts(repositoryId: string, provider: 'codex' | 'antigravity'): number {
+    if (this.readOnly || !this.available || !this.ftsAvailable) return 0
+    return this.db.transaction(() => {
+      const ftsRows = this.db.prepare(`
+        SELECT m.rowid FROM native_reference_fts_map m
+        JOIN native_reference_sources s ON s.nativeKey = m.nativeKey
+        WHERE s.repositoryId=? AND s.provider=?
+      `).all(repositoryId, provider) as Array<{ rowid: number }>
+      if (ftsRows.length) {
+        const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
+        const delMap = this.db.prepare('DELETE FROM native_reference_fts_map WHERE rowid=?')
+        for (const r of ftsRows) {
+          delFts.run(r.rowid)
+          delMap.run(r.rowid)
+        }
+        this.bumpIndexEpoch()
+      }
+      return ftsRows.length
+    }).immediate()
+  }
+
+  hasFtsEntriesForProvider(repositoryId: string, provider: 'codex' | 'antigravity'): boolean {
+    if (!this.available || !this.ftsAvailable) return false
+    return !!this.db.prepare(`
+      SELECT 1 FROM native_reference_fts_map m
+      JOIN native_reference_sources s ON s.nativeKey = m.nativeKey
+      WHERE s.repositoryId=? AND s.provider=? LIMIT 1
+    `).get(repositoryId, provider)
+  }
+
+  hasPendingCheckpoints(repositoryId: string, worktreeId?: string, generation?: string): boolean {
+    if (!this.available) return false
+    const cp = this.db.prepare('SELECT nativeKey FROM native_reference_checkpoints LIMIT 10').all() as Array<{ nativeKey: string }>
+    if (!cp.length) return false
+    if (!worktreeId && !generation) return true
+    return cp.some(c => {
+      const src = this.getSummary(c.nativeKey)
+      return !src || (src.repositoryId === repositoryId && src.worktreeId === worktreeId && src.generation === generation)
+    })
+  }
+
+  listReadySources(
+    repositoryId: string,
+    filter: { worktreeId?: string; generation?: string; providers?: Array<'codex' | 'antigravity'>; sourceSessionId?: string } = {},
+    offset = 0,
+    limit = 500
+  ): Array<{ nativeKey: string; provider: 'codex' | 'antigravity'; worktreeId: string; generation: string; sourceSessionId: string; locatorHash: string; normalizer: string; revision: number; fileIdentity: string; sourceBytes: number }> {
+    if (!this.available) return []
+    const clauses = ['repositoryId=?']
+    const params: unknown[] = [repositoryId]
+    if (filter.worktreeId && filter.generation) {
+      clauses.push('worktreeId=? AND generation=?')
+      params.push(filter.worktreeId, filter.generation)
+    }
+    if (filter.providers?.length) {
+      clauses.push(`provider IN (${filter.providers.map(() => '?').join(',')})`)
+      params.push(...filter.providers)
+    }
+    if (filter.sourceSessionId) {
+      clauses.push('sourceSessionId=?')
+      params.push(filter.sourceSessionId)
+    }
+    return this.db.prepare(`
+      SELECT nativeKey, provider, worktreeId, generation, sourceSessionId, locatorHash, normalizer, revision, fileIdentity, sourceBytes
+      FROM native_reference_sources
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY nativeKey ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as Array<{ nativeKey: string; provider: 'codex' | 'antigravity'; worktreeId: string; generation: string; sourceSessionId: string; locatorHash: string; normalizer: string; revision: number; fileIdentity: string; sourceBytes: number }>
   }
 
   pageTurns(nativeKey: string, revision: number, offset: number, limit: number): NativeTurnSummary[] {
@@ -591,6 +735,10 @@ export class NativeSessionReferences {
   private buildEventWhere(nativeKey: string, revision: number, filters: NativeEventFilter): { sql: string; params: unknown[] } {
     const clauses = ['nativeKey=?', 'revision=?']
     const params: unknown[] = [nativeKey, revision]
+    if (filters.eventId) {
+      clauses.push('eventId=?')
+      params.push(filters.eventId)
+    }
     if (filters.types?.length) {
       clauses.push(`type IN (${filters.types.map(() => '?').join(',')})`)
       params.push(...filters.types)
@@ -611,8 +759,10 @@ export class NativeSessionReferences {
       clauses.push('errorKind=?')
       params.push(filters.errorKind)
     }
-    if (filters.isError) {
+    if (filters.isError === true) {
       clauses.push("(type='ERROR' OR status IN ('FAILURE', 'REFUSAL'))")
+    } else if (filters.isError === false) {
+      clauses.push("(type<>'ERROR' AND status='SUCCESS')")
     }
     if (filters.after) {
       const ms = Date.parse(filters.after)
@@ -629,20 +779,12 @@ export class NativeSessionReferences {
     return { sql: clauses.join(' AND '), params }
   }
 
-  searchFtsRowids(query: string, mode: 'ALL_TERMS' | 'PHRASE'): number[] {
-    if (!this.available) return []
-    const hasFts = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_fts'").get()
-    if (!hasFts) return []
-    const formatted = mode === 'PHRASE'
-      ? `"${query.replace(/"/g, '""')}"`
-      : query.split(/\s+/).filter(Boolean).map(t => `"${t.replace(/"/g, '""')}"`).join(' AND ')
-    if (!formatted) return []
-    try {
-      const rows = this.db.prepare('SELECT rowid FROM native_reference_fts WHERE native_reference_fts MATCH ?').all(formatted) as Array<{ rowid: number }>
-      return rows.map(r => r.rowid)
-    } catch {
-      return []
-    }
+  private formatFtsQuery(query: string, mode: 'ALL_TERMS' | 'PHRASE'): string | undefined {
+    const trimmed = query.trim()
+    if (!trimmed) return undefined
+    if (mode === 'PHRASE') return `"${trimmed.replace(/"/g, '""')}"`
+    const tokens = trimmed.split(/\s+/).filter(Boolean).map(t => `"${t.replace(/"/g, '""')}"`)
+    return tokens.length ? tokens.join(' AND ') : undefined
   }
 
   pageTools(nativeKey: string, revision: number, offset: number, limit: number): { tools: Array<{ tool: string; count: number }>; more: boolean } {
@@ -666,8 +808,19 @@ export class NativeSessionReferences {
 
   searchCrossSessionEvents(filter: NativeCrossSessionFilter): { hits: NativeCrossSessionHit[]; more: boolean } {
     if (!this.available) return { hits: [], more: false }
+    if (filter.nativeKeys !== undefined && filter.nativeKeys.length === 0) return { hits: [], more: false }
+    if (filter.providers !== undefined && filter.providers.length === 0) return { hits: [], more: false }
+    let ftsJoin = ''
     const clauses = ['s.repositoryId=?']
     const params: unknown[] = [filter.repositoryId]
+    if (filter.query !== undefined) {
+      if (!this.ftsAvailable) return { hits: [], more: false }
+      const formatted = this.formatFtsQuery(filter.query, filter.mode ?? 'ALL_TERMS')
+      if (!formatted) return { hits: [], more: false }
+      ftsJoin = 'JOIN native_reference_fts_map m ON m.nativeKey = e.nativeKey AND m.revision = e.revision AND m.eventId = e.eventId'
+      clauses.push('m.rowid IN (SELECT rowid FROM native_reference_fts WHERE native_reference_fts MATCH ?)')
+      params.push(formatted)
+    }
     if (filter.worktreeId && filter.generation) {
       clauses.push('s.worktreeId=? AND s.generation=?')
       params.push(filter.worktreeId, filter.generation)
@@ -679,6 +832,14 @@ export class NativeSessionReferences {
     if (filter.provider) {
       clauses.push('s.provider=?')
       params.push(filter.provider)
+    }
+    if (filter.providers?.length) {
+      clauses.push(`s.provider IN (${filter.providers.map(() => '?').join(',')})`)
+      params.push(...filter.providers)
+    }
+    if (filter.sourceSessionId) {
+      clauses.push('s.sourceSessionId=?')
+      params.push(filter.sourceSessionId)
     }
     if (filter.types?.length) {
       clauses.push(`e.type IN (${filter.types.map(() => '?').join(',')})`)
@@ -696,8 +857,10 @@ export class NativeSessionReferences {
       clauses.push('e.errorKind=?')
       params.push(filter.errorKind)
     }
-    if (filter.isError) {
+    if (filter.isError === true) {
       clauses.push("(e.type='ERROR' OR e.status IN ('FAILURE', 'REFUSAL'))")
+    } else if (filter.isError === false) {
+      clauses.push("(e.type<>'ERROR' AND e.status='SUCCESS')")
     }
     if (filter.turnId) {
       clauses.push('e.turnId=?')
@@ -715,11 +878,6 @@ export class NativeSessionReferences {
       clauses.push('e.timestampMs IS NOT NULL AND e.timestampMs<=?')
       params.push(ms)
     }
-    if (filter.rowids !== undefined) {
-      if (!filter.rowids.length) return { hits: [], more: false }
-      clauses.push(`(e.nativeKey, e.revision, e.eventId) IN (SELECT nativeKey, revision, eventId FROM native_reference_fts_map WHERE rowid IN (${filter.rowids.map(() => '?').join(',')}))`)
-      params.push(...filter.rowids)
-    }
     const where = clauses.join(' AND ')
     const sql = `
       SELECT s.nativeKey, s.revision, s.provider, s.repositoryId, s.worktreeId, s.generation, s.sourceSessionId, s.normalizer, s.fileIdentity,
@@ -727,11 +885,20 @@ export class NativeSessionReferences {
              e.bytes, e.lineStart, e.lineEnd, e.partIndex
       FROM native_reference_sources s
       JOIN native_reference_events e ON e.nativeKey = s.nativeKey AND e.revision = s.revision
+      ${ftsJoin}
       WHERE ${where}
-      ORDER BY e.timestampMs ASC, e.eventId ASC
+      ORDER BY CASE WHEN e.timestampMs IS NULL THEN 1 ELSE 0 END ASC, e.timestampMs ASC, s.sourceSessionId ASC, e.eventId ASC
       LIMIT ? OFFSET ?
     `
-    const rows = this.db.prepare(sql).all(...params, filter.limit + 1, filter.offset) as Array<Record<string, unknown>>
+    let rows: Array<Record<string, unknown>>
+    try {
+      rows = this.db.prepare(sql).all(...params, filter.limit + 1, filter.offset) as Array<Record<string, unknown>>
+    } catch (error) {
+      if (filter.query !== undefined && error instanceof Error && /fts5/i.test(error.message)) {
+        return { hits: [], more: false }
+      }
+      throw error
+    }
     const more = rows.length > filter.limit
     const hits: NativeCrossSessionHit[] = rows.slice(0, filter.limit).map(r => ({
       nativeKey: String(r.nativeKey),

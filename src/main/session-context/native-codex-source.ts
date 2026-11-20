@@ -62,7 +62,7 @@ function stripVerbatimPrefix(path: string): string {
   return process.platform === 'win32' && path.startsWith('\\\\?\\') ? path.slice(4) : path
 }
 
-function readCodexGrantStatus(storePath: string, repositoryId: string):
+export function readCodexGrantStatus(storePath: string, repositoryId: string):
   | { configured: false }
   | { configured: true; ok: false }
   | { configured: true; ok: true; configPath: string; configText: string; profile: string; creatorAccountHash: string; allowLexicalIndex: boolean } {
@@ -407,7 +407,7 @@ export function openCodexSourceHandle(options: {
       profile,
       identity,
       sizeBytes: Number(before.size),
-      locatorHash: digest(JSON.stringify([path, root, creatorAccountHash])),
+      locatorHash: digest(JSON.stringify([path, root, creatorAccountHash, allowLexicalIndex])),
       liveFingerprint: digest(identity),
       worktreeRootResolved: root,
       creatorAccountHash,
