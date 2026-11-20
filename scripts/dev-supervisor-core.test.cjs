@@ -77,7 +77,7 @@ describe('dev-supervisor-core', () => {
     await new Promise((resolve) => activeSupervisor.server.once('listening', resolve))
     const port = activeSupervisor.server.address().port
 
-    // Reserve dev sync
+    // Reserve via legacy wire literal (DEV_SYNC_PREPARE)
     const prep1 = await sendCommand(port, { action: 'DEV_SYNC_PREPARE', token: 'test-token', operationId: 'op-1' })
     assert.equal(prep1, 'READY')
 
@@ -106,8 +106,8 @@ describe('dev-supervisor-core', () => {
     activeSupervisor = createDevSupervisor({
       token: 'test-token',
       spawnRuntime: () => mockChild1,
-      async renewRuntime({ devSync }) {
-        renewedWith = devSync
+      async renewRuntime({ devUpdate }) {
+        renewedWith = devUpdate
         return mockChild2
       }
     })

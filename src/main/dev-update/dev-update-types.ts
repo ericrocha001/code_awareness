@@ -1,4 +1,4 @@
-export type DevSyncStatus =
+export type DevUpdateStatus =
   | 'NONE'
   | 'IDLE'
   | 'SYNCING'
@@ -18,16 +18,16 @@ export type DevSyncStatus =
   | 'EXPECTED_COMMIT_NOT_INTEGRATED'
   | 'ASYMMETRIC_TRACKING_UNSUPPORTED'
 
-export interface DevSyncRequest {
+export interface DevUpdateRequest {
   operationId: string
   expectedInstanceId: string
   expectedIntegratedCommit?: string
   caller?: 'UI' | 'MCP'
 }
 
-export interface DevSyncResult {
+export interface DevUpdateResult {
   operationId: string
-  status: DevSyncStatus
+  status: DevUpdateStatus
   message: string
   head?: string
   oldInstanceId?: string
@@ -36,9 +36,9 @@ export interface DevSyncResult {
   postResponse?: () => Promise<void>
 }
 
-export interface DevSyncSupervisorReceipt {
+export interface DevUpdateSupervisorReceipt {
   operationId: string
-  status: DevSyncStatus
+  status: DevUpdateStatus
   expectedHead?: string
   head?: string
   oldInstanceId?: string
@@ -49,11 +49,11 @@ export interface DevSyncSupervisorReceipt {
   completedAt?: number
 }
 
-export interface DevSyncAvailability {
+export interface DevUpdateAvailability {
   available: boolean
   reason?: string
   branch?: string
   head?: string
   supervisorConnected: boolean
-  lastResult?: DevSyncResult | null
+  lastResult?: DevUpdateResult | null
 }

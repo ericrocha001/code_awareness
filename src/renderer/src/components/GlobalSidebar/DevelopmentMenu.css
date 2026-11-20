@@ -206,7 +206,7 @@
   cursor: not-allowed;
 }
 
-/* Botão de ação primária (DevSync) */
+/* Botão de ação primária (DevUpdate) */
 .dev-menu-action-btn--primary {
   background: rgba(120, 82, 238, 0.08);
   border: 1px solid rgba(120, 82, 238, 0.2);

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { Wrench, RefreshCw, CheckCircle2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react'
 import { Popover } from '../shared/Popover/Popover'
-import type { DevSyncAvailability, DevSyncResult } from '../../../../main/dev-sync/dev-sync-types'
+import type { DevUpdateAvailability, DevUpdateResult } from '../../../../main/dev-update/dev-update-types'
 import './DevelopmentMenu.css'
 
 interface DevelopmentMenuProps {
@@ -9,23 +9,23 @@ interface DevelopmentMenuProps {
 }
 
 export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen }) => {
-  const [availability, setAvailability] = useState<DevSyncAvailability | null>(null)
+  const [availability, setAvailability] = useState<DevUpdateAvailability | null>(null)
   const [open, setOpen] = useState(false)
-  const [isSyncing, setIsSyncing] = useState(false)
-  const [syncStatusText, setSyncStatusText] = useState<string | null>(null)
-  const [syncResult, setSyncResult] = useState<DevSyncResult | null>(null)
+  const [isUpdating, setIsUpdating] = useState(false)
+  const [updateStatusText, setUpdateStatusText] = useState<string | null>(null)
+  const [updateResult, setUpdateResult] = useState<DevUpdateResult | null>(null)
   const [showErrorDetails, setShowErrorDetails] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => {
     let mounted = true
-    if (window.codeAwareness?.getDevSyncStatus) {
-      window.codeAwareness.getDevSyncStatus()
+    if (window.codeAwareness?.getDevUpdateStatus) {
+      window.codeAwareness.getDevUpdateStatus()
         .then((res) => {
           if (mounted) {
             setAvailability(res)
             if (res?.lastResult) {
-              setSyncResult(res.lastResult)
+              setUpdateResult(res.lastResult)
             }
           }
         })
@@ -39,17 +39,17 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
   const handleOpen = () => {
     setOpen((prev) => {
       const next = !prev
-      if (next && window.codeAwareness?.getDevSyncStatus) {
-        window.codeAwareness.getDevSyncStatus().then((fresh) => {
+      if (next && window.codeAwareness?.getDevUpdateStatus) {
+        window.codeAwareness.getDevUpdateStatus().then((fresh) => {
           setAvailability(fresh)
-          if (fresh?.lastResult) setSyncResult(fresh.lastResult)
+          if (fresh?.lastResult) setUpdateResult(fresh.lastResult)
         }).catch(() => {})
       }
       return next
     })
   }
 
-  // Se DevSync não estiver disponível, renderiza botão clássico do DevTools (para modo produção / fallback)
+  // Se DevUpdate não estiver disponível, renderiza botão clássico do DevTools (para modo produção / fallback)
   if (!availability?.available) {
     return (
       <button
@@ -66,29 +66,29 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
     )
   }
 
-  const handleDevSyncClick = async () => {
-    if (isSyncing) return
-    setIsSyncing(true)
-    setSyncStatusText('Sincronizando...')
+  const handleDevUpdateClick = async () => {
+    if (isUpdating) return
+    setIsUpdating(true)
+    setUpdateStatusText('Sincronizando...')
     setShowErrorDetails(false)
     try {
-      const result = await window.codeAwareness.requestDevSync()
-      setSyncResult(result)
+      const result = await window.codeAwareness.requestDevUpdate()
+      setUpdateResult(result)
       if (result.status === 'SCHEDULED') {
-        setSyncStatusText('Reiniciando runtime...')
+        setUpdateStatusText('Reiniciando runtime...')
       } else {
-        setSyncStatusText(null)
+        setUpdateStatusText(null)
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
-      setSyncResult({
+      setUpdateResult({
         operationId: 'local-err',
         status: 'FAILED',
         message
       })
-      setSyncStatusText(null)
+      setUpdateStatusText(null)
     } finally {
-      setIsSyncing(false)
+      setIsUpdating(false)
     }
   }
 
@@ -106,7 +106,7 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
         aria-label="Menu Development"
         aria-haspopup="true"
         aria-expanded={open}
-        title="Development (DevSync e Ferramentas)"
+        title="Development (DevUpdate e Ferramentas)"
       >
         <span className="global-sidebar-nav-icon" aria-hidden="true">
           <Wrench size={18} strokeWidth={2} />
@@ -131,32 +131,32 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
           </div>
 
           {/* Banner de resultado anterior ou concluído */}
-          {syncResult?.status === 'COMPLETED' && (
+          {updateResult?.status === 'COMPLETED' && (
             <div className="dev-menu-banner dev-menu-banner--success" role="status">
               <CheckCircle2 size={15} className="dev-menu-banner-icon" />
               <div className="dev-menu-banner-text">
-                <div>DevSync concluído ({syncResult.head?.slice(0, 7) || 'atualizado'})</div>
+                <div>DevUpdate concluído ({updateResult.head?.slice(0, 7) || 'atualizado'})</div>
                 <div className="dev-menu-banner-sub">Se necessário, execute "Atualizar ações" no ChatGPT.</div>
               </div>
             </div>
           )}
 
-          {syncResult?.status === 'ALREADY_CURRENT' && (
+          {updateResult?.status === 'ALREADY_CURRENT' && (
             <div className="dev-menu-banner dev-menu-banner--info" role="status">
               <CheckCircle2 size={15} className="dev-menu-banner-icon" />
               <div className="dev-menu-banner-text">
                 <div>Já atualizado com upstream</div>
-                <div className="dev-menu-banner-sub">HEAD: {syncResult.head?.slice(0, 7) || availability.head?.slice(0, 7)}</div>
+                <div className="dev-menu-banner-sub">HEAD: {updateResult.head?.slice(0, 7) || availability.head?.slice(0, 7)}</div>
               </div>
             </div>
           )}
 
-          {syncResult && ['FAILED', 'PARTIAL', 'DIRTY_WORKTREE', 'AHEAD_OR_DIVERGED', 'DETACHED_HEAD', 'UPSTREAM_UNAVAILABLE', 'EXPECTED_COMMIT_NOT_INTEGRATED'].includes(syncResult.status) && (
+          {updateResult && ['FAILED', 'PARTIAL', 'DIRTY_WORKTREE', 'AHEAD_OR_DIVERGED', 'DETACHED_HEAD', 'UPSTREAM_UNAVAILABLE', 'EXPECTED_COMMIT_NOT_INTEGRATED'].includes(updateResult.status) && (
             <div className="dev-menu-banner dev-menu-banner--error" role="alert">
               <AlertCircle size={15} className="dev-menu-banner-icon" />
               <div className="dev-menu-banner-text">
-                <div className="dev-menu-banner-error-msg">{syncResult.message}</div>
-                {syncResult.details && (
+                <div className="dev-menu-banner-error-msg">{updateResult.message}</div>
+                {updateResult.details && (
                   <button
                     type="button"
                     className="dev-menu-details-toggle"
@@ -165,9 +165,9 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
                     {showErrorDetails ? <ChevronDown size={12} /> : <ChevronRight size={12} />} Detalhes técnicos
                   </button>
                 )}
-                {showErrorDetails && syncResult.details && (
+                {showErrorDetails && updateResult.details && (
                   <pre className="dev-menu-error-pre">
-                    {JSON.stringify(syncResult.details, null, 2)}
+                    {JSON.stringify(updateResult.details, null, 2)}
                   </pre>
                 )}
               </div>
@@ -175,21 +175,21 @@ export const DevelopmentMenu: React.FC<DevelopmentMenuProps> = ({ isSidebarOpen 
           )}
 
           <div className="dev-menu-actions">
-            {/* Ação Primária: DevSync */}
+            {/* Ação Primária: DevUpdate */}
             <button
               type="button"
               className="dev-menu-action-btn dev-menu-action-btn--primary"
-              onClick={handleDevSyncClick}
-              disabled={isSyncing}
+              onClick={handleDevUpdateClick}
+              disabled={isUpdating}
               role="menuitem"
             >
-              <RefreshCw size={16} className={`dev-menu-action-icon ${isSyncing ? 'dev-menu-spin' : ''}`} />
+              <RefreshCw size={16} className={`dev-menu-action-icon ${isUpdating ? 'dev-menu-spin' : ''}`} />
               <div className="dev-menu-action-content">
                 <div className="dev-menu-action-label">
-                  {syncStatusText || 'DevSync'}
+                  {updateStatusText || 'Restart to Update'}
                 </div>
                 <div className="dev-menu-action-desc">
-                  Sincronizar código e reiniciar runtime
+                  Atualizar código (fetch e fast-forward) e reiniciar runtime
                 </div>
               </div>
             </button>

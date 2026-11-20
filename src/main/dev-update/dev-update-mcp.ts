@@ -1,10 +1,10 @@
 import type { AgentAuthority } from '../continuum/agent-authority'
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
-import type { DevSyncService } from './dev-sync-service'
+import type { DevUpdateService } from './dev-update-service'
 
-export const REQUEST_DEV_SYNC_TOOL: McpToolDefinition = {
-  name: 'request_dev_sync',
-  description: 'Request automated git fetch, fast-forward pull and complete development runtime renewal for the Code Awareness development checkout. Validates clean worktree, upstream tracking and supervisor authorization before scheduling restart.',
+export const REQUEST_DEV_UPDATE_TOOL: McpToolDefinition = {
+  name: 'request_dev_update',
+  description: 'Request DevUpdate (automated git fetch, fast-forward pull and complete development runtime renewal) for the Code Awareness development checkout. Validates clean worktree, upstream tracking and supervisor authorization before scheduling restart.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -31,8 +31,8 @@ export const REQUEST_DEV_SYNC_TOOL: McpToolDefinition = {
   securitySchemes: [{ type: 'oauth2', scopes: [] }]
 }
 
-export async function executeRequestDevSync(
-  service: DevSyncService,
+export async function executeRequestDevUpdate(
+  service: DevUpdateService,
   args: unknown,
   authority?: AgentAuthority,
   targetRepositoryId?: string
@@ -65,17 +65,17 @@ export async function executeRequestDevSync(
 
   // Verificar autorização do agente
   if (!authority || (typeof authority.isActive === 'function' && !authority.isActive())) {
-    return { content: [{ type: 'text', text: 'AGENT_UNAUTHORIZED: Missing active agent authority for DevSync' }], isError: true }
+    return { content: [{ type: 'text', text: 'AGENT_UNAUTHORIZED: Missing active agent authority for DevUpdate' }], isError: true }
   }
 
   if (targetRepositoryId && authority.repositoryId !== targetRepositoryId) {
     return {
-      content: [{ type: 'text', text: `REPOSITORY_MISMATCH: DevSync requires an authorized context matching repository '${targetRepositoryId}', found '${authority.repositoryId}'` }],
+      content: [{ type: 'text', text: `REPOSITORY_MISMATCH: DevUpdate requires an authorized context matching repository '${targetRepositoryId}', found '${authority.repositoryId}'` }],
       isError: true
     }
   }
 
-  const outcome = await service.executeDevSync({
+  const outcome = await service.executeDevUpdate({
     operationId: values.operationId,
     expectedInstanceId: values.expectedInstanceId,
     expectedIntegratedCommit: values.expectedIntegratedCommit as string | undefined,

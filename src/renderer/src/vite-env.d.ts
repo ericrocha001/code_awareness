@@ -313,9 +313,9 @@ declare global {
 
       toggleDevTools: () => Promise<{ success: boolean }>
 
-      getDevSyncStatus: () => Promise<import('../../main/dev-sync/dev-sync-types').DevSyncAvailability>
+      getDevUpdateStatus: () => Promise<import('../../main/dev-update/dev-update-types').DevUpdateAvailability>
 
-      requestDevSync: () => Promise<import('../../main/dev-sync/dev-sync-types').DevSyncResult>
+      requestDevUpdate: () => Promise<import('../../main/dev-update/dev-update-types').DevUpdateResult>
 
       // ─── Banco de Dados (Code Checkpoints) ───────────────────────────
       initializeDatabase: (repoPath: string) => Promise<{ success: boolean; error?: string }>

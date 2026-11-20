@@ -1,21 +1,21 @@
 import { ipcMain } from 'electron'
 import { randomUUID } from 'node:crypto'
-import type { DevSyncService } from '../dev-sync/dev-sync-service'
-import type { DevSyncAvailability, DevSyncResult } from '../dev-sync/dev-sync-types'
+import type { DevUpdateService } from '../dev-update/dev-update-service'
+import type { DevUpdateAvailability, DevUpdateResult } from '../dev-update/dev-update-types'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 
-export function registerDevSyncHandlers(
-  devSyncService: DevSyncService,
+export function registerDevUpdateHandlers(
+  devUpdateService: DevUpdateService,
   runtimeIdentity: RuntimeIdentityProvider
 ): void {
-  ipcMain.handle('devsync:get-status', async (): Promise<DevSyncAvailability> => {
-    return devSyncService.getAvailability()
+  ipcMain.handle('devupdate:get-status', async (): Promise<DevUpdateAvailability> => {
+    return devUpdateService.getAvailability()
   })
 
-  ipcMain.handle('devsync:request-sync', async (): Promise<DevSyncResult> => {
+  ipcMain.handle('devupdate:request-update', async (): Promise<DevUpdateResult> => {
     const expectedInstanceId = runtimeIdentity.getInstanceId()
-    const operationId = `ui-sync-${randomUUID()}`
-    const result = await devSyncService.executeDevSync({
+    const operationId = `ui-update-${randomUUID()}`
+    const result = await devUpdateService.executeDevUpdate({
       operationId,
       expectedInstanceId,
       caller: 'UI'
@@ -27,7 +27,7 @@ export function registerDevSyncHandlers(
         try {
           await result.postResponse?.()
         } catch (err) {
-          console.error('[DevSync IPC] postResponse failed:', err)
+          console.error('[DevUpdate IPC] postResponse failed:', err)
         }
       })
     }

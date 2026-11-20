@@ -7,17 +7,17 @@ import { DevelopmentMenu } from './DevelopmentMenu'
 beforeEach(() => {
   window.codeAwareness = {
     toggleDevTools: vi.fn(),
-    getDevSyncStatus: vi.fn(async () => ({
+    getDevUpdateStatus: vi.fn(async () => ({
       available: true,
-      branch: 'feat/dev-sync',
+      branch: 'feat/dev-update',
       head: 'abc12345678',
       supervisorConnected: true
     })),
-    requestDevSync: vi.fn(async () => ({
+    requestDevUpdate: vi.fn(async () => ({
       operationId: 'op-test',
       status: 'SCHEDULED' as const,
       head: 'new-head-123',
-      message: 'DevSync agendado'
+      message: 'DevUpdate agendado'
     }))
   } as unknown as Window['codeAwareness']
 })
@@ -25,8 +25,8 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('DevelopmentMenu', () => {
-  it('renders DevTools button as fallback when devSync is not available', async () => {
-    window.codeAwareness.getDevSyncStatus = vi.fn(async () => ({
+  it('renders DevTools button as fallback when DevUpdate is not available', async () => {
+    window.codeAwareness.getDevUpdateStatus = vi.fn(async () => ({
       available: false,
       reason: 'production mode',
       supervisorConnected: false
@@ -41,14 +41,16 @@ describe('DevelopmentMenu', () => {
     expect(window.codeAwareness.toggleDevTools).toHaveBeenCalled()
   })
 
-  it('renders Development menu button when devSync is available', async () => {
+  it('renders Development menu button with DevUpdate title when DevUpdate is available', async () => {
     render(<DevelopmentMenu isSidebarOpen={true} />)
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: 'Menu Development' })).toBeTruthy()
+      const btn = screen.getByRole('button', { name: 'Menu Development' })
+      expect(btn).toBeTruthy()
+      expect(btn.getAttribute('title')).toBe('Development (DevUpdate e Ferramentas)')
     })
   })
 
-  it('opens menu, shows branch and options, and triggers DevTools', async () => {
+  it('opens menu, shows branch, exact Restart to Update label, and triggers DevTools', async () => {
     render(<DevelopmentMenu isSidebarOpen={true} />)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Menu Development' })).toBeTruthy()
@@ -58,8 +60,9 @@ describe('DevelopmentMenu', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Desenvolvimento')).toBeTruthy()
-      expect(screen.getByText('feat/dev-sync')).toBeTruthy()
-      expect(screen.getByText('DevSync')).toBeTruthy()
+      expect(screen.getByText('feat/dev-update')).toBeTruthy()
+      expect(screen.getByText('Restart to Update')).toBeTruthy()
+      expect(screen.getByText(/fetch e fast-forward/i)).toBeTruthy()
       expect(screen.getByText('Chromium DevTools')).toBeTruthy()
     })
 
@@ -67,7 +70,7 @@ describe('DevelopmentMenu', () => {
     expect(window.codeAwareness.toggleDevTools).toHaveBeenCalled()
   })
 
-  it('triggers requestDevSync on click and updates feedback', async () => {
+  it('triggers requestDevUpdate on click and updates feedback', async () => {
     render(<DevelopmentMenu isSidebarOpen={true} />)
     await waitFor(() => {
       expect(screen.getByRole('button', { name: 'Menu Development' })).toBeTruthy()
@@ -75,19 +78,19 @@ describe('DevelopmentMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Menu Development' }))
     await waitFor(() => {
-      expect(screen.getByText('DevSync')).toBeTruthy()
+      expect(screen.getByText('Restart to Update')).toBeTruthy()
     })
-    const devSyncBtn = screen.getByText('DevSync').closest('button')!
-    fireEvent.click(devSyncBtn)
+    const devUpdateBtn = screen.getByText('Restart to Update').closest('button')!
+    fireEvent.click(devUpdateBtn)
 
     await waitFor(() => {
-      expect(window.codeAwareness.requestDevSync).toHaveBeenCalled()
+      expect(window.codeAwareness.requestDevUpdate).toHaveBeenCalled()
       expect(screen.getByText('Reiniciando runtime...')).toBeTruthy()
     })
   })
 
-  it('displays discreet success banner when previous sync completed', async () => {
-    window.codeAwareness.getDevSyncStatus = vi.fn(async () => ({
+  it('displays discreet success banner when previous DevUpdate completed', async () => {
+    window.codeAwareness.getDevUpdateStatus = vi.fn(async () => ({
       available: true,
       branch: 'main',
       head: '1234567890',
@@ -96,7 +99,7 @@ describe('DevelopmentMenu', () => {
         operationId: 'op-done',
         status: 'COMPLETED' as const,
         head: '1234567890',
-        message: 'DevSync concluído'
+        message: 'DevUpdate concluído'
       }
     }))
 
@@ -107,13 +110,13 @@ describe('DevelopmentMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Menu Development' }))
     await waitFor(() => {
-      expect(screen.getByText(/DevSync concluído/i)).toBeTruthy()
+      expect(screen.getByText(/DevUpdate concluído/i)).toBeTruthy()
       expect(screen.getByText(/Atualizar ações/i)).toBeTruthy()
     })
   })
 
-  it('displays error message and toggleable details when DevSync fails', async () => {
-    window.codeAwareness.requestDevSync = vi.fn(async () => ({
+  it('displays error message and toggleable details when DevUpdate fails', async () => {
+    window.codeAwareness.requestDevUpdate = vi.fn(async () => ({
       operationId: 'op-fail',
       status: 'DIRTY_WORKTREE' as const,
       message: 'Checkout possui arquivos modificados.',
@@ -127,10 +130,10 @@ describe('DevelopmentMenu', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Menu Development' }))
     await waitFor(() => {
-      expect(screen.getByText('DevSync')).toBeTruthy()
+      expect(screen.getByText('Restart to Update')).toBeTruthy()
     })
-    const devSyncBtn = screen.getByText('DevSync').closest('button')!
-    fireEvent.click(devSyncBtn)
+    const devUpdateBtn = screen.getByText('Restart to Update').closest('button')!
+    fireEvent.click(devUpdateBtn)
 
     await waitFor(() => {
       expect(screen.getByText('Checkout possui arquivos modificados.')).toBeTruthy()

@@ -15,10 +15,10 @@ function createDevSupervisor(options) {
   let child = null
   let restartExpected = false
   let restartPrepared = false
-  let devSyncReserved = null
-  let devSyncPending = null
-  let latestDevSyncReceipt = null
-  const devSyncReceipts = new Map()
+  let devUpdateReserved = null
+  let devUpdatePending = null
+  let latestDevUpdateReceipt = null
+  const devUpdateReceipts = new Map()
   let stopping = false
 
   const server = createServer((socket) => {
@@ -34,37 +34,39 @@ function createDevSupervisor(options) {
         if (message.token !== token) { socket.write('REJECTED\n'); continue }
 
         if (message.action === 'PREPARE') {
-          if (!restartPrepared && !devSyncReserved) {
+          if (!restartPrepared && !devUpdateReserved) {
             restartPrepared = true
             socket.write('READY\n')
           } else {
             socket.write('REJECTED\n')
           }
         } else if (message.action === 'COMMIT') {
-          if (restartPrepared && !devSyncReserved) {
+          if (restartPrepared && !devUpdateReserved) {
             restartExpected = true
             socket.write('ACK\n')
           } else {
             socket.write('REJECTED\n')
           }
+        // Legado técnico intencional: literais privados wire DEV_SYNC_* preservados para
+        // compatibilidade com o Dev Supervisor que pode sobreviver à troca de código Electron.
         } else if (message.action === 'DEV_SYNC_PREPARE') {
-          if (!restartPrepared && !devSyncReserved && message.operationId) {
+          if (!restartPrepared && !devUpdateReserved && message.operationId) {
             restartPrepared = true
-            devSyncReserved = message.operationId
+            devUpdateReserved = message.operationId
             socket.write('READY\n')
           } else {
             socket.write('REJECTED\n')
           }
         } else if (message.action === 'DEV_SYNC_CANCEL') {
-          if (devSyncReserved && devSyncReserved === message.operationId) {
-            devSyncReserved = null
+          if (devUpdateReserved && devUpdateReserved === message.operationId) {
+            devUpdateReserved = null
             restartPrepared = false
             socket.write('RELEASED\n')
           } else {
             socket.write('REJECTED\n')
           }
         } else if (message.action === 'DEV_SYNC_COMMIT') {
-          if (devSyncReserved && devSyncReserved === message.operationId) {
+          if (devUpdateReserved && devUpdateReserved === message.operationId) {
             restartExpected = true
             const receipt = {
               operationId: message.operationId,
@@ -74,38 +76,38 @@ function createDevSupervisor(options) {
               status: 'RESTARTING',
               committedAt: Date.now()
             }
-            devSyncPending = receipt
-            devSyncReceipts.set(message.operationId, receipt)
-            latestDevSyncReceipt = receipt
-            devSyncReserved = null
+            devUpdatePending = receipt
+            devUpdateReceipts.set(message.operationId, receipt)
+            latestDevUpdateReceipt = receipt
+            devUpdateReserved = null
             socket.write('ACK\n')
           } else {
             socket.write('REJECTED\n')
           }
         } else if (message.action === 'RUNTIME_READY') {
-          if (devSyncPending) {
-            const headMatches = message.startupHead && message.startupHead === devSyncPending.expectedHead
-            const instanceDifferent = !devSyncPending.oldInstanceId || message.instanceId !== devSyncPending.oldInstanceId
+          if (devUpdatePending) {
+            const headMatches = message.startupHead && message.startupHead === devUpdatePending.expectedHead
+            const instanceDifferent = !devUpdatePending.oldInstanceId || message.instanceId !== devUpdatePending.oldInstanceId
             if (headMatches && instanceDifferent) {
-              devSyncPending.status = 'COMPLETED'
-              devSyncPending.head = message.startupHead
-              devSyncPending.newInstanceId = message.instanceId
-              devSyncPending.completedAt = Date.now()
-              latestDevSyncReceipt = { ...devSyncPending }
-              devSyncPending = null
+              devUpdatePending.status = 'COMPLETED'
+              devUpdatePending.head = message.startupHead
+              devUpdatePending.newInstanceId = message.instanceId
+              devUpdatePending.completedAt = Date.now()
+              latestDevUpdateReceipt = { ...devUpdatePending }
+              devUpdatePending = null
             } else {
-              devSyncPending.status = 'PARTIAL'
-              devSyncPending.error = 'IDENTITY_MISMATCH'
-              devSyncPending.details = { startupHead: message.startupHead, expectedHead: devSyncPending.expectedHead }
-              latestDevSyncReceipt = { ...devSyncPending }
-              devSyncPending = null
+              devUpdatePending.status = 'PARTIAL'
+              devUpdatePending.error = 'IDENTITY_MISMATCH'
+              devUpdatePending.details = { startupHead: message.startupHead, expectedHead: devUpdatePending.expectedHead }
+              latestDevUpdateReceipt = { ...devUpdatePending }
+              devUpdatePending = null
             }
           }
           socket.write('ACK\n')
         } else if (message.action === 'GET_DEV_SYNC_STATUS') {
           const receipt = message.operationId
-            ? devSyncReceipts.get(message.operationId)
-            : latestDevSyncReceipt
+            ? devUpdateReceipts.get(message.operationId)
+            : latestDevUpdateReceipt
           socket.write(`${JSON.stringify(receipt || { status: 'NONE' })}\n`)
         } else {
           socket.write('REJECTED\n')
@@ -121,21 +123,21 @@ function createDevSupervisor(options) {
       if (restartExpected && !stopping) {
         restartExpected = false
         restartPrepared = false
-        devSyncReserved = null
-        if (devSyncPending && options.renewRuntime) {
+        devUpdateReserved = null
+        if (devUpdatePending && options.renewRuntime) {
           try {
             const renewed = await options.renewRuntime({
               port: server.address().port,
               token,
-              devSync: devSyncPending
+              devUpdate: devUpdatePending
             })
             bindChild(renewed)
           } catch (err) {
             console.error(`[Dev Supervisor] Renewal failed: ${err?.message || err}`)
-            if (devSyncPending) {
-              devSyncPending.status = 'FAILED'
-              devSyncPending.error = err?.message || String(err)
-              latestDevSyncReceipt = { ...devSyncPending }
+            if (devUpdatePending) {
+              devUpdatePending.status = 'FAILED'
+              devUpdatePending.error = err?.message || String(err)
+              latestDevUpdateReceipt = { ...devUpdatePending }
             }
             server.close()
             options.onFinalExit?.(1)
@@ -153,7 +155,7 @@ function createDevSupervisor(options) {
   function startRuntime() {
     restartExpected = false
     restartPrepared = false
-    devSyncReserved = null
+    devUpdateReserved = null
     const newChild = options.spawnRuntime({ port: server.address().port, token })
     bindChild(newChild)
   }
