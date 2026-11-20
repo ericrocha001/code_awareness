@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3'
 import { digest, utf8Prefix } from './privacy'
 import { sessionIdentity, sessionSelector } from './session-identity'
-import { parseNativeEnvelope, type NativeHookEnvelope } from './native-hooks'
+import { nativeSessionEntityId, parseNativeEnvelope, type NativeHookEnvelope } from './native-hooks'
 import { provenanceClass, type ProvenanceClass } from './provenance-evidence'
 
 export type EntityKind = 'COMMIT' | 'CHECKPOINT' | 'SESSION' | 'PR' | 'ARTIFACT' | 'PROOF' | 'WORKTREE' | 'EXECUTION'
@@ -16,11 +16,15 @@ export interface NativeSessionFilter {
 }
 export interface NativeObservationSelector { provider: 'codex-native' | 'antigravity-native'; id: string; worktreeId?: string; generation?: string }
 export interface NativeObservationFilter {
+  eventId?: string
   hookEvents?: readonly string[]
+  types?: readonly string[]
   turnId?: string
   invocationId?: string
   tool?: string
   status?: string
+  errorKind?: string
+  operation?: string
   isError?: boolean
   after?: string
   before?: string
@@ -237,7 +241,11 @@ export class CheckpointRegistry {
 
   nativeObservationPage(selector: NativeObservationSelector, filter: NativeObservationFilter, offset: number, limit: number, accountHash?: string): { events: NativeHookEnvelope[]; more: boolean; filteredTotal?: number } {
     const { cte, params, providerSource } = this.nativeObservationSelection(selector, accountHash)
+    if (filter.types?.length || filter.status || filter.errorKind || filter.operation || filter.isError === false) {
+      return { events: [], more: false, filteredTotal: 0 }
+    }
     const where: string[] = [], values: (string | number)[] = []
+    if (filter.eventId) { where.push(`json_extract(cursor,'$.eventId')=?`); values.push(filter.eventId) }
     if (filter.hookEvents?.length) { where.push(`json_extract(cursor,'$.event') IN (${filter.hookEvents.map(() => '?').join(',')})`); values.push(...filter.hookEvents) }
     if (filter.turnId) { where.push(`json_extract(cursor,'$.turnId')=?`); values.push(filter.turnId) }
     if (filter.invocationId) { where.push(`json_extract(cursor,'$.invocationId')=?`); values.push(filter.invocationId) }
@@ -283,23 +291,41 @@ export class CheckpointRegistry {
     repositoryId: string
     worktreeId?: string
     generation?: string
+    provider?: 'codex-native' | 'antigravity-native'
+    agent?: string
     sessionIds?: string[]
+    hookEvents?: readonly string[]
     tool?: string
     invocationId?: string
     turnId?: string
-    isError?: boolean
     after?: string
     before?: string
     offset: number
     limit: number
-  }, accountHash?: string): { events: NativeHookEnvelope[]; more: boolean } {
+  }, accountHash?: string): { events: Array<{ event: NativeHookEnvelope; nextOffset: number }>; more: boolean; examined: number } {
+    if (filter.sessionIds !== undefined && filter.sessionIds.length === 0) {
+      return { events: [], more: false, examined: 0 }
+    }
+    if (filter.agent && filter.agent !== 'codex' && filter.agent !== 'antigravity') {
+      return { events: [], more: false, examined: 0 }
+    }
     const where = [
       "s.status='COMPLETE'",
       "s.source LIKE 'NATIVE_HOOK:%'",
       "e.state='OBSERVED'",
+      "json_valid(s.cursor)",
+      "s.source = 'NATIVE_HOOK:' || json_extract(s.cursor,'$.eventId')",
       "json_extract(s.cursor,'$.repositoryId')=?"
     ]
     const params: (string | number)[] = [filter.repositoryId]
+    if (filter.provider) {
+      where.push("json_extract(s.cursor,'$.source')=?")
+      params.push(filter.provider === 'codex-native' ? 'CODEX_NATIVE_HOOK' : 'ANTIGRAVITY_NATIVE_HOOK')
+    }
+    if (filter.agent) {
+      where.push("json_extract(s.cursor,'$.source')=?")
+      params.push(filter.agent === 'codex' ? 'CODEX_NATIVE_HOOK' : 'ANTIGRAVITY_NATIVE_HOOK')
+    }
     if (filter.worktreeId && filter.generation) {
       where.push("json_extract(s.cursor,'$.worktreeId')=? AND json_extract(s.cursor,'$.generation')=?")
       params.push(filter.worktreeId, filter.generation)
@@ -307,6 +333,10 @@ export class CheckpointRegistry {
     if (filter.sessionIds?.length) {
       where.push(`json_extract(s.cursor,'$.sessionId') IN (${filter.sessionIds.map(() => '?').join(',')})`)
       params.push(...filter.sessionIds)
+    }
+    if (filter.hookEvents?.length) {
+      where.push(`json_extract(s.cursor,'$.event') IN (${filter.hookEvents.map(() => '?').join(',')})`)
+      params.push(...filter.hookEvents)
     }
     if (filter.tool) {
       where.push("json_extract(s.cursor,'$.tool')=?")
@@ -320,22 +350,17 @@ export class CheckpointRegistry {
       where.push("json_extract(s.cursor,'$.turnId')=?")
       params.push(filter.turnId)
     }
-    if (filter.isError) {
-      where.push("(json_extract(s.cursor,'$.event')='ERROR' OR json_extract(s.cursor,'$.error') IS NOT NULL)")
-    }
     if (filter.after) {
       const ms = Date.parse(filter.after)
-      if (Number.isFinite(ms)) {
-        where.push("json_extract(s.cursor,'$.observedAt') >= ?")
-        params.push(new Date(ms).toISOString())
-      }
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      where.push("strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(s.cursor,'$.observedAt')) >= ?")
+      params.push(new Date(ms).toISOString())
     }
     if (filter.before) {
       const ms = Date.parse(filter.before)
-      if (Number.isFinite(ms)) {
-        where.push("json_extract(s.cursor,'$.observedAt') <= ?")
-        params.push(new Date(ms).toISOString())
-      }
+      if (!Number.isFinite(ms)) throw new Error('INVALID_ARGUMENT')
+      where.push("strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(s.cursor,'$.observedAt')) <= ?")
+      params.push(new Date(ms).toISOString())
     }
     const sql = `
       SELECT s.source, s.cursor
@@ -343,13 +368,23 @@ export class CheckpointRegistry {
       JOIN registry_sources s ON e.source = s.source
       WHERE ${where.join(' AND ')}
       GROUP BY s.source
-      ORDER BY json_extract(s.cursor,'$.observedAt') ASC, json_extract(s.cursor,'$.eventId') ASC
+      ORDER BY strftime('%Y-%m-%dT%H:%M:%fZ', json_extract(s.cursor,'$.observedAt')) ASC, json_extract(s.cursor,'$.sessionId') ASC, json_extract(s.cursor,'$.eventId') ASC
       LIMIT ? OFFSET ?
     `
     const rows = this.db.prepare(sql).all(...params, filter.limit + 1, filter.offset) as Array<{ source: string; cursor: string }>
     const more = rows.length > filter.limit
-    const events = rows.slice(0, filter.limit).map(r => parseNativeEnvelope(r.cursor))
-    return { events, more }
+    const candidateRows = rows.slice(0, filter.limit)
+    const events: Array<{ event: NativeHookEnvelope; nextOffset: number }> = []
+    for (let i = 0; i < candidateRows.length; i++) {
+      const r = candidateRows[i]!
+      const event = parseNativeEnvelope(r.cursor)
+      if (event.repositoryId !== this.repositoryId || r.source !== 'NATIVE_HOOK:' + event.eventId) {
+        throw new Error('REGISTRY_INTEGRITY_FAILED')
+      }
+      if (!this.visible({ kind: 'SESSION', id: nativeSessionEntityId(event, event.sessionId) }, accountHash)) continue
+      events.push({ event, nextOffset: filter.offset + i + 1 })
+    }
+    return { events, more, examined: candidateRows.length }
   }
 
   nativeObservationTurns(selector: NativeObservationSelector, offset: number, limit: number, accountHash?: string) {

@@ -5,7 +5,7 @@ import type { PublicationProvenancePort, PublicationAssociation } from '../../sh
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
-import { normalizeScopedReadArgs, parseSessionRefresh, parseSessionList, parseCaptureHealth, nativeLiteralTarget } from './mcp'
+import { normalizeScopedReadArgs, parseSessionRefresh, parseSessionList, parseCaptureHealth, parseEvidenceSearch, nativeLiteralTarget } from './mcp'
 import { inspectNativeTrust, matchesNativeClient, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import type { LiveSessionTarget, SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
@@ -419,6 +419,34 @@ export class SessionContextClient implements SessionContextPort {
             } else if (this.resolveTarget?.current) {
               target = await this.resolveTarget.current()
               request.validate = target.validate
+            }
+          }
+          if (name === 'search_agent_session_evidence') {
+            let q
+            try { q = parseEvidenceSearch(normalizedArgs) } catch { throw new Error('INVALID_ARGUMENT') }
+            if (!q.sourceSessionId && this.resolveTarget) {
+              const wtSel = q.worktreeId && q.generation
+                ? { worktreeId: q.worktreeId, generation: q.generation }
+                : q.nativeSession?.worktreeId && q.nativeSession?.generation
+                  ? { worktreeId: q.nativeSession.worktreeId, generation: q.nativeSession.generation }
+                  : undefined
+              if (wtSel) {
+                request.phase = 'target-resolution'
+                const resolved = await this.resolveSelectionOnce(wtSel)
+                if (resolved) {
+                  target = { ...resolved, selection: wtSel }
+                  request.validate = resolved.validate
+                  liveTargets = [{ ...wtSel, root: resolved.root, fingerprint: resolved.fingerprint }]
+                }
+              } else if (this.resolveTarget.discover) {
+                request.phase = 'target-resolution'
+                liveTargets = await this.resolveTarget.discover()
+                const snapshot = liveTargets
+                request.validate = async () => {
+                  const fresh = await this.resolveTarget!.discover!()
+                  if (snapshot.some(t => !fresh.some(f => f.worktreeId === t.worktreeId && f.generation === t.generation && f.root === t.root && f.fingerprint === t.fingerprint))) throw new Error('WORKTREE_STALE')
+                }
+              }
             }
           }
           const literalTarget = nativeLiteralTarget(name, args)

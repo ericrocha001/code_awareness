@@ -323,7 +323,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
           message.args,
           assertRequest,
           target?.selection,
-          message.liveTargets ?? [],
+          message.liveTargets ?? (target ? [{ ...target.selection, root: target.root, fingerprint: target.fingerprint }] : []),
           runScoped,
           target?.root ?? root,
           undefined,

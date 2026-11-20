@@ -18,7 +18,9 @@ export interface NativeSessionQuery {
   expectedRevision?: number
   cursor?: string
   limit: number
+  eventId?: string
   hookEvents?: NativeHookEvent[]
+  types?: string[]
   file?: string
   turnId?: string
   invocationId?: string
@@ -26,6 +28,7 @@ export interface NativeSessionQuery {
   status?: string
   isError?: boolean
   errorKind?: string
+  operation?: string
   query?: string
   mapView?: 'SEGMENTS' | 'TURNS' | 'ORIGINS' | 'INVOCATIONS' | 'ERRORS' | 'TOOLS' | 'FILES' | 'TIMELINE'
   facet?: 'TURNS' | 'INVOCATIONS' | 'ERRORS' | 'TOOLS' | 'FILES' | 'TIMELINE'
@@ -33,9 +36,44 @@ export interface NativeSessionQuery {
   before?: string
 }
 
+export function literalSnapshotRevision(baseRevision: number, normalizer: string, snapshotRevision: number, liveFingerprint: string): number {
+  return parseInt(digest(JSON.stringify([baseRevision, normalizer, snapshotRevision, liveFingerprint])).slice(0, 13), 16) || 1
+}
+
+export function verifyNativeLiteralContext(
+  store: SessionStore,
+  nativeSession: NativeSessionSelector,
+  target: { worktreeId: string; generation: string },
+  accountHash?: string
+) {
+  const app = nativeSession.provider === 'antigravity-native'
+  let observation: ReturnType<typeof nativeSessionProjection> | undefined
+  let hookObserved = false
+  try {
+    observation = nativeSessionProjection(store, { nativeSession, limit: 1 }, 'MAP', accountHash)
+    hookObserved = true
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== 'SESSION_UNAVAILABLE') throw error
+    if (!store.registry.visible({ kind: 'SESSION', id: `${nativeSession.provider}:${nativeSession.id}` }, accountHash)) {
+      throw new Error('SESSION_UNAVAILABLE')
+    }
+  }
+  const observations = hookObserved ? store.registry.nativeObservationScope({ provider: nativeSession.provider, id: nativeSession.id }, accountHash) : undefined
+  const knownWorktrees = store.registry.sessionWorktrees(nativeSession.provider, nativeSession.id)
+  if ((observations && (observations.total === 0 || observations.originCount !== 1 || observations.origins.some(wt =>
+    wt.worktreeId !== target.worktreeId || wt.generation !== target.generation))) ||
+    (knownWorktrees.length > 0 && !knownWorktrees.some(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))) {
+    throw new Error('ORIGIN_UNVERIFIED')
+  }
+  const locators = app ? (observations?.locators ?? []) : []
+  const registryVerifiedOrigin = (observations !== undefined && observations.total > 0) ||
+    (knownWorktrees.length > 0 && knownWorktrees.every(wt => wt.worktreeId === target.worktreeId && wt.generation === target.generation))
+  return { app, observation, hookObserved, locators, registryVerifiedOrigin, baseRevision: observation?.revision ?? 0 }
+}
+
 export function nativeSessionProjection(store: SessionStore, request: NativeSessionQuery, mode: 'MAP' | 'EVENTS', accountHash?: string) {
   return store.registry.readSnapshot(() => {
-    const { nativeSession, expectedRevision, cursor, limit, hookEvents, after, before, file, turnId, invocationId, tool, status, isError, errorKind, query, mapView, facet } = request
+    const { nativeSession, expectedRevision, cursor, limit, eventId, hookEvents, types, after, before, file, turnId, invocationId, tool, status, isError, errorKind, operation, query, mapView, facet } = request
     const selectedView = facet || mapView
     const registry = store.registry
     const observation = registry.nativeObservationScope(nativeSession, accountHash)
@@ -47,7 +85,7 @@ export function nativeSessionProjection(store: SessionStore, request: NativeSess
     const revision = parseInt(digest(JSON.stringify([scopedSelector, observation.revision])).slice(0, 13), 16) || 1
     if (expectedRevision !== undefined && expectedRevision !== revision) throw new Error('REVISION_CONFLICT')
     if (query) throw new Error('SOURCE_UNAVAILABLE')
-    const scope = { v: 2, mode, repo: store.repositoryId, nativeSession: scopedSelector, revision, accountHash, limit, hookEvents, after, before, file, turnId, invocationId, tool, status, isError, errorKind, mapView: selectedView }
+    const scope = { v: 2, mode, repo: store.repositoryId, nativeSession: scopedSelector, revision, accountHash, limit, eventId, hookEvents, types, after, before, file, turnId, invocationId, tool, status, isError, errorKind, operation, mapView: selectedView }
     const offset = store.offset(cursor, scope)
     const unitEvidence = nativeSession.provider === 'codex-native' ? 'PROVIDER_TURN_ID_OBSERVED' : 'PROVIDER_INVOCATION_ID_OBSERVED'
     const base = {
@@ -128,9 +166,16 @@ export function nativeSessionProjection(store: SessionStore, request: NativeSess
         context: { tool: 'discover_execution_context', arguments: { repositoryId: store.repositoryId, selector: { type: 'SESSION', provider: nativeSession.provider, id: nativeSession.id } } } }
     }
     if (!nativeSession.worktreeId && !singleOrigin) throw new Error('ORIGIN_UNVERIFIED')
-    const page = file ? { events: [], more: false, filteredTotal: 0 } : registry.nativeObservationPage(nativeSession, { hookEvents, turnId, invocationId, tool, status, isError, after, before }, offset, limit, accountHash)
+    const unsupportedHookFilter = !!(file || operation || types?.length || status || errorKind || isError === false)
+    const page = unsupportedHookFilter
+      ? { events: [], more: false, filteredTotal: 0 }
+      : registry.nativeObservationPage(nativeSession, { eventId, hookEvents, turnId, invocationId, tool, status, isError, after, before }, offset, limit, accountHash)
     if (page.filteredTotal !== undefined && offset > page.filteredTotal) throw new Error('CURSOR_STALE')
-    return { ...base, ...(file ? { fileCoverage: { state: 'NOT_OBSERVED' } } : {}), events: page.events.map(event => ({
+    return { ...base,
+      ...(file ? { fileCoverage: { state: 'NOT_OBSERVED' } } : {}),
+      ...(operation ? { operationCoverage: { state: 'NOT_OBSERVED' } } : {}),
+      ...(types?.length || status || errorKind || isError === false ? { coverageReason: 'UNSUPPORTED_FILTER_FOR_NATIVE_HOOK' } : {}),
+      events: page.events.map(event => ({
       eventId: event.eventId, type: event.event, ...(event.turnId && singleOrigin ? { turnId: event.turnId } : {}), observedAt: event.observedAt, tool: event.tool, invocationId: event.invocationId,
       worktreeId: event.worktreeId, generation: event.generation, provenance: 'NATIVE_HOOK_OBSERVED', omission: 'SOURCE_UNAVAILABLE'
     })), ...(page.more ? { nextCursor: store.cursor(scope, offset + limit) } : {}) }
