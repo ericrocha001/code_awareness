@@ -8,7 +8,8 @@ type Edge = Graph['edges'][number]
 const workEvidence = new Set([
   'GITHUB_PR_MERGE', 'GITHUB_COMMIT_LIST', 'HANDOFF_DECLARED', 'CONTINUUM_REVISION',
   'CONTINUUM_REVISIONED_RELATION', 'CONTINUUM_TYPED_RELATION', 'OPERATION_EXECUTION_CONTEXT',
-  'LEDGER_EVIDENCE_FOR', 'CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'NATIVE_GIT_CAUSAL'
+  'LEDGER_EVIDENCE_FOR', 'CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'NATIVE_GIT_CAUSAL',
+  'EXECUTION_CONTEXT_OBSERVED', 'DELEGATED_SESSION_LINEAGE'
 ])
 const workRelations = new Set(['implements', 'resolved-by', 'validates'])
 const usable = (edge: Pick<Edge, 'state'>) => edge.state !== 'STALE' && edge.state !== 'UNKNOWN'
@@ -49,7 +50,7 @@ function workDiagnostics(graph: Graph, root: string, selector: ExecutionSelector
     return [...(graph.bounded ? ['GRAPH_LIMIT_REACHED'] : []), ...(!allowed ? ['GATE_REQUIRED'] : []),
       ...limited.flatMap(row => [(row as any).reasonCode ? `${row.source}_${(row as any).reasonCode}` : null, row.source + '_' + row.status].filter(Boolean) as string[])]
   }
-  const workCoverage = coverageFor(source => ['CONTINUUM','GITHUB','DELIVERY_GIT','DELIVERY_PR'].includes(source))
+  const workCoverage = coverageFor(source => ['CONTINUUM','GITHUB','DELIVERY_GIT','DELIVERY_PR','DELIVERY_CONTINUUM'].includes(source))
   const causalCoverage = coverageFor(source => source.startsWith('NATIVE_') || selector.type === 'PR' && source === 'GITHUB')
   const material = work.filter(item => item.role === 'PLAN' || item.role === 'HANDOFF')
   const usableWork = allowed && material.find(item => item.witness.length && item.witness.every(usable))

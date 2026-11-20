@@ -9,6 +9,30 @@ import type { RegistryBatch, RegistryEdge, RegistryEntity, RegistryReader } from
 import { digest } from './privacy'
 import { extractArtifactReferences } from '../continuum/artifact-references'
 
+const safeSourceCodes = [
+  'NETWORK_NOT_AUTHORIZED', 'REAUTH_REQUIRED', 'RATE_LIMITED', 'PERMISSION_DENIED',
+  'TIMEOUT', 'NETWORK_ERROR', 'REMOTE_CONTEXT_CHANGED', 'REPOSITORY_MISMATCH', 'RECEIPT_READ_FAILED'
+] as const
+
+function classifySourceError(error: unknown, stage: string): { status: string; reasonCode: string; stage: string } {
+  const raw = error && typeof error === 'object' && 'code' in error ? String((error as { code: unknown }).code) : error instanceof Error ? error.message : ''
+  const upper = raw.trim().toUpperCase()
+  if (upper.includes('CURSOR_STALE') || upper === 'INVALID_CURSOR' || upper === 'INVALID_ARGUMENT' || upper.startsWith('INVALID_ARGUMENT:')) {
+    return { status: 'PARTIAL', reasonCode: 'CURSOR_STALE', stage }
+  }
+  if (upper.includes('CONTRACT_STALE') || upper.includes('SCHEMA')) {
+    return { status: 'UNAVAILABLE', reasonCode: 'CONTRACT_STALE', stage }
+  }
+  if (upper.includes('UNSUPPORTED')) {
+    return { status: 'UNSUPPORTED', reasonCode: 'SOURCE_UNSUPPORTED', stage }
+  }
+  const match = safeSourceCodes.find(code => upper.includes(code))
+  if (match === 'NETWORK_NOT_AUTHORIZED' || match === 'REAUTH_REQUIRED') {
+    return { status: 'NETWORK_NOT_AUTHORIZED', reasonCode: match, stage }
+  }
+  return { status: 'UNAVAILABLE', reasonCode: match ?? 'SOURCE_UNAVAILABLE', stage }
+}
+
 export function registrySources(options: {
   repositoryId: string; root: string; continuum: () => ContinuumService | null; ledger: ValidationLedger
   github: Pick<GitHubIntegrationService, 'commitPullRequests' | 'getPullRequest' | 'pullRequestCommits'> & Partial<Pick<GitHubIntegrationService, 'pullRequestCatalogPage' | 'deliveryRepository' | 'deliveryProjectionPage'>>
@@ -90,7 +114,7 @@ export function registrySources(options: {
       for (const neighbor of neighbors.slice(0, 20)) if (neighbor.kind === 'ARTIFACT') addArtifact(neighbor.id)
       const metadataKey = selector?.kind === 'PR' ? 'pullRequest' : selector?.kind === 'COMMIT' ? 'commitSha' : selector?.kind === 'EXECUTION' ? 'executionId' : undefined
       if (metadataKey && selector) for (const row of service.list({ metadata: { [metadataKey]: selector.kind === 'PR' ? Number(selector.id) : selector.id }, limit: 10 }).artifacts) addArtifact(row.artifactId)
-    } else unavailable('CONTINUUM')
+    } else unavailable('CONTINUUM', 'UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'CONTINUUM_SERVICE')
     let canonicalRepository: string | undefined
     try { canonicalRepository = await options.github.deliveryRepository?.(options.root, repositoryId); assertCurrent() } catch { assertCurrent() }
     const validDeliveryAnchor = (rawAnchor: unknown) => {
@@ -111,8 +135,14 @@ export function registrySources(options: {
       ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string) => options.github.deliveryProjectionPage!(repositoryId, cursor) : undefined],
       ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string) => service.publicationDeliveryPage!(cursor) : undefined]
     ] as const) if (read) {
+      let deliveryStage = 'DELIVERY_CURSOR'
       try {
-        const page = await read(cursors[source]); assertCurrent()
+        const savedCursor = cursors[source]
+        if (savedCursor !== undefined && typeof savedCursor !== 'string') throw new Error('CURSOR_STALE')
+        deliveryStage = 'DELIVERY_PAGE'
+        const page = await read(savedCursor); assertCurrent()
+        if (!page || !Array.isArray(page.observations)) throw new Error('CONTRACT_STALE')
+        deliveryStage = 'DELIVERY_PROJECT'
         for (const observation of page.observations) {
           const anchor = validDeliveryAnchor(observation.anchor)
           if (!anchor) continue
@@ -138,8 +168,22 @@ export function registrySources(options: {
           if (target.kind === 'ARTIFACT') addArtifact(target.id)
           if (target.kind === 'PR') prs.add(Number(target.id))
         }
-        addBatch({ source, revision: digest(JSON.stringify(page.observations.map(o => o.receiptId))), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
-      } catch { assertCurrent(); unavailable(source) }
+        if (selector) {
+          addBatch({ source, revision: digest(JSON.stringify([selector.kind, selector.id, page.observations.map(o => o.receiptId)])), cursor: savedCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
+        } else {
+          addBatch({ source, revision: digest(JSON.stringify(page.observations.map(o => o.receiptId))), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
+          diagnostic(source, page.nextCursor ? 'BACKLOG_PENDING' : 'SOURCE_READY', deliveryStage)
+        }
+      } catch (error) {
+        assertCurrent()
+        const classified = classifySourceError(error, deliveryStage)
+        if (classified.reasonCode === 'CURSOR_STALE') {
+          addBatch({ source, revision: digest('CURSOR_STALE:' + deliveryStage), cursor: '', status: 'PARTIAL', edges: [] })
+          diagnostic(source, 'CURSOR_STALE', deliveryStage)
+        } else {
+          unavailable(source, classified.status, classified.reasonCode, classified.stage)
+        }
+      }
     }
     if (selector?.kind === 'PR') prs.add(Number(selector.id))
     for (const artifact of artifacts.values()) {
@@ -149,12 +193,15 @@ export function registrySources(options: {
     }
     if (prs.size && canonicalRepository) addBatch({ source: 'DELIVERY_PR_HINTS', revision: digest(JSON.stringify([...prs])), status: 'COMPLETE',
       entities: [...prs].slice(0, 20).map(number => ({ kind: 'PR', id: String(number) })), edges: [] })
-    if (!options.networkAllowed()) unavailable('GITHUB', 'NETWORK_NOT_AUTHORIZED')
+    const discoveredCommits = new Set<string>()
+    if (!options.networkAllowed()) unavailable('GITHUB', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_GATE')
     else {
+      let githubStage = 'GITHUB_READ'
       try {
         const assertNetwork = () => { assertCurrent(); if (!options.networkAllowed()) throw new Error('NETWORK_NOT_AUTHORIZED') }
         let discoveryUnavailable = false
         if (!selector && options.github.pullRequestCatalogPage) {
+          githubStage = 'CATALOG_PAGE'
           const discovery = await discoverGitHubPage({ repositoryId, root: options.root, read: options.github.pullRequestCatalogPage.bind(options.github), cursor: cursors.GITHUB_DISCOVERY, epoch: discoveryEpoch, assertCurrent, assertNetwork })
           batches.push(...discovery)
           const state = discovery.find(batch => batch.source === 'GITHUB_DISCOVERY')
@@ -165,10 +212,12 @@ export function registrySources(options: {
           }
         }
         if (selector?.kind === 'COMMIT') {
+          githubStage = 'COMMIT_PRS'
           assertNetwork()
           for (const number of await options.github.commitPullRequests(options.root, selector.id)) prs.add(number)
         }
         for (const number of [...prs].slice(0, 2)) {
+          githubStage = 'PR_LOOKUP'
           assertNetwork()
           const key = 'GITHUB:PR:' + number
           const saved = JSON.parse(cursors[key] ?? '{}')
@@ -198,10 +247,12 @@ export function registrySources(options: {
           if (verifiedPrs.get(number) === 'VALID') currentPrHeads.set(number, pr.head.sha)
           if (pr.mergedAt && pr.lifecycle === 'MERGED' && typeof pr.mergeCommitSha === 'string' && /^[a-f0-9]{40}$/.test(pr.mergeCommitSha) && canonicalRepository && pr.base.repository.toLowerCase() === canonicalRepository.toLowerCase()) {
             const evidenceRef = 'PR:' + number + ':merge:' + pr.mergeCommitSha
+            discoveredCommits.add(pr.mergeCommitSha)
             addBatch({ source: key + ':MERGE', revision: pr.head.sha, status: 'COMPLETE', edges: [{ from: { kind: 'PR', id: String(number) }, relation: 'merged-as', to: { kind: 'COMMIT', id: pr.mergeCommitSha }, evidenceKind: 'GITHUB_PR_MERGE', evidenceRef, digest: digest(evidenceRef), freshness: 'OBSERVED_SNAPSHOT' }] })
           }
           if (saved.head === pr.head.sha && saved.nextPage === null && saved.catalogRevision === catalogRevision) continue
           const pageNumber = saved.head === pr.head.sha ? saved.nextPage ?? 1 : 1
+          githubStage = 'PR_COMMITS'
           assertNetwork()
           let page
           try { page = await options.github.pullRequestCommits(options.root, number, pr.head.sha, pageNumber) }
@@ -215,14 +266,17 @@ export function registrySources(options: {
           }
           assertCurrent()
           if (page.repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
+          for (const commit of page.commits) discoveredCommits.add(commit.sha)
           addBatch({ source: key + ':' + pageNumber, revision: pr.head.sha, status: 'COMPLETE', entities: [{ kind: 'PR', id: String(number) }], edges: page.commits.map(commit => ({
             from: { kind: 'COMMIT', id: commit.sha }, relation: 'member-of', to: { kind: 'PR', id: String(number) }, evidenceKind: 'GITHUB_COMMIT_LIST', evidenceRef: `PR:${number}:${pr.head.sha}:${pageNumber}`, digest: digest(JSON.stringify(page.commits)), freshness: 'OBSERVED_SNAPSHOT' })) })
           addBatch({ source: key, revision: pr.head.sha, status: page.nextPage ? 'PARTIAL' : 'COMPLETE', cursor: JSON.stringify({ head: pr.head.sha, nextPage: page.nextPage, catalogRevision }), edges: [] })
         }
         addBatch({ source: 'GITHUB', revision: digest(JSON.stringify([...prs])), status: discoveryUnavailable ? 'UNAVAILABLE' : prs.size > 2 ? 'PARTIAL' : 'OBSERVED_SNAPSHOT', edges: [] })
+        diagnostic('GITHUB', discoveryUnavailable ? 'SOURCE_UNAVAILABLE' : prs.size > 2 ? 'BACKLOG_PENDING' : 'SOURCE_READY', githubStage)
       } catch (error) {
         assertCurrent()
-        unavailable('GITHUB', error instanceof Error && error.message === 'NETWORK_NOT_AUTHORIZED' ? 'NETWORK_NOT_AUTHORIZED' : 'UNAVAILABLE')
+        const classified = classifySourceError(error, githubStage)
+        unavailable('GITHUB', classified.status, classified.reasonCode, classified.stage)
       }
     }
     for (const { batch, number, head } of prDeliveries) {
@@ -236,6 +290,9 @@ export function registrySources(options: {
       for (const number of [...prs].slice(0, 2)) {
         const filters: Record<string, string | number>[] = [{ pullRequest: number }, { prNumber: number }, ...(canonicalRepository ? [{ prUrl: 'https://github.com/' + canonicalRepository + '/pull/' + number }] : [])]
         for (const metadata of filters) for (const row of service.list({ metadata, limit: 5 }).artifacts) addArtifact(row.artifactId)
+      }
+      for (const sha of [...discoveredCommits].slice(0, 5)) {
+        for (const row of service.list({ metadata: { commitSha: sha }, limit: 5 }).artifacts) addArtifact(row.artifactId)
       }
       for (const artifact of [...artifacts.values()]) for (const relation of artifact.metadata.relations ?? []) addArtifact(relation.artifactId)
     }
@@ -269,13 +326,31 @@ export function registrySources(options: {
       }
       addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness, verifiedAnchor?.bindingDigest ?? ''])), status: 'COMPLETE', entities, edges })
     }
+    let ledgerStage = 'LEDGER_PAGE'
     try {
-      if (selector?.kind === 'PROOF') projectProof(await options.ledger.getProofWithFreshness(selector.id))
+      if (selector?.kind === 'PROOF') {
+        ledgerStage = 'LEDGER_PROOF'
+        projectProof(await options.ledger.getProofWithFreshness(selector.id))
+      }
+      ledgerStage = 'LEDGER_PAGE'
       const page = !selector ? await options.ledger.projectionPage(cursors.LEDGER) : undefined
       for (const proof of page?.proofs ?? []) projectProof(proof)
-      for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)
+      ledgerStage = 'LEDGER_BY_ARTIFACT'
+      for (const artifactId of [...new Set([...artifacts.values()].map(a => a.artifactId))].slice(0, 8)) {
+        for (const proof of await options.ledger.listProofs({ requirementId: artifactId, limit: 10 })) projectProof(proof)
+      }
       addBatch({ source: 'LEDGER', revision: digest(page?.cursor ?? selector?.id ?? ''), cursor: page?.cursor ?? cursors.LEDGER, status: page?.more ? 'PARTIAL' : selector ? 'SELECTED_SCOPE' : 'COMPLETE', edges: [] })
-    } catch { assertCurrent(); unavailable('LEDGER') }
+      if (!selector) diagnostic('LEDGER', page?.more ? 'BACKLOG_PENDING' : 'SOURCE_READY', ledgerStage)
+    } catch (error) {
+      assertCurrent()
+      const classified = classifySourceError(error, ledgerStage)
+      if (classified.reasonCode === 'CURSOR_STALE') {
+        addBatch({ source: 'LEDGER', revision: digest('CURSOR_STALE'), cursor: '', status: 'PARTIAL', edges: [] })
+        diagnostic('LEDGER', 'CURSOR_STALE', ledgerStage)
+      } else {
+        unavailable('LEDGER', classified.status, classified.reasonCode, classified.stage)
+      }
+    }
     for (const id of missing) {
       const source = /:\d+$/.test(id) ? 'CONTINUUM:' + id : 'CONTINUUM_CURRENT:' + id
       addBatch({ source, revision: 'ARTIFACT_NOT_FOUND', status: 'REPLACED', edges: [], artifactLabels: [{ id, snapshot: null }] })

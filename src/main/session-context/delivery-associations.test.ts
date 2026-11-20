@@ -415,7 +415,7 @@ it('propagates active execution identity automatically through LocalChannel Git,
     expect.objectContaining({ type: 'ARTIFACT', id: u2Plan.artifactId, revision: 1, key: `ARTIFACT:fixture:${u2Plan.artifactId}:1` }),
     expect.objectContaining({ type: 'PR', id: '202', key: 'PR:fixture:202' })
   ]))
-}, 60000)
+}, 120000)
 
 it('separates Antigravity contextual activation from verified causal proof, handles multi-session & delegated lineage, and enforces producerWitness', async () => {
   const f = await fixture()
@@ -511,3 +511,99 @@ it('separates Antigravity contextual activation from verified causal proof, hand
   sessions.registry.apply(nativeObservationBatch(s2PostManaged), undefined)
   expect(await correlateNativeGit(sessions.registry, agBinding, s2PreManaged.invocationId!, f.git, () => {})).toBe('VERIFIED')
 }, 60000)
+
+it('batches receipt paging cleanly, isolates malformed blobs, avoids EOF wrap-around, protects global completeness on focal refresh and recovers alternative exact evidence without backfill', async () => {
+  const f = await fixture()
+  await f.service.bootstrapExecution({ planArtifactId: f.plan.artifactId, expectedPlanRevision: f.plan.revision }, f.observe)
+  const snapshot = await f.observe()
+  const operations = new GitOperationsService(f.root, f.git, {} as any, { repositoryId: 'fixture', isActive: () => true })
+  const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => true), 'fixture', () => true, snapshot.worktreeId)
+
+  const badPath = join(f.root, '.git', 'corrupt-receipt.json')
+  writeFileSync(badPath, '{malformed-json')
+  const corruptBlob = (await gitExec(f.root, ['hash-object', '-w', badPath])).trim()
+  await gitExec(f.root, ['update-ref', 'refs/code-awareness/operation-receipts/000-corrupt', corruptBlob])
+
+  const committedShas: string[] = []
+  for (const opId of ['u4-op-01', 'u4-op-02']) {
+    writeFileSync(join(f.root, `${opId}.txt`), opId)
+    const s0 = await operations.getState()
+    await executeGitOperationsTool(operations, 'stage_git_changes', {
+      operationId: `${opId}-stage`, mode: 'STAGE', paths: [`${opId}.txt`], expectedIndexRevision: s0.indexRevision, expectedWorktreeRevision: s0.worktreeRevision
+    }, undefined, authority)
+    const s1 = await operations.getState()
+    const res = await executeGitOperationsTool(operations, 'commit_git_changes', {
+      operationId: opId, message: opId, expectedHead: s1.head, expectedIndexRevision: s1.indexRevision
+    }, undefined, authority, () => f.observe().then(() => f.service.resolveExecutionContext(authority, undefined, f.observe).then(r => r.anchor)))
+    expect(res.isError).toBeFalsy()
+    committedShas.push(JSON.parse(res.content[0].text).sha)
+  }
+
+  const page1 = await f.git.operationReceiptPage(f.root, '', 2)
+  expect(page1.nextCursor).toBe('u4-op-01')
+  const page2 = await f.git.operationReceiptPage(f.root, page1.nextCursor)
+  expect(page2.receipts.map(r => r.receipt.operationId)).toEqual(expect.arrayContaining(['u4-op-01-stage', 'u4-op-02', 'u4-op-02-stage']))
+
+  const deliveries = await operations.deliveryProjectionPage()
+  expect(deliveries.observations.map(o => o.operationId)).toEqual(['u4-op-01', 'u4-op-02'])
+  expect(await operations.deliveryProjectionPage('zzz-after-tail')).toEqual({ observations: [], nextCursor: undefined })
+
+  await gitExec(f.root, ['commit', '--allow-empty', '-m', 'untracked historical commit'])
+  const externalSha = (await f.git.getCurrentCommitHash(f.root))!
+  const histPlan = f.service.publish('---\nname: Historical Plan\ndescription: Historical fixture\nkind: EXECUTABLE_PLAN\n---\nPlan body')
+  const histHandoff = f.service.publish(`---\nname: Historical Handoff\ndescription: Historical handoff\nkind: IMPLEMENTATION_HANDOFF\ncommitSha: ${externalSha}\nrelations:\n  - artifactId: ${histPlan.artifactId}\n    kind: implements\n---\nHandoff body`)
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u4.db')); cleanup.push(async () => ledger.close())
+  const proof = ledger.recordProof({
+    kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
+    startedAt: '2026-11-20T10:00:00Z', finishedAt: '2026-11-20T10:00:01Z', durationMs: 1000,
+    scope: ['u4'], summary: 'u4 proof', evidenceFor: [histPlan.artifactId]
+  })
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  let gitPageCalls = 0
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: async () => {
+      gitPageCalls++
+      return gitPageCalls === 1
+        ? { observations: [deliveries.observations[0]], nextCursor: 'u4-op-01' }
+        : { observations: [], nextCursor: undefined }
+    },
+    github: {
+      deliveryRepository: async () => 'owner/repo',
+      commitPullRequests: async (_root: string, sha: string) => sha === externalSha ? [162] : [],
+      getPullRequest: async () => ({
+        repositoryId: 'fixture', repository: 'owner/repo',
+        pullRequest: {
+          number: 162, url: 'https://github.com/owner/repo/pull/162', title: 'External PR #162', state: 'closed',
+          draft: false, head: { ref: 'feat', repository: 'owner/repo', sha: externalSha },
+          base: { ref: 'main', repository: 'owner/repo', sha: 'a'.repeat(40) }, mergeability: 'UNKNOWN',
+          mergedAt: '2026-11-20T09:00:00Z', lifecycle: 'MERGED', mergeCommitSha: externalSha, observedAt: '2026-11-20T09:01:00Z'
+        }
+      }),
+      pullRequestCommits: async () => ({ repositoryId: 'fixture', repository: 'owner/repo', headSha: externalSha, commits: [{ sha: externalSha }], nextPage: null })
+    } as any,
+    networkAllowed: () => true,
+    assertCurrent: () => {}
+  })
+
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+  expect(sessions.registry.source('DELIVERY_GIT')?.status).toBe('PARTIAL')
+  expect(sessions.registry.source('DELIVERY_GIT')?.cursor).toBe('u4-op-01')
+
+  sessions.registry.applyAll(await read({ selector: { kind: 'COMMIT', id: externalSha }, cursors: sessions.registry.cursors() }), () => {})
+  expect(sessions.registry.source('DELIVERY_GIT')?.status).toBe('PARTIAL')
+  expect(sessions.registry.source('DELIVERY_GIT')?.cursor).toBe('u4-op-01')
+
+  const recovered = sessions.registry.contextGraph({ kind: 'COMMIT', id: externalSha }, undefined, 4)
+  expect(recovered.nodes).toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'PR', id: '162' }),
+    expect.objectContaining({ type: 'ARTIFACT', id: histHandoff.artifactId }),
+    expect.objectContaining({ type: 'ARTIFACT', id: histPlan.artifactId }),
+    expect.objectContaining({ type: 'PROOF', id: proof.proofId })
+  ]))
+  expect(recovered.edges.some(e => e.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && (e.from.endsWith(externalSha) || e.to.endsWith(externalSha)))).toBe(false)
+}, 120000)

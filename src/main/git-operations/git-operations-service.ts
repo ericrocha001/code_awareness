@@ -166,16 +166,16 @@ export class GitOperationsService {
     return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
   }
   async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
-    let page = await this.git.operationReceiptPage(this.repoRoot, after)
-    if (after && page.receipts.length === 0) {
-      page = await this.git.operationReceiptPage(this.repoRoot, '')
-    }
+    const page = await this.git.operationReceiptPage(this.repoRoot, after)
     const observations: DeliveryProjectionPage['observations'] = []
     for (const { receipt, sha } of page.receipts) {
       const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
       if (receipt.deliveryVerified !== true || !parsed.success || receipt.status !== 'COMPLETED' || !['commit_git_changes', 'mutate_worktree'].includes(receipt.operation) || !receipt.result || receipt.result.isError) continue
       if (parsed.data.repositoryId !== this.coordinationIdentity?.repositoryId) continue
-      const result = JSON.parse(receipt.result.content[0].text)
+      const text = receipt.result.content?.[0]?.text
+      if (typeof text !== 'string') continue
+      let result: Record<string, unknown>
+      try { result = JSON.parse(text) as Record<string, unknown> } catch { continue }
       const commitSha = typeof result.sha === 'string' ? result.sha : result.head
       if (typeof commitSha !== 'string' || !/^[a-f0-9]{40}$/.test(commitSha) || result.parent !== parsed.data.snapshot.head) continue
       observations.push({ receiptId: sha, operationId: receipt.operationId, operation: receipt.operation as 'commit_git_changes' | 'mutate_worktree', argumentFingerprint: receipt.argumentFingerprint, anchor: parsed.data, commitSha })

@@ -296,3 +296,55 @@ it('serves authorized compact labels and selected rationale through MCP SDK with
     await new Promise<void>(resolve => server.close(() => resolve()))
   }
 }, 30000)
+
+it('projects Antigravity contextual/delegated lineage without elevating to verified causal and exposes native/delivery reasonCode and stage in WORK view', async () => {
+  const f = fixture(), execId = 'exec-u4-1', invId = 'a'.repeat(64)
+  const s1 = 'antigravity-native:' + 'b'.repeat(64), s2 = 'antigravity-native:' + 'c'.repeat(64)
+  f.store.registry.applyAll([
+    {
+      repositoryId: 'repo', source: 'CONTINUUM', revision: '1', status: 'COMPLETE',
+      artifactLabels: [{ id: plan1, snapshot: { id: plan1, title: 'Plan U4', artifactKind: 'EXECUTABLE_PLAN', status: 'IN_PROGRESS', revision: 1, contentHash: digest('plan-u4'), freshness: 'CURRENT_REVISION_AT_PROJECTION' } }],
+      edges: [
+        edge(entity('ARTIFACT', plan1 + ':1'), entity('EXECUTION', execId), 'OPERATION_EXECUTION_CONTEXT', 'execution-context'),
+        edge(entity('ARTIFACT', plan1), entity('ARTIFACT', plan1 + ':1'), 'CONTINUUM_REVISION', 'revision'),
+        edge(entity('EXECUTION', execId), entity('COMMIT', commit), 'OPERATION_EXECUTION_CONTEXT', 'delivery-context')
+      ]
+    },
+    {
+      repositoryId: 'repo', source: 'NATIVE_HOOK:ag-ctx', revision: '1', status: 'COMPLETE',
+      edges: [
+        edge(entity('SESSION', s1), entity('EXECUTION', execId), 'EXECUTION_CONTEXT_OBSERVED', 'observed-in-execution'),
+        edge(entity('SESSION', s2), entity('SESSION', s1), 'DELEGATED_SESSION_LINEAGE', 'delegated-from'),
+        edge(entity('SESSION', s1), entity('EXECUTION', 'native-invocation:' + invId), 'EXECUTION_CONTEXT_OBSERVED', 'invoked')
+      ]
+    },
+    { repositoryId: 'repo', source: 'DELIVERY_GIT', revision: 'r1', status: 'UNAVAILABLE', edges: [] },
+    { repositoryId: 'repo', source: 'DELIVERY_GIT:DIAGNOSTIC', revision: 'd1', cursor: JSON.stringify({ reasonCode: 'CONTRACT_STALE', stage: 'DELIVERY_PAGE' }), status: 'CONTRACT_STALE', edges: [] }
+  ], () => {})
+
+  const workRes = await f.call({ selector: { type: 'COMMIT', id: commit }, view: 'WORK' }, undefined, true)
+  const body = JSON.parse((workRes.content[0] as { text: string }).text)
+  expect(body).toMatchObject({
+    workLink: { state: 'FOUND', weakestLink: 'OBSERVED' },
+    causalSession: { state: 'CONTEXTUAL_ONLY' },
+    relevantCoverage: {
+      workLink: { state: 'PARTIAL', reasons: expect.arrayContaining(['DELIVERY_GIT_CONTRACT_STALE', 'DELIVERY_GIT_UNAVAILABLE']) },
+      causalSession: { state: 'SELECTED_SCOPE' }
+    }
+  })
+  expect(body.work).toEqual(expect.arrayContaining([expect.objectContaining({ artifactId: plan1, title: 'Plan U4' })]))
+  expect(body.related.SESSION).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'b'.repeat(64), provider: 'antigravity-native' })]))
+  expect(body.sourceCoverage).toEqual(expect.arrayContaining([
+    expect.objectContaining({ source: 'DELIVERY_GIT', status: 'UNAVAILABLE', reasonCode: 'CONTRACT_STALE', stage: 'DELIVERY_PAGE' })
+  ]))
+
+  f.store.registry.apply({
+    repositoryId: 'repo', source: 'NATIVE_GIT:' + invId, revision: digest('ANTIGRAVITY_CAUSAL_UNSUPPORTED'),
+    status: 'CONFLICT', cursor: 'ANTIGRAVITY_CAUSAL_UNSUPPORTED', edges: []
+  }, undefined)
+  const unsupportedRes = JSON.parse(((await f.call({ selector: { type: 'COMMIT', id: commit }, view: 'WORK' }, undefined, true)).content[0] as { text: string }).text)
+  expect(unsupportedRes).toMatchObject({
+    causalSession: { state: 'UNRESOLVED', reason: `NATIVE_GIT:${invId}_ANTIGRAVITY_CAUSAL_UNSUPPORTED` },
+    relevantCoverage: { causalSession: { state: 'PARTIAL' } }
+  })
+})

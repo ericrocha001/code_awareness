@@ -106,8 +106,8 @@ export class CheckpointRegistry {
   reconciliationBacklog() {
     const sources = this.coverageSources()
     const github = this.source('GITHUB')?.status
-    const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
-    const local = sources.some(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
+    const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR', 'DELIVERY_CONTINUUM'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
+    const local = sources.some(source => ['CONTINUUM', 'LEDGER', 'DELIVERY_GIT', 'DELIVERY_PR', 'DELIVERY_CONTINUUM'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
     let discovery: { phase?: string; reasonCode?: string; lastAttemptAt?: string; lastAdvanceAt?: string; page?: number } = {}
     try { discovery = JSON.parse(this.source('GITHUB_DISCOVERY')?.cursor ?? '{}') } catch {}
     const discoveryPending = discovery.phase === 'FULL' || discovery.phase === 'PREFIX'
@@ -817,10 +817,10 @@ export class CheckpointRegistry {
     return this.db.prepare('SELECT * FROM registry_sources ORDER BY observedAt DESC,source LIMIT 20').all() as ReturnType<CheckpointRegistry['sources']>
   }
   coverageSources(): ReturnType<CheckpointRegistry['sources']> {
-    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','GITHUB_DISCOVERY','DELIVERY_GIT','DELIVERY_PR','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
+    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','GITHUB_DISCOVERY','DELIVERY_GIT','DELIVERY_PR','DELIVERY_CONTINUUM','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
   }
   source(source: string): ReturnType<CheckpointRegistry['sources']>[number] | undefined { return this.db.prepare('SELECT * FROM registry_sources WHERE source=?').get(source) as ReturnType<CheckpointRegistry['source']> }
-  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare("SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY CASE WHEN source IN ('CONTINUUM','LEDGER','DELIVERY_GIT','DELIVERY_PR','GITHUB_DISCOVERY','GITHUB_REFRESH','ENTIRE_REFS') THEN 0 ELSE 1 END,observedAt DESC LIMIT 100").all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
+  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare("SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY CASE WHEN source IN ('CONTINUUM','LEDGER','DELIVERY_GIT','DELIVERY_PR','DELIVERY_CONTINUUM','GITHUB_DISCOVERY','GITHUB_REFRESH','ENTIRE_REFS') THEN 0 ELSE 1 END,observedAt DESC LIMIT 100").all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
   applyAll(batches: RegistryBatch[], assertCurrent: () => void): void {
     this.db.transaction(() => {
       const discovery = batches.find(batch => batch.source === 'GITHUB_DISCOVERY')
@@ -900,7 +900,7 @@ export class CheckpointRegistry {
       if (batch.status === 'CONFLICT') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('CONFLICT', batch.source, 'OBSERVED')
       if (batch.status === 'REPLACED') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('SUPERSEDED', batch.source, 'OBSERVED')
       if (/^GITHUB:PR:[0-9]+$/.test(batch.source) && ['PARTIAL', 'COMPLETE'].includes(batch.status)) this.db.prepare("UPDATE registry_edges SET state='STALE' WHERE source LIKE ? AND sourceRevision<>? AND state='OBSERVED'").run(batch.source + ':%', batch.revision)
-      this.db.prepare(`INSERT INTO registry_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET revision=excluded.revision,cursor=excluded.cursor,status=(CASE WHEN excluded.status='SELECTED_SCOPE' AND status='PARTIAL' THEN 'PARTIAL' ELSE excluded.status END),observedAt=excluded.observedAt`).run(batch.source, batch.revision, batch.cursor ?? null, batch.status, observedAt)
+      this.db.prepare(`INSERT INTO registry_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET revision=excluded.revision,cursor=excluded.cursor,status=(CASE WHEN excluded.status='SELECTED_SCOPE' AND status IN ('PARTIAL','UNAVAILABLE') THEN status ELSE excluded.status END),observedAt=excluded.observedAt`).run(batch.source, batch.revision, batch.cursor ?? null, batch.status, observedAt)
       assertCurrent()
     }).immediate()
   }
