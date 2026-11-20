@@ -4,6 +4,10 @@ import type { ValidationExecution } from './validation-execution'
 import { ValidationBusyError } from './validation-execution'
 import { ValidationTargetError } from './validation-profile-catalog'
 import { operationalFailure, VALIDATION_RETRY_AFTER_MS } from '../mcp/operational-guidance'
+import { resolveEffectiveDeliveryContext, type DeliveryAnchor, type DeliveryContextRequest } from '../../shared/types/delivery-context-types'
+import type { AgentAuthority } from '../continuum/agent-authority'
+
+export type PrepareValidationDelivery = (request: DeliveryContextRequest, worktreeId?: string) => Promise<DeliveryAnchor>
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] as string[] }]
 export const VALIDATION_EXECUTION_TOOLS: McpToolDefinition[] = [
@@ -24,7 +28,14 @@ function object(args: unknown): Record<string, unknown> | null {
   return args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : null
 }
 
-export async function executeValidationTool(execution: ValidationExecution, name: string, args: unknown, deadlineAtMs?: number): Promise<McpToolResult> {
+export async function executeValidationTool(
+  execution: ValidationExecution,
+  name: string,
+  args: unknown,
+  deadlineAtMs?: number,
+  prepareDelivery?: PrepareValidationDelivery,
+  authority?: AgentAuthority
+): Promise<McpToolResult> {
   const values = object(args)
   if (!values) return error('INVALID_ARGUMENT: Expected an arguments object')
   const allowed = name === 'start_validation' ? ['profileId', 'targets', 'producer', 'evidenceFor'] : name === 'get_validation_run' ? ['runId', 'waitMs'] : []
@@ -39,7 +50,21 @@ export async function executeValidationTool(execution: ValidationExecution, name
       if (values.evidenceFor !== undefined && (!Array.isArray(values.evidenceFor) || values.evidenceFor.some((value) => typeof value !== 'string'))) return error('INVALID_ARGUMENT: evidenceFor must be strings')
       const producer = values.producer as ProofProducer
       if (!['IMPLEMENTER', 'ARCHITECT', 'USER', 'SYSTEM', 'TESTER'].includes(producer)) return error('INVALID_ARGUMENT: Unknown producer')
-      const run = await execution.start({ profileId: values.profileId, targets: values.targets as string[] | undefined, producer, evidenceFor: values.evidenceFor as string[] | undefined })
+      const resolved = resolveEffectiveDeliveryContext(undefined, authority?.deliveryContext, authority?.deliveryContextError)
+      if (!resolved.ok) return error('DELIVERY_CONTEXT_INVALID')
+      let deliveryContext: DeliveryAnchor | undefined
+      if (resolved.request) {
+        if (!prepareDelivery) return error('DELIVERY_CONTEXT_INVALID')
+        deliveryContext = await prepareDelivery(resolved.request, authority?.worktreeId)
+      }
+      const run = await execution.start({
+        profileId: values.profileId,
+        targets: values.targets as string[] | undefined,
+        producer,
+        evidenceFor: values.evidenceFor as string[] | undefined,
+        ...(deliveryContext ? { deliveryContext } : {}),
+        ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {})
+      })
       return result({ runId: run.runId, status: run.status, cwd: run.cwd, source: run.source, retryAfterMs: VALIDATION_RETRY_AFTER_MS })
     }
     if (name === 'get_validation_run') {

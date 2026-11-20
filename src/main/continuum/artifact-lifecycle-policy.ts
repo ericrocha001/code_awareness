@@ -40,6 +40,7 @@ export interface LifecycleDependencies {
   proof?(proofId: string): Promise<import('../validation-ledger/validation-ledger-types').ProofWithFreshness | null>
   proofsFor?(artifactId: string): Promise<import('../validation-ledger/validation-ledger-types').ProofWithFreshness[]>
   approve?(review: import('./artifact-lifecycle').LifecycleReview): Promise<import('./artifact-lifecycle').LifecycleApproval | null>
+  observeDelivery?(worktreeId?: string): Promise<import('../../shared/types/execution-branch-types').ExecutionBranchSnapshot>
 }
 export function lifecycleProjection(artifact: Artifact, receipt?: import('./artifact-lifecycle').LifecycleReceipt | null) {
   const policy = lifecyclePolicy(artifact.metadata)

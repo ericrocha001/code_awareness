@@ -147,18 +147,21 @@ async function run(command, args = [], options = {}) {
   let connection, registrationDiagnostic
   const diagnostics = []
   let before = null
+  const deliveryContext = options.deliveryContext !== undefined
+    ? parseDeliveryContextInput(options.deliveryContext)
+    : parseDeliveryContextInput(process.env.CODE_AWARENESS_DELIVERY_CONTEXT)
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
-  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)
+  const requestedRegistration = Boolean(options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR || deliveryContext)
   const shouldCaptureSource = !options.evidenceRoot && options.register !== false && (expectTests || requestedRegistration)
-  receipt.ledger = { association, identity: null, before: null, after: null }
+  receipt.ledger = { association, identity: null, before: null, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
   receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
   if (shouldCaptureSource) {
     try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
-    receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
+    receipt.ledger = { association, identity: connection?.identity || null, before, after: null, ...(deliveryContext ? { deliveryContext } : {}) }
     save()
   }
   let child
@@ -303,11 +306,11 @@ async function run(command, args = [], options = {}) {
   }
   save()
   if (connection && requestedRegistration) {
-    try { receipt.registration = await connection.register(id, receipt.digest) }
+    try { receipt.registration = await connection.register(id, receipt.digest, undefined, deliveryContext) }
     catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
     if (receipt.registration.state === 'PERSISTED') {
-      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200 }) } catch (error) { diagnostics.push(publicError(error)) }
+      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200, ...(deliveryContext ? { deliveryContext } : {}) }) } catch (error) { diagnostics.push(publicError(error)) }
     } else {
       try {
         const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
@@ -408,6 +411,7 @@ async function runSequence(phases, options = {}) {
       evidenceRoot: phase.evidenceRoot ?? options.evidenceRoot,
       expectTests: phase.expectTests ?? options.expectTests,
       association: phase.association ?? options.association,
+      deliveryContext: phase.deliveryContext ?? options.deliveryContext,
       profile: phase.profile ?? options.profile,
       register: phase.register ?? options.register,
       env: options.env || phase.env ? { ...options.env, ...phase.env } : undefined,
@@ -461,37 +465,57 @@ function splitSequenceArgs(args) {
   })
 }
 
+function parseDeliveryContextInput(raw) {
+  if (raw === undefined || raw === null || raw === '') return undefined
+  let parsed = raw
+  if (typeof raw === 'string') {
+    try { parsed = JSON.parse(raw) } catch { throw Object.assign(new Error('DELIVERY_CONTEXT_INVALID'), { code: 'DELIVERY_CONTEXT_INVALID' }) }
+  }
+  const failCtx = () => { throw Object.assign(new Error('DELIVERY_CONTEXT_INVALID'), { code: 'DELIVERY_CONTEXT_INVALID' }) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) failCtx()
+  const keys = Object.keys(parsed)
+  if (keys.length !== 5 || ['bindingArtifactId', 'bindingRevision', 'planArtifactId', 'planRevision', 'executionId'].some(k => !Object.hasOwn(parsed, k))) failCtx()
+  if (typeof parsed.bindingArtifactId !== 'string' || !/^artifact-execution-branch-[a-f0-9]{64}$/.test(parsed.bindingArtifactId)) failCtx()
+  if (!Number.isInteger(parsed.bindingRevision) || parsed.bindingRevision < 1) failCtx()
+  if (typeof parsed.planArtifactId !== 'string' || !/^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(parsed.planArtifactId)) failCtx()
+  if (!Number.isInteger(parsed.planRevision) || parsed.planRevision < 1) failCtx()
+  if (typeof parsed.executionId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(parsed.executionId)) failCtx()
+  return parsed
+}
+
 function parseRunOptions(args, allowHuman = true) {
-  let human = false; let timeoutMs; let expectTests = false; let association; let profile
+  let human = false; let timeoutMs; let expectTests = false; let association; let profile; let deliveryContext
   while (args.length && args[0] !== '--') {
     const flag = args.shift()
     if (allowHuman && flag === '--human') human = true
     else if (flag === '--expect-tests') expectTests = true
     else if (flag === '--association') association = JSON.parse(args.shift())
+    else if (flag === '--delivery-context') deliveryContext = parseDeliveryContextInput(args.shift())
     else if (flag === '--profile') profile = args.shift()
     else if (flag === '--timeout-ms') { timeoutMs = Number(args.shift()); if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid timeout') }
     else throw new Error('Invalid run option')
   }
   if (args.shift() !== '--') throw new Error('Options must be terminated by --')
-  return { human, timeoutMs, expectTests, association, profile }
+  return { human, timeoutMs, expectTests, association, deliveryContext, profile }
 }
 
 async function cli() {
   const args = process.argv.slice(2)
   const action = args.shift()
   if (action === 'register') {
-    const id = args.shift(); let association; let profile
+    const id = args.shift(); let association; let profile; let deliveryContext
     while (args.length) {
       const flag = args.shift(), value = args.shift()
       if (value === undefined) throw new Error('Invalid registration option')
       if (flag === '--association') association = JSON.parse(value)
+      else if (flag === '--delivery-context') deliveryContext = parseDeliveryContextInput(value)
       else if (flag === '--profile') profile = value
       else throw new Error('Invalid registration option')
     }
-    console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association }))); return
+    console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association, deliveryContext }))); return
   }
   if (action === 'reconcile') {
-    let id, limit, cursor, profile, association
+    let id, limit, cursor, profile, association, deliveryContext
     while (args.length) {
       const flag = args.shift(), value = args.shift()
       if (value === undefined) throw new Error('Invalid reconcile option')
@@ -500,9 +524,10 @@ async function cli() {
       else if (flag === '--cursor') cursor = value
       else if (flag === '--profile') profile = value
       else if (flag === '--association') association = JSON.parse(value)
+      else if (flag === '--delivery-context') deliveryContext = parseDeliveryContextInput(value)
       else throw new Error('Invalid reconcile option')
     }
-    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(association ? { association } : {}), ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
+    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(association ? { association } : {}), ...(deliveryContext ? { deliveryContext } : {}), ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
   }
   if (action === 'observe') {
     const id = args.shift(); let afterState
@@ -533,15 +558,15 @@ async function cli() {
     fs.rmSync(directory, { recursive: true }); console.log(JSON.stringify({ removed: id })); return
   }
   if (action === 'sequence') {
-    const { timeoutMs, expectTests, association, profile } = parseRunOptions(args, false)
+    const { timeoutMs, expectTests, association, deliveryContext, profile } = parseRunOptions(args, false)
     const phases = splitSequenceArgs(args)
-    const sequence = await runSequence(phases, { timeoutMs, expectTests, association, profile })
+    const sequence = await runSequence(phases, { timeoutMs, expectTests, association, deliveryContext, profile })
     console.log(projectSequence(sequence))
     process.exitCode = sequence.state === 'PASS' ? 0 : sequence.exitCode || 1
     return
   }
   if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; sequence [--expect-tests] [--timeout-ms N] -- cmd1 --- cmd2; inspect id; reconcile [--receipt id] [--limit N]; clean id')
-  const { human, timeoutMs, expectTests, association, profile } = parseRunOptions(args, true)
+  const { human, timeoutMs, expectTests, association, deliveryContext, profile } = parseRunOptions(args, true)
   const command = args.shift()
   if (!command) throw new Error('Command required')
   const [executable, parameters] = resolveCommand(command, args)
@@ -551,7 +576,7 @@ async function cli() {
     if (result.error) console.error(result.error.message)
     return
   }
-  const receipt = await run(executable, parameters, { timeoutMs, expectTests, association, profile })
+  const receipt = await run(executable, parameters, { timeoutMs, expectTests, association, deliveryContext, profile })
   console.log(project(receipt))
   process.exitCode = receipt.state === 'PASS' ? 0 : receipt.exitCode || 1
 }

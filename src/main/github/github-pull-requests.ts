@@ -1,4 +1,4 @@
-import { sameDeliveryScope, deliveryAnchor, deliveryContextRequest, type DeliveryAnchor, type DeliveryContextRequest, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
+import { sameDeliveryScope, deliveryAnchor, deliveryContextRequest, resolveEffectiveDeliveryContext, type DeliveryAnchor, type DeliveryContextRequest, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, lstatSync, readdirSync }  from 'node:fs'
 import { join } from 'node:path'
@@ -16,6 +16,9 @@ export interface PullRequestDependencies {
 
 export interface PullRequestExecutionContext {
   prepareDelivery?(request: DeliveryContextRequest, worktreeId?: string): Promise<DeliveryAnchor>
+  defaultDeliveryContext?: DeliveryContextRequest
+  deliveryContextError?: string
+  defaultWorktreeId?: string
   isActive(): boolean
   inspectWorktree?(id: string): Promise<{ branch: string | null; head: string | null }>
 }
@@ -29,19 +32,27 @@ export class GitHubPullRequests {
 
   async create(input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
     validateCreatePullRequest(input)
+    const resolvedDelivery = resolveEffectiveDeliveryContext(input.deliveryContext, execution.defaultDeliveryContext, execution.deliveryContextError)
+    if (!resolvedDelivery.ok) throw new PullRequestError('DELIVERY_CONTEXT_INVALID')
+    if (execution.defaultWorktreeId && input.worktreeId && execution.defaultWorktreeId !== input.worktreeId) throw new PullRequestError('DELIVERY_CONTEXT_INVALID')
+    const effectiveInput: CreatePullRequestInput = {
+      ...input,
+      ...(resolvedDelivery.request ? { deliveryContext: resolvedDelivery.request } : {}),
+      ...(input.worktreeId ?? execution.defaultWorktreeId ? { worktreeId: input.worktreeId ?? execution.defaultWorktreeId } : {})
+    }
     const context = await this.resolve()
-    const fingerprint = hash(JSON.stringify([context.repositoryId, context.repository.toLowerCase(), input.headBranch, input.baseBranch, input.expectedHeadSha, input.title, input.body, input.worktreeId ?? null, ...(input.deliveryContext ? [deliveryContextRequest.parse(input.deliveryContext)] : [])]))
+    const fingerprint = hash(JSON.stringify([context.repositoryId, context.repository.toLowerCase(), effectiveInput.headBranch, effectiveInput.baseBranch, effectiveInput.expectedHeadSha, effectiveInput.title, effectiveInput.body, effectiveInput.worktreeId ?? null, ...(effectiveInput.deliveryContext ? [deliveryContextRequest.parse(effectiveInput.deliveryContext)] : [])]))
     if (!this.dependencies) throw new PullRequestError('AUTHORIZATION_REQUIRED')
     const directory = join(this.dependencies.receiptDirectory, hash(context.repositoryId))
-    const operationPath = join(directory, `${hash(input.operationId)}.json`)
+    const operationPath = join(directory, `${hash(effectiveInput.operationId)}.json`)
     let previous: { fingerprint: string } | null
     try { previous = JSON.parse(readFileSync(operationPath, 'utf8')) } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new PullRequestError('RECEIPT_UNAVAILABLE')
       previous = null
     }
     if (previous && previous.fingerprint !== fingerprint) throw new PullRequestError('IDEMPOTENCY_CONFLICT')
-    await this.verify(context, input, execution, false)
-    const existing = await this.reconcile(context, input)
+    await this.verify(context, effectiveInput, execution, false)
+    const existing = await this.reconcile(context, effectiveInput)
     if (existing) {
       try {
         mkdirSync(directory, { recursive: true, mode: 0o700 })
@@ -53,54 +64,54 @@ export class GitHubPullRequests {
         if (error instanceof PullRequestError) throw error
         throw new PullRequestError('RECEIPT_UNAVAILABLE')
       }
-      return { status: 'EXISTING_OPEN' as const, operationId: input.operationId, replayed: !!previous, pullRequest: existing }
+      return { status: 'EXISTING_OPEN' as const, operationId: effectiveInput.operationId, replayed: !!previous, pullRequest: existing }
     }
     if (previous) throw new PullRequestError('OUTCOME_UNKNOWN')
-    await this.verify(context, input, execution)
+    await this.verify(context, effectiveInput, execution)
     const expiresAt = new Date(Date.now() + 120_000).toISOString()
-    const granted = await this.dependencies.approve({ ...input, ...context, operation: 'CREATE_PULL_REQUEST', expiresAt })
+    const granted = await this.dependencies.approve({ ...effectiveInput, ...context, operation: 'CREATE_PULL_REQUEST', expiresAt })
     if (!granted) throw new PullRequestError('AUTHORIZATION_DENIED')
     if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
     const current = await this.resolve()
     if (current.repositoryId !== context.repositoryId || current.repository !== context.repository) throw new PullRequestError('PROJECT_CHANGED')
-    await this.verify(context, input, execution)
-    const raced = await this.reconcile(context, input)
-    if (raced) return { status: 'EXISTING_OPEN' as const, operationId: input.operationId, replayed: false, pullRequest: raced }
+    await this.verify(context, effectiveInput, execution)
+    const raced = await this.reconcile(context, effectiveInput)
+    if (raced) return { status: 'EXISTING_OPEN' as const, operationId: effectiveInput.operationId, replayed: false, pullRequest: raced }
     if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
     if (!execution.isActive()) throw new PullRequestError('PROJECT_CHANGED')
     let anchor: DeliveryAnchor | undefined
-    if (input.deliveryContext) {
+    if (effectiveInput.deliveryContext) {
       if (!execution.prepareDelivery) throw new PullRequestError('DELIVERY_CONTEXT_INVALID')
-      anchor = await execution.prepareDelivery(input.deliveryContext, input.worktreeId)
-      if (anchor.repositoryId !== context.repositoryId || anchor.snapshot.head !== input.expectedHeadSha || anchor.snapshot.branchRef !== 'refs/heads/' + input.headBranch || input.worktreeId && anchor.snapshot.worktreeId !== input.worktreeId) throw new PullRequestError('DELIVERY_CONTEXT_STALE')
+      anchor = await execution.prepareDelivery(effectiveInput.deliveryContext, effectiveInput.worktreeId)
+      if (anchor.repositoryId !== context.repositoryId || anchor.snapshot.head !== effectiveInput.expectedHeadSha || anchor.snapshot.branchRef !== 'refs/heads/' + effectiveInput.headBranch || effectiveInput.worktreeId && anchor.snapshot.worktreeId !== effectiveInput.worktreeId) throw new PullRequestError('DELIVERY_CONTEXT_STALE')
     }
     try {
       mkdirSync(directory, { recursive: true, mode: 0o700 })
-      if (!claim(operationPath, { fingerprint, operationId: input.operationId, ...(anchor ? { deliveryContext: anchor } : {}), operation: 'CREATE_PULL_REQUEST', preparedAt: new Date().toISOString() })) throw new PullRequestError('OUTCOME_UNKNOWN')
+      if (!claim(operationPath, { fingerprint, operationId: effectiveInput.operationId, ...(anchor ? { deliveryContext: anchor } : {}), operation: 'CREATE_PULL_REQUEST', preparedAt: new Date().toISOString() })) throw new PullRequestError('OUTCOME_UNKNOWN')
       // A persistent head claim fences other operation IDs and process restarts after an uncertain POST.
-      if (!claim(join(directory, `head-${hash(context.repository.toLowerCase() + ':' + input.headBranch)}.json`), { operationId: input.operationId, fingerprint })) throw new PullRequestError('OUTCOME_UNKNOWN')
+      if (!claim(join(directory, `head-${hash(context.repository.toLowerCase() + ':' + effectiveInput.headBranch)}.json`), { operationId: effectiveInput.operationId, fingerprint })) throw new PullRequestError('OUTCOME_UNKNOWN')
     } catch (error) {
       if (error instanceof PullRequestError) throw error
       throw new PullRequestError('RECEIPT_UNAVAILABLE')
     }
     try {
-      const created = await this.api.createPullRequest(context.repository, input, () => {
+      const created = await this.api.createPullRequest(context.repository, effectiveInput, () => {
         if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
         if (!execution.isActive()) throw new PullRequestError('PROJECT_CHANGED')
       })
       const verified = await this.api.getPullRequest(context.repository, created.number)
-      this.assertCompatible(context, input, verified)
-      const reconciled = await this.reconcile(context, input)
+      this.assertCompatible(context, effectiveInput, verified)
+      const reconciled = await this.reconcile(context, effectiveInput)
       if (!reconciled || reconciled.number !== verified.number) throw new PullRequestError('PR_IDENTITY_CONFLICT')
       if (anchor) await this.completeDelivery(operationPath, fingerprint, reconciled, execution)
       try { this.dependencies.onDeliveryObserved?.(context.repositoryId) }
       catch { console.warn('[GitHub] DELIVERY_PROJECTION_REQUEST_FAILED') }
-      return { status: 'CREATED' as const, operationId: input.operationId, replayed: false, pullRequest: reconciled }
+      return { status: 'CREATED' as const, operationId: effectiveInput.operationId, replayed: false, pullRequest: reconciled }
     } catch (error) {
       if (error instanceof PullRequestError && ['AUTHORIZATION_EXPIRED', 'PROJECT_CHANGED'].includes(error.code)) throw error
       try {
-        const recovered = await this.reconcile(context, input)
-        if (recovered) return { status: 'EXISTING_OPEN' as const, operationId: input.operationId, replayed: true, pullRequest: recovered }
+        const recovered = await this.reconcile(context, effectiveInput)
+        if (recovered) return { status: 'EXISTING_OPEN' as const, operationId: effectiveInput.operationId, replayed: true, pullRequest: recovered }
       } catch (error) {
         if (error instanceof PullRequestError && ['PR_IDENTITY_CONFLICT', 'CLOSED_PR_REQUIRES_DECISION'].includes(error.code)) throw error
       }

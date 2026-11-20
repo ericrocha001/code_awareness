@@ -348,3 +348,33 @@ it('persists verified provider acceptance metadata on delayed registration and r
   writeFileSync(tamperedPath, JSON.stringify(tampered))
   await expect(registerReceipt(tampered.id, { cwd: f.root, profile: f.profile })).rejects.toMatchObject({ code: 'RECEIPT_IDENTITY_MISMATCH' })
 }, 60000)
+
+it('propagates verified deliveryContext through test-output.cjs and TestOutputLocalAdapter and rejects divergent association', async () => {
+  const f = fixture()
+  await f.start()
+  const request = {
+    bindingArtifactId: 'artifact-execution-branch-' + '1'.repeat(64),
+    bindingRevision: 1,
+    planArtifactId: 'artifact-11111111-1111-4111-8111-111111111111',
+    planRevision: 1,
+    executionId: 'execution-test-output'
+  }
+  const prepareDeliveryContext = vi.fn(async (_authority: unknown, req: typeof request, observe: () => Promise<any>) => {
+    const snap = await observe()
+    return {
+      ...req, schemaVersion: 1, repositoryId: snap.repositoryId, planDigest: '2'.repeat(64), bindingDigest: '3'.repeat(64),
+      classification: 'AUTHENTICATED_EXECUTION_CONTEXT', snapshot: snap
+    }
+  })
+  vi.spyOn(f.session, 'getActiveService').mockReturnValue({ prepareDeliveryContext } as any)
+  const receipt = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile, deliveryContext: request })
+  expect(receipt.state).toBe('PASS')
+  expect(receipt.ledger.deliveryContext).toEqual(request)
+  expect(receipt.registration).toMatchObject({ state: 'PERSISTED', evidenceFor: [request.planArtifactId] })
+  const proof = f.ledger().getProof(receipt.registration.proofId)!
+  expect(proof.evidenceFor).toEqual([request.planArtifactId])
+  expect(proof.commandProfile?.deliveryContext).toMatchObject({ executionId: 'execution-test-output', planArtifactId: request.planArtifactId })
+  await expect(registerReceipt(receipt.id, {
+    cwd: f.root, profile: f.profile, deliveryContext: { ...request, executionId: 'other-execution' }
+  })).rejects.toMatchObject({ code: 'RECEIPT_ASSOCIATION_CONFLICT' })
+}, 60000)

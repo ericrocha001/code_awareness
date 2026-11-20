@@ -21,7 +21,7 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
   const pre = facts.filter(edge => edge.relation === 'PreToolUse'), post = facts.filter(edge => edge.relation === 'PostToolUse')
   if (pre.length > 1 || post.length > 1) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   if (pre.length !== 1 || post.length !== 1) return reject('INVOCATION_INCOMPLETE', 'PARTIAL')
-  if (pre[0].to.kind !== 'SESSION' || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== binding.worktreeId + ':' + binding.generation)) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
+  if (pre[0].to.kind !== 'SESSION' || !pre[0].to.id.startsWith('codex-native:') || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== binding.worktreeId + ':' + binding.generation)) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   const request = JSON.parse(pre[0].evidenceRef) as RequestFact, result = JSON.parse(post[0].evidenceRef) as RequestFact
   if (request.action !== result.action || request.requestDigest !== result.requestDigest || request.context !== result.context) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   if (result.outcome !== 'SUCCESS' || !result.receipt) return reject('RESULT_UNCONFIRMED')
@@ -37,6 +37,11 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
   if (receiptDigest !== publicationReceiptDigest(receiptBody)) return reject('RECEIPT_MISMATCH')
   if (receipt.repositoryId !== registry.repositoryId || receipt.artifactId !== result.receipt.artifactId || receipt.revision !== result.receipt.revision || receipt.digest !== result.receipt.digest ||
     receipt.action !== request.action || receipt.requestDigest !== request.requestDigest) return reject('RECEIPT_MISMATCH')
+  if (receipt.deliveryContext) {
+    const dc = receipt.deliveryContext
+    if (dc.repositoryId !== registry.repositoryId || dc.snapshot?.worktreeId !== binding.worktreeId || dc.snapshot?.worktreeGeneration !== binding.generation) return reject('DELIVERY_CONTEXT_CONFLICT', 'PARTIAL')
+  }
+  if (receipt.sessionWitness && receipt.sessionWitness.sessionId !== pre[0].to.id.slice('codex-native:'.length)) return reject('SESSION_WITNESS_MISMATCH', 'PARTIAL')
   integrity = window()
   if (integrity !== 'VERIFIED') return reject(integrity, 'PARTIAL')
   const revision = nativeDigest(JSON.stringify([pre[0].digest, post[0].digest, receipt.digest]))

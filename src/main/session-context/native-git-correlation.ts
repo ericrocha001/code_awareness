@@ -18,7 +18,7 @@ export async function correlateNativeGit(registry: CheckpointRegistry, binding: 
   }
   if (pre.length > 1 || post.length > 1) return unverified('INVOCATION_AMBIGUOUS')
   if (pre.length !== 1 || post.length !== 1) return unverified('INVOCATION_INCOMPLETE')
-  if (pre[0].to.kind !== 'SESSION' || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== `${binding.worktreeId}:${binding.generation}`)) return unverified('INVOCATION_AMBIGUOUS')
+  if (pre[0].to.kind !== 'SESSION' || !pre[0].to.id.startsWith('codex-native:') || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== `${binding.worktreeId}:${binding.generation}`)) return unverified('INVOCATION_AMBIGUOUS')
   const contexts = registry.directEvidence(invocation, 'NATIVE_GIT_CONTEXT')
   if (contexts.length !== 2 || contexts[0].evidenceRef !== contexts[1].evidenceRef) return unverified('INVOCATION_AMBIGUOUS')
   const request = JSON.parse(pre[0].evidenceRef) as NonNullable<NativeHookEnvelope['git']>
@@ -34,6 +34,10 @@ export async function correlateNativeGit(registry: CheckpointRegistry, binding: 
   if (!observed || observed.receipt.status !== 'COMPLETED' || observed.receipt.operation !== 'commit_git_changes' || observed.receipt.argumentFingerprint !== request.fingerprint || !observed.receipt.result) return unverified('RECEIPT_UNVERIFIED')
   const receipt = decodeGitReceiptResult(observed.receipt.result)
   if (receipt.isError || receipt.value.sha !== result.sha || receipt.value.parent !== request.expectedHead) return unverified('RECEIPT_MISMATCH')
+  if (observed.receipt.deliveryContext) {
+    const dc = observed.receipt.deliveryContext as { repositoryId?: string; snapshot?: { worktreeId?: string; worktreeGeneration?: string } }
+    if (dc.repositoryId !== registry.repositoryId || (dc.snapshot && (dc.snapshot.worktreeId !== binding.worktreeId || dc.snapshot.worktreeGeneration !== binding.generation))) return unverified('DELIVERY_CONTEXT_CONFLICT')
+  }
   const commits = await git.getCommitOperationObjects(binding.root, [result.sha])
   assertCurrent()
   const commit = commits.find(commit => commit.sha === result.sha)

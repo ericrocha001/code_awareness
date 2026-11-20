@@ -15,6 +15,7 @@ import { executeGetVisualArtifact } from './continuum-mcp'
 import { navigationQuery } from './artifact-navigation'
 import type { Artifact } from './continuum-types'
 import { publicationFields } from './artifact-publication'
+import { authenticatedSessionWitness, deliveryContextRequest, type DeliveryAnchor, type ObserveDelivery } from '../../shared/types/delivery-context-types'
 
 export class ContinuumLocalAdapter implements LocalChannelAdapter {
   readonly domain = 'continuum'
@@ -29,13 +30,14 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
     }
     this.operations = {
       ...Object.fromEntries(CONTINUUM_AGENT_TOOLS.map(tool => [tool.name, operation(input => {
-        const request = selection(input, Object.keys(tool.inputSchema.properties ?? {}))
-        const { repositoryId: _repository, worktreeId: _worktree, ...args } = request.value
+        const request = selection(input, [...Object.keys(tool.inputSchema.properties ?? {}), 'deliveryContext', 'sessionWitness'])
+        const { repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, ...args } = request.value
         parseContinuumAgentRequest(tool.name, args)
-        return { ...request, args }
+        return { ...request, deliveryContext, sessionWitness, args }
       }, async (request, context) => {
         const service = await this.service(request, context)
-        return executeContinuumAgent(service, tool.name, request.args, () => context.connected(), this.authority(request, context))
+        const authority = this.authority(request, context)
+        return executeContinuumAgent(service, tool.name, request.args, () => context.connected(), authority, this.observeDelivery(request, service, context))
       })])),
       inspect_artifact_structure: operation(input => {
         const request = selection(input, ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor'])
@@ -111,9 +113,15 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
         return artifact
       }),
-      publish: operation(input => { const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind']); const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, ...fields } = request.value; return { ...request, rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => {
+      publish: operation(input => { const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind', 'deliveryContext', 'sessionWitness']); const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, ...fields } = request.value; return { ...request, deliveryContext, sessionWitness, rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => {
         const service = await this.service(request, context)
-        const receipt = service.publish(request.rawMarkdown, request.fields, this.authority(request, context))
+        const authority = this.authority(request, context)
+        if (authority.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+        let anchor: DeliveryAnchor | undefined
+        if (authority.deliveryContext) {
+          anchor = await service.prepareDeliveryContext(authority, authority.deliveryContext, this.observeDelivery(request, service, context))
+        }
+        const receipt = service.publish(request.rawMarkdown, request.fields, authority, anchor)
         const artifact = service.get(receipt.artifactId)!
         let sessionCoverage: object | undefined
         if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF' && this.handoffCoverage) {
@@ -126,13 +134,13 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         return { ...receipt, state: 'PERSISTED', ...(sessionCoverage ? { sessionCoverage } : {}) }
       }),
       update: operation(input => {
-        const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind', 'lifecycle'])
-        const { repositoryId: _repository, worktreeId: _worktree, ...args } = request.value
-        return { ...request, args: parseAgentArtifactUpdate(args) }
+        const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind', 'lifecycle', 'deliveryContext', 'sessionWitness'])
+        const { repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, ...args } = request.value
+        return { ...request, deliveryContext, sessionWitness, args: parseAgentArtifactUpdate(args) }
       }, async (request, context) => {
         const service = await this.service(request, context)
         const { artifactId, expectedRevision, rawMarkdown, lifecycle, ...fields } = request.args
-        return service.updateAgent(this.authority(request, context), artifactId, expectedRevision, rawMarkdown, fields, lifecycle)
+        return service.updateAgent(this.authority(request, context), artifactId, expectedRevision, rawMarkdown, fields, lifecycle, this.observeDelivery(request, service, context))
       })
     }
   }
@@ -140,10 +148,35 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
     if (this.registry?.session !== active) this.registry = { session: active, value: new GitWorktreeRegistry(active.repositoryPath, new GitService(), { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active }) }
     return this.registry.value
   }
-  private authority(request: { repositoryId: unknown; worktreeId: unknown }, context: LocalRequestContext) {
+  private observeDelivery(request: { repositoryId: unknown; worktreeId: unknown }, service: ReturnType<RepositoryContinuumSession['getActiveService']>, context: LocalRequestContext): ObserveDelivery {
+    return async () => {
+      const active = this.session.getActiveSession()!
+      const target = await this.getRegistry(active).revalidateSelection(String(request.worktreeId))
+      if (await this.service(request, context, false) !== service) throw new Error('REPOSITORY_MISMATCH')
+      const git = new GitService(), identity = { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active && context.connected() }
+      return new GitBranchInventory(active.repositoryPath, git, this.getRegistry(active), identity).executionSnapshot(target.worktreeId, target.generation)
+    }
+  }
+  private authority(request: { repositoryId: unknown; worktreeId: unknown; deliveryContext?: unknown; sessionWitness?: unknown }, context: LocalRequestContext) {
     const active = this.session.getActiveSession()
     if (!active || !context.principal || request.repositoryId !== active.repositoryId) throw new Error('AGENT_UNAUTHORIZED')
-    return authorizeArtifactAgent(context.principal, active.repositoryId, () => this.session.getActiveSession() === active && context.connected(), String(request.worktreeId))
+    let deliveryContextError: string | undefined
+    let deliveryContext: import('../../shared/types/delivery-context-types').DeliveryContextRequest | undefined
+    if (request.deliveryContext !== undefined) {
+      const parsed = deliveryContextRequest.safeParse(request.deliveryContext)
+      if (!parsed.success) deliveryContextError = 'DELIVERY_CONTEXT_MALFORMED'
+      else deliveryContext = parsed.data
+    }
+    let sessionWitness: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness | undefined
+    if (request.sessionWitness !== undefined) {
+      const parsed = authenticatedSessionWitness.safeParse(request.sessionWitness)
+      if (!parsed.success) deliveryContextError ??= 'SESSION_WITNESS_INVALID'
+      else sessionWitness = parsed.data
+    }
+    const scope = deliveryContext || deliveryContextError || sessionWitness
+      ? { ...(deliveryContext ? { deliveryContext } : {}), ...(deliveryContextError ? { deliveryContextError } : {}), ...(sessionWitness ? { sessionWitness } : {}) }
+      : undefined
+    return authorizeArtifactAgent(context.principal, active.repositoryId, () => this.session.getActiveSession() === active && context.connected(), String(request.worktreeId), scope)
   }
   private async service(request: { repositoryId: unknown; worktreeId: unknown }, context: LocalRequestContext, discover = true) {
     const active = this.session.getActiveSession()

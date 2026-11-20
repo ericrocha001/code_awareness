@@ -44,11 +44,16 @@ const transitionProperties = CONTINUUM_AGENT_TOOLS.find(tool => tool.name === 't
 export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Authenticated delegated editing of all editorial metadata including status, tags and automation corrections, with one atomic CAS revision and receipts; no desktop confirmation. Legacy YAML replaces metadata literally. Technical identity, hashes and native provenance use repair_artifact_metadata, never invented YAML. Status uses canonical lifecycle internally; when automatic evidence is insufficient, supply honest contextual lifecycle.attestation. Reread on conflict.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string, ...semanticFields,
   lifecycle: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['evidenceMode', 'attestation', 'evidenceRefs', 'supportingArtifactId'].map(key => [key, transitionProperties[key]])) }
 }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
-export async function executeAgentUpdateArtifact(service: IContinuumService, args: unknown, authority?: AgentAuthority) {
+export async function executeAgentUpdateArtifact(
+  service: IContinuumService,
+  args: unknown,
+  authority?: AgentAuthority,
+  observeDelivery?: import('../../shared/types/delivery-context-types').ObserveDelivery
+) {
   try {
     if (!authority || !service.updateAgent) throw new Error('AGENT_UNAUTHORIZED')
     const { artifactId, expectedRevision, rawMarkdown, lifecycle, ...fields } = parseAgentArtifactUpdate(args)
-    return ok(await service.updateAgent(authority, artifactId, expectedRevision, rawMarkdown, fields, lifecycle))
+    return ok(await service.updateAgent(authority, artifactId, expectedRevision, rawMarkdown, fields, lifecycle, observeDelivery))
   } catch (error) { return failure(error) }
 }
 
@@ -96,8 +101,13 @@ export function executeGetArtifact(reader: IArtifactReader, args: unknown): McpT
     return readingResult({ ...current, ...(provenance.nativeArtifact ? { provenance: { nativeArtifact: provenance.nativeArtifact } } : {}) }, includeTokenUsage, current.rawMarkdown)
   } catch (error) { return failure(error) }
 }
-export function executePublishArtifact(service: IContinuumService, args: unknown, authority?: AgentAuthority): McpToolResult<McpTextContent> {
-  try { const { rawMarkdown, ...fields } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string, publicationFields(fields), authority)) } catch (error) { return failure(error) }
+export function executePublishArtifact(
+  service: IContinuumService,
+  args: unknown,
+  authority?: AgentAuthority,
+  anchor?: import('../../shared/types/delivery-context-types').DeliveryAnchor
+): McpToolResult<McpTextContent> {
+  try { const { rawMarkdown, ...fields } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string, publicationFields(fields), authority, anchor)) } catch (error) { return failure(error) }
 }
 export function executeUpdateArtifact(service: IContinuumService, args: unknown): McpToolResult<McpTextContent> {
   try {

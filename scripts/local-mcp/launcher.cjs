@@ -6,17 +6,30 @@ const { ResultSchema, McpError, ErrorCode } = require('@modelcontextprotocol/sdk
 const { discover, sameBinding, fail } = require('./bootstrap.cjs')
 const { publicError } = require('../local-agent/discovery.cjs')
 
-async function start({ profile, projectId, input = process.stdin, output = process.stdout, timeoutMs = 25000 } = {}) {
+async function start({
+  profile,
+  projectId,
+  deliveryContext = process.env.CODE_AWARENESS_DELIVERY_CONTEXT,
+  worktreeId = process.env.CODE_AWARENESS_WORKTREE_ID,
+  sessionWitness = process.env.CODE_AWARENESS_SESSION_WITNESS,
+  input = process.stdin,
+  output = process.stdout,
+  timeoutMs = 25000
+} = {}) {
   const binding = await discover(profile, projectId)
   let invalidated = false
+  const headers = {
+    'x-code-awareness-instance': binding.instanceId,
+    'x-code-awareness-project': binding.projectId,
+    'x-code-awareness-binding': binding.bindingId
+  }
+  if (typeof deliveryContext === 'string' && deliveryContext.trim()) headers['x-code-awareness-delivery-context'] = deliveryContext.trim()
+  if (typeof worktreeId === 'string' && worktreeId.trim()) headers['x-code-awareness-worktree'] = worktreeId.trim()
+  if (typeof sessionWitness === 'string' && sessionWitness.trim()) headers['x-code-awareness-session-witness'] = sessionWitness.trim()
   const client = new Client({ name: 'code-awareness-local-bootstrap', version: '1.0.0' })
   const transport = new StreamableHTTPClientTransport(new URL(binding.endpoint), {
     reconnectionOptions: { maxRetries: 0 },
-    requestInit: { headers: {
-      'x-code-awareness-instance': binding.instanceId,
-      'x-code-awareness-project': binding.projectId,
-      'x-code-awareness-binding': binding.bindingId
-    } },
+    requestInit: { headers },
     fetch: async (url, init) => {
       if (String(url) !== binding.endpoint || invalidated) fail('MCP_SESSION_INVALIDATED')
       return fetch(url, { ...init, redirect: 'error', signal: AbortSignal.any([

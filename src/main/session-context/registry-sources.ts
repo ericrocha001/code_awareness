@@ -93,21 +93,37 @@ export function registrySources(options: {
     } else unavailable('CONTINUUM')
     let canonicalRepository: string | undefined
     try { canonicalRepository = await options.github.deliveryRepository?.(options.root, repositoryId); assertCurrent() } catch { assertCurrent() }
+    const validDeliveryAnchor = (rawAnchor: unknown) => {
+      const parsed = deliveryAnchor.safeParse(rawAnchor)
+      if (!parsed.success || parsed.data.repositoryId !== repositoryId) return null
+      const anchor = parsed.data
+      const binding = service?.provenanceSnapshot(anchor.bindingArtifactId, anchor.bindingRevision), plan = service?.provenanceSnapshot(anchor.planArtifactId, anchor.planRevision)
+      if (!binding?.provenance?.executionBranchBinding || binding.contentHash !== anchor.bindingDigest || plan?.contentHash !== anchor.planDigest || plan.metadata.executionId !== anchor.executionId || binding.metadata.sourceArtifactId !== anchor.planArtifactId || binding.metadata.executionId !== anchor.executionId || binding.metadata.repositoryId !== repositoryId || binding.metadata.worktreeId !== anchor.snapshot.worktreeId || binding.metadata.worktreeGeneration !== anchor.snapshot.worktreeGeneration || binding.metadata.branchRef !== anchor.snapshot.branchRef || binding.metadata.branchGeneration !== anchor.snapshot.branchGeneration) return null
+      return anchor
+    }
+    const deliveryExecutionEntity = (anchor: import('../../shared/types/delivery-context-types').DeliveryAnchor): RegistryEntity => ({
+      kind: 'EXECUTION',
+      id: 'delivery:' + digest(JSON.stringify([anchor.executionId, anchor.planArtifactId, anchor.planRevision, anchor.bindingArtifactId]))
+    })
     for (const [source, read] of [
       ['DELIVERY_GIT', options.gitDeliveries],
-      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string) => options.github.deliveryProjectionPage!(repositoryId, cursor) : undefined]
+      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string) => options.github.deliveryProjectionPage!(repositoryId, cursor) : undefined],
+      ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string) => service.publicationDeliveryPage!(cursor) : undefined]
     ] as const) if (read) {
       try {
         const page = await read(cursors[source]); assertCurrent()
         for (const observation of page.observations) {
-          const parsed = deliveryAnchor.safeParse(observation.anchor)
-          if (!parsed.success || parsed.data.repositoryId !== repositoryId) continue
-          const anchor = parsed.data
-          const binding = service?.provenanceSnapshot(anchor.bindingArtifactId, anchor.bindingRevision), plan = service?.provenanceSnapshot(anchor.planArtifactId, anchor.planRevision)
-          if (!binding?.provenance?.executionBranchBinding || binding.contentHash !== anchor.bindingDigest || plan?.contentHash !== anchor.planDigest || plan.metadata.executionId !== anchor.executionId || binding.metadata.sourceArtifactId !== anchor.planArtifactId || binding.metadata.executionId !== anchor.executionId || binding.metadata.repositoryId !== repositoryId || binding.metadata.worktreeId !== anchor.snapshot.worktreeId || binding.metadata.worktreeGeneration !== anchor.snapshot.worktreeGeneration || binding.metadata.branchRef !== anchor.snapshot.branchRef || binding.metadata.branchGeneration !== anchor.snapshot.branchGeneration) continue
+          const anchor = validDeliveryAnchor(observation.anchor)
+          if (!anchor) continue
           if (observation.operation === 'CREATE_PULL_REQUEST' && (!canonicalRepository || observation.repository?.toLowerCase() !== canonicalRepository.toLowerCase())) continue
-          const from: RegistryEntity = { kind: 'EXECUTION', id: 'delivery:' + digest(JSON.stringify([anchor.executionId, anchor.planArtifactId, anchor.planRevision, anchor.bindingArtifactId])) }
-          const target: RegistryEntity | undefined = observation.commitSha && /^[a-f0-9]{40}$/.test(observation.commitSha) ? { kind: 'COMMIT', id: observation.commitSha } : observation.pullRequest && Number.isSafeInteger(observation.pullRequest) ? { kind: 'PR', id: String(observation.pullRequest) } : undefined
+          const from = deliveryExecutionEntity(anchor)
+          const target: RegistryEntity | undefined = observation.commitSha && /^[a-f0-9]{40}$/.test(observation.commitSha)
+            ? { kind: 'COMMIT', id: observation.commitSha }
+            : observation.pullRequest && Number.isSafeInteger(observation.pullRequest)
+              ? { kind: 'PR', id: String(observation.pullRequest) }
+              : observation.artifactId && observation.artifactRevision && service?.provenanceSnapshot(observation.artifactId, observation.artifactRevision)
+                ? { kind: 'ARTIFACT', id: observation.artifactId + ':' + observation.artifactRevision }
+                : undefined
           if (!target) continue
           const freshness = service?.get(anchor.planArtifactId)?.revision === anchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE'
           const evidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: observation.receiptId, digest: digest(JSON.stringify(observation)), freshness }
@@ -118,6 +134,7 @@ export function registrySources(options: {
           if (target.kind === 'PR') prDeliveries.push({ batch, number: Number(target.id), head: observation.headSha })
           else addBatch(batch)
           addArtifact(anchor.planArtifactId + ':' + anchor.planRevision); addArtifact(anchor.bindingArtifactId + ':' + anchor.bindingRevision)
+          if (target.kind === 'ARTIFACT') addArtifact(target.id)
           if (target.kind === 'PR') prs.add(Number(target.id))
         }
         addBatch({ source, revision: digest(JSON.stringify(page.observations.map(o => o.receiptId))), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
@@ -227,11 +244,29 @@ export function registrySources(options: {
       const sourceRepo = proof.commandProfile?.source?.repositoryId ?? proof.commandProfile?.checkout?.repositoryId
       if (sourceRepo && sourceRepo !== repositoryId) return
       const targets = proof.evidenceFor.filter(id => !!service?.get(id)).slice(0, 20)
-      if (!sourceRepo && !targets.length) return
+      const anchor = proof.commandProfile?.deliveryContext ? validDeliveryAnchor(proof.commandProfile.deliveryContext) : null
+      const sourceMatch = !anchor || (
+        (!proof.commandProfile?.source || (proof.commandProfile.source.worktreeId === anchor.snapshot.worktreeId && proof.commandProfile.source.generation === anchor.snapshot.worktreeGeneration && proof.commandProfile.source.head === anchor.snapshot.head)) &&
+        (!proof.commandProfile?.checkout || (proof.commandProfile.checkout.worktreeId === anchor.snapshot.worktreeId && proof.commandProfile.checkout.generation === anchor.snapshot.worktreeGeneration && proof.commandProfile.checkout.head === anchor.snapshot.head))
+      )
+      const verifiedAnchor = sourceMatch ? anchor : null
+      if (!sourceRepo && !targets.length && !verifiedAnchor) return
       for (const id of targets) addArtifact(id)
       const edges: RegistryEdge[] = targets.map(id => ({ from: { kind: 'ARTIFACT', id }, relation: 'evidence', to: { kind: 'PROOF', id: proof.proofId }, evidenceKind: 'LEDGER_EVIDENCE_FOR', evidenceRef: proof.proofId,
         digest: digest(JSON.stringify([proof.proofId, proof.evidenceFor, proof.sourceFingerprint])), freshness: proof.freshness }))
-      addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness])), status: 'COMPLETE', entities: [{ kind: 'PROOF', id: proof.proofId }], edges })
+      const entities: RegistryEntity[] = [{ kind: 'PROOF', id: proof.proofId }]
+      if (verifiedAnchor) {
+        const execNode = deliveryExecutionEntity(verifiedAnchor)
+        const evidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: proof.proofId, digest: digest(JSON.stringify([proof.proofId, verifiedAnchor])), freshness: proof.freshness }
+        entities.push(execNode)
+        edges.push(
+          { from: { kind: 'ARTIFACT', id: verifiedAnchor.planArtifactId + ':' + verifiedAnchor.planRevision }, relation: 'execution-context', to: execNode, ...evidence },
+          { from: execNode, relation: 'delivery-context', to: { kind: 'PROOF', id: proof.proofId }, ...evidence }
+        )
+        addArtifact(verifiedAnchor.planArtifactId + ':' + verifiedAnchor.planRevision)
+        addArtifact(verifiedAnchor.bindingArtifactId + ':' + verifiedAnchor.bindingRevision)
+      }
+      addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness, verifiedAnchor?.bindingDigest ?? ''])), status: 'COMPLETE', entities, edges })
     }
     try {
       if (selector?.kind === 'PROOF') projectProof(await options.ledger.getProofWithFreshness(selector.id))
@@ -282,6 +317,15 @@ export function registrySources(options: {
       if (artifact.provenance?.executionBranchBinding === true && metadata.bindingRole === 'EXECUTION_BRANCH' && metadata.repositoryId === repositoryId && typeof metadata.executionId === 'string' && typeof metadata.worktreeId === 'string' && typeof metadata.worktreeGeneration === 'string') {
         edges.push({ from, relation: 'branch-context', to: { kind: 'EXECUTION', id: metadata.executionId }, evidenceKind: 'BRANCH_CONTEXT_ONLY', ...evidence })
         edges.push({ from, relation: 'branch-context', to: { kind: 'WORKTREE', id: metadata.worktreeId + ':' + metadata.worktreeGeneration }, evidenceKind: 'BRANCH_CONTEXT_ONLY', ...evidence })
+      }
+      const artifactAnchor = artifact.provenance?.deliveryContext ? validDeliveryAnchor(artifact.provenance.deliveryContext) : null
+      if (artifactAnchor) {
+        const execNode = deliveryExecutionEntity(artifactAnchor)
+        const ctxEvidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: from.id, digest: digest(JSON.stringify([from.id, artifactAnchor])), freshness: service?.get(artifactAnchor.planArtifactId)?.revision === artifactAnchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE' }
+        edges.push(
+          { from: { kind: 'ARTIFACT', id: artifactAnchor.planArtifactId + ':' + artifactAnchor.planRevision }, relation: 'execution-context', to: execNode, ...ctxEvidence },
+          { from: execNode, relation: 'delivery-context', to: from, ...ctxEvidence }
+        )
       }
       const native = artifact.provenance?.nativeArtifact as { state?: string; receiptId?: string } | undefined
       const authority = { nativeState: native?.state ?? 'UNAVAILABLE', receiptId: native?.receiptId }

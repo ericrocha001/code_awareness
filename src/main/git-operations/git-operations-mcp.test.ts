@@ -6,6 +6,7 @@ import type { GitService } from '../core/git-service'
 import type { GitHubAuthService } from '../github/github-auth-service'
 import { executeGitOperationsTool, GIT_OPERATIONS_TOOLS } from './git-operations-mcp'
 import { GitOperationsError, type GitOperationsService } from './git-operations-service'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 describe('Git MCP contract', () => {
   it('requires staging identity and both observed revisions before dispatch', async () => {
@@ -125,5 +126,42 @@ describe('shared GitHub remote authentication', () => {
     await transport.push('/project', 'main')
     expect(auth.getValidAccessToken).toHaveBeenCalledTimes(calls)
     expect(git.push).toHaveBeenCalledWith('/project', 'origin', 'main', undefined)
+  })
+  it('propagates authority deliveryContext into commit_git_changes and worktree mutations and rejects conflicts before effect', async () => {
+    const request = { bindingArtifactId: 'artifact-execution-branch-' + '1'.repeat(64), bindingRevision: 1, planArtifactId: 'artifact-11111111-1111-4111-8111-111111111111', planRevision: 1, executionId: 'execution-A' }
+    const anchor = { ...request, schemaVersion: 1 as const, repositoryId: 'repo-1', planDigest: '2'.repeat(64), bindingDigest: '3'.repeat(64), classification: 'AUTHENTICATED_EXECUTION_CONTEXT' as const,
+      snapshot: { repositoryId: 'repo-1', worktreeId: 'a'.repeat(64), worktreeGeneration: '4'.repeat(64), branchRef: 'refs/heads/feat', branchGeneration: '5'.repeat(64), branchRevision: '6'.repeat(64), fingerprint: '7'.repeat(64), head: 'b'.repeat(40) } }
+    const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', () => true), 'repo-1', () => true, 'a'.repeat(64), { deliveryContext: request })
+    const prepareDelivery = vi.fn(async () => anchor)
+    const commit = vi.fn(async () => ({ sha: 'c'.repeat(40), parent: 'b'.repeat(40) }))
+    const executeReceipted = vi.fn(async (_id, _name, args, mutate, prep) => {
+      expect(args.deliveryContext).toBeUndefined()
+      expect(await prep?.()).toEqual(anchor)
+      return mutate()
+    })
+    const service = { commit, executeReceipted, mutateWorktree: vi.fn(async (_req, prep) => ({ content: [{ type: 'text', text: JSON.stringify(await prep?.()) }] })) } as unknown as GitOperationsService
+    const commitArgs = { message: 'msg', expectedHead: 'b'.repeat(40), expectedIndexRevision: 'd'.repeat(64), operationId: 'op-1' }
+    const okResult = await executeGitOperationsTool(service, 'commit_git_changes', commitArgs, prepareDelivery, authority)
+    expect(okResult.isError).toBeUndefined()
+    expect(prepareDelivery).toHaveBeenCalledWith(request, 'a'.repeat(64))
+
+    const conflicting = await executeGitOperationsTool(service, 'commit_git_changes', { ...commitArgs, operationId: 'op-2', deliveryContext: { ...request, executionId: 'execution-OTHER' } }, prepareDelivery, authority)
+    expect(conflicting.isError).toBe(true)
+    expect(JSON.parse(conflicting.content[0].text)).toMatchObject({ code: 'DELIVERY_CONTEXT_CONFLICT' })
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    const badAuthority = authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', () => true), 'repo-1', () => true, 'a'.repeat(64), { deliveryContextError: 'DELIVERY_CONTEXT_MALFORMED' })
+    const rejectedBad = await executeGitOperationsTool(service, 'commit_git_changes', { ...commitArgs, operationId: 'op-3' }, prepareDelivery, badAuthority)
+    expect(rejectedBad.isError).toBe(true)
+    expect(JSON.parse(rejectedBad.content[0].text)).toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID' })
+    expect(commit).toHaveBeenCalledTimes(1)
+
+    const mismatchedWorktree = await executeGitOperationsTool(service, 'mutate_worktree', {
+      action: 'COMMIT', worktreeId: 'f'.repeat(64), leaseId: 'l1', leaseCredential: 'e'.repeat(64), operationId: 'op-4', message: 'msg',
+      snapshot: { branch: 'feat', head: 'b'.repeat(40), indexRevision: 'd'.repeat(64), worktreeRevision: '1'.repeat(64), operation: null }
+    }, prepareDelivery, authority)
+    expect(mismatchedWorktree.isError).toBe(true)
+    expect(JSON.parse(mismatchedWorktree.content[0].text)).toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID', reason: 'WORKTREE_SCOPE_CONFLICT' })
+    expect(service.mutateWorktree).not.toHaveBeenCalled()
   })
 })

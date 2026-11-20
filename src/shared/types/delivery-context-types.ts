@@ -16,11 +16,59 @@ const snapshot = z.object({ repositoryId: identifier, branchRef: z.string().star
 export const deliveryAnchor = deliveryContextRequest.extend({ schemaVersion: z.literal(1), repositoryId: identifier, planDigest: hash, bindingDigest: hash, snapshot,
   classification: z.literal('AUTHENTICATED_EXECUTION_CONTEXT') }).strict()
 export type DeliveryAnchor = z.infer<typeof deliveryAnchor>
-export interface DeliveryObservation { receiptId: string; operationId: string; operation: 'commit_git_changes' | 'CREATE_PULL_REQUEST'; argumentFingerprint: string; anchor: DeliveryAnchor;
-  commitSha?: string; pullRequest?: number; headSha?: string; repository?: string }
+export const authenticatedSessionWitness = z.object({
+  provider: z.enum(['codex', 'antigravity', 'unknown']),
+  sessionId: z.string().min(1).max(200).optional(),
+  invocationId: z.string().min(1).max(200).optional(),
+  principalId: identifier.optional(),
+  channelId: identifier.optional()
+}).strict()
+export type AuthenticatedSessionWitness = z.infer<typeof authenticatedSessionWitness>
+export interface DeliveryObservation { receiptId: string; operationId: string; operation: 'commit_git_changes' | 'mutate_worktree' | 'CREATE_PULL_REQUEST' | 'PUBLISH_ARTIFACT' | 'UPDATE_ARTIFACT' | 'VALIDATION_PROOF'; argumentFingerprint: string; anchor: DeliveryAnchor;
+  commitSha?: string; pullRequest?: number; headSha?: string; repository?: string; artifactId?: string; artifactRevision?: number; proofId?: string }
 export interface DeliveryProjectionPage { observations: DeliveryObservation[]; nextCursor?: string }
 export type PrepareDelivery = (request: DeliveryContextRequest) => Promise<DeliveryAnchor>
 export type ObserveDelivery = () => Promise<ExecutionBranchSnapshot>
+
+export type ResolvedDeliveryContext =
+  | { ok: true; request?: DeliveryContextRequest }
+  | { ok: false; code: 'DELIVERY_CONTEXT_INVALID'; reason: string }
+
+export function sameDeliveryRequest(a: DeliveryContextRequest, b: DeliveryContextRequest): boolean {
+  return a.bindingArtifactId === b.bindingArtifactId &&
+    a.bindingRevision === b.bindingRevision &&
+    a.planArtifactId === b.planArtifactId &&
+    a.planRevision === b.planRevision &&
+    a.executionId === b.executionId
+}
+
+export function resolveEffectiveDeliveryContext(
+  explicit?: unknown,
+  authorityContext?: DeliveryContextRequest,
+  authorityError?: string
+): ResolvedDeliveryContext {
+  if (authorityError) {
+    return { ok: false, code: 'DELIVERY_CONTEXT_INVALID', reason: authorityError }
+  }
+  if (explicit !== undefined) {
+    const parsed = deliveryContextRequest.safeParse(explicit)
+    if (!parsed.success) {
+      return { ok: false, code: 'DELIVERY_CONTEXT_INVALID', reason: 'DELIVERY_CONTEXT_MALFORMED' }
+    }
+    if (authorityContext && !sameDeliveryRequest(parsed.data, authorityContext)) {
+      return { ok: false, code: 'DELIVERY_CONTEXT_INVALID', reason: 'DELIVERY_CONTEXT_CONFLICT' }
+    }
+    return { ok: true, request: parsed.data }
+  }
+  if (authorityContext !== undefined) {
+    const parsed = deliveryContextRequest.safeParse(authorityContext)
+    if (!parsed.success) {
+      return { ok: false, code: 'DELIVERY_CONTEXT_INVALID', reason: 'DELIVERY_CONTEXT_MALFORMED' }
+    }
+    return { ok: true, request: parsed.data }
+  }
+  return { ok: true, request: undefined }
+}
 
 export function sameDeliveryScope(before: DeliveryAnchor, after: DeliveryAnchor): boolean {
   return ['repositoryId','bindingArtifactId','bindingRevision','bindingDigest','planArtifactId','planRevision','planDigest','executionId'].every(key => before[key as keyof DeliveryAnchor] === after[key as keyof DeliveryAnchor]) &&

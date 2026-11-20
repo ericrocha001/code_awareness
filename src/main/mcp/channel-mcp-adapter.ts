@@ -435,8 +435,10 @@ export class ChannelMcpAdapter {
   }
 
   private async prepareDelivery(authority: AgentAuthority | undefined, request: DeliveryContextRequest, worktreeId?: string) {
-    if (!this.continuum?.prepareDeliveryContext || !this.gitOperations) throw new Error('DELIVERY_CONTEXT_INVALID')
-    return this.continuum.prepareDeliveryContext(authority, request, () => this.gitOperations!.deliverySnapshot(worktreeId))
+    if (!this.continuum?.prepareDeliveryContext || !this.gitOperations || authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+    if (authority?.worktreeId && worktreeId && authority.worktreeId !== worktreeId) throw new Error('DELIVERY_CONTEXT_CONFLICT')
+    const targetWorktreeId = worktreeId ?? authority?.worktreeId
+    return this.continuum.prepareDeliveryContext(authority, request, () => this.gitOperations!.deliverySnapshot(targetWorktreeId))
   }
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
@@ -504,6 +506,9 @@ export class ChannelMcpAdapter {
     if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
       return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
         prepareDelivery: (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId ?? authority?.worktreeId),
+        defaultDeliveryContext: authority?.deliveryContext,
+        deliveryContextError: authority?.deliveryContextError,
+        defaultWorktreeId: authority?.worktreeId,
         isActive: this.githubContext.githubPrIsActive ?? (() => false),
         inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined
       })
@@ -521,7 +526,7 @@ export class ChannelMcpAdapter {
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }
     }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
-      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args, request => this.prepareDelivery(authority, request))
+      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args, (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId), authority)
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }
     if (name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name && this.githubContext?.githubIntegration) {
@@ -534,7 +539,7 @@ export class ChannelMcpAdapter {
     }
     if (VALIDATION_EXECUTION_TOOLS.some((tool) => tool.name === name)) {
       return this.validationExecution
-        ? executeValidationTool(this.validationExecution, name, args, invocationContext?.deadlineAtMs)
+        ? executeValidationTool(this.validationExecution, name, args, invocationContext?.deadlineAtMs, (request, worktreeId) => this.prepareDelivery(authority, request, worktreeId), authority)
         : { content: [{ type: 'text', text: 'VALIDATION_EXECUTION_UNAVAILABLE' }], isError: true }
     }
 
@@ -556,7 +561,8 @@ export class ChannelMcpAdapter {
 
     if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {
       if (!supportsContinuumAgent(this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
-      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args, undefined, authority)) }] } }
+      const observeDelivery = this.gitOperations ? () => this.gitOperations!.deliverySnapshot(authority?.worktreeId) : undefined
+      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args, undefined, authority, observeDelivery)) }] } }
       catch (error) { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
     }
     if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
@@ -580,10 +586,16 @@ export class ChannelMcpAdapter {
     if (name === 'publish_artifact' || name === 'update_artifact') {
       if (!this.continuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: repository service is not configured' }], isError: true }
       if (name === 'publish_artifact') {
-        try { assertArtifactAgent(authority, this.continuum.repositoryId ?? ''); return executePublishArtifact(this.continuum, args, authority) }
+        try {
+          assertArtifactAgent(authority, this.continuum.repositoryId ?? '')
+          if (authority.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+          const anchor = authority.deliveryContext ? await this.prepareDelivery(authority, authority.deliveryContext, authority.worktreeId) : undefined
+          return executePublishArtifact(this.continuum, args, authority, anchor)
+        }
         catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] } }
       }
-      return executeAgentUpdateArtifact(this.continuum, args, authority)
+      const observeDelivery = this.gitOperations ? () => this.gitOperations!.deliverySnapshot(authority?.worktreeId) : undefined
+      return executeAgentUpdateArtifact(this.continuum, args, authority, observeDelivery)
     }
 
     if (name === 'get_runtime_identity') {
@@ -624,7 +636,13 @@ export class ChannelMcpAdapter {
       if (!this.validationLedger) {
         return { content: [{ type: 'text', text: 'LEDGER_UNAVAILABLE: No validation ledger configured' }], isError: true }
       }
-      return executeRecordValidationProof(this.validationLedger, args)
+      try {
+        if (authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+        const anchor = authority?.deliveryContext ? await this.prepareDelivery(authority, authority.deliveryContext, authority.worktreeId) : undefined
+        return executeRecordValidationProof(this.validationLedger, args, authority, anchor)
+      } catch (error) {
+        return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true }
+      }
     }
 
     if (!this.codeNavigationAvailable) {
