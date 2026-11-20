@@ -70,7 +70,7 @@
 
 .global-sidebar-footer { padding: 8px; border-top: 1px solid var(--border-subtle); }
 .global-sidebar-footer-btn { min-height: 34px; font-size: 11px; }
-.global-sidebar-theme-btn:hover, .global-sidebar-devtools-btn:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+.global-sidebar-theme-btn:hover, .global-sidebar-devtools-btn:hover, .global-sidebar-devmenu-btn:hover { color: var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 
 .sidebar-closed .global-sidebar-logo-title, .sidebar-closed .global-sidebar-nav-label { display: none; }
 .sidebar-closed .global-sidebar-project { display: none; }

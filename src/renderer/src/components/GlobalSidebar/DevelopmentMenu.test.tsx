@@ -140,4 +140,20 @@ describe('DevelopmentMenu', () => {
     fireEvent.click(screen.getByText('Detalhes técnicos'))
     expect(screen.getByText(/"count": 3/)).toBeTruthy()
   })
+
+  it('renders correctly under light theme with proper container role and structure', async () => {
+    document.body.setAttribute('data-theme', 'light')
+    render(<DevelopmentMenu isSidebarOpen={true} />)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Menu Development' })).toBeTruthy()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Menu Development' }))
+    await waitFor(() => {
+      const menu = screen.getByRole('menu', { name: 'Opções de Desenvolvimento' })
+      expect(menu).toBeTruthy()
+      expect(menu.classList.contains('dev-menu-container')).toBe(true)
+    })
+    document.body.removeAttribute('data-theme')
+  })
 })

@@ -1,71 +1,133 @@
+/* ─── Botão do menu no rodapé do sidebar ──────────────────────────────── */
+.global-sidebar-devmenu-btn:hover {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+/* ─── Container do Popover ─────────────────────────────────────────────── */
 .dev-menu-container {
   width: 280px;
   padding: 8px;
-  background: var(--bg-surface, #1e1e24);
-  border: 1px solid var(--border-subtle, #33333d);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-  color: var(--text-primary, #e2e8f0);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, var(--shadow-opacity, 0.25));
+  color: var(--text-primary);
   font-family: inherit;
   font-size: 13px;
 }
 
+[data-theme="light"] .dev-menu-container {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+
+/* ─── Cabeçalho ────────────────────────────────────────────────────────── */
 .dev-menu-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 4px 6px 8px 6px;
-  border-bottom: 1px solid var(--border-subtle, #33333d);
+  border-bottom: 1px solid var(--border-subtle);
   margin-bottom: 6px;
 }
 
 .dev-menu-title {
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-secondary, #94a3b8);
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
 }
 
 .dev-menu-branch {
   font-size: 11px;
-  background: var(--bg-muted, #2a2a35);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
   padding: 2px 6px;
   border-radius: 4px;
   max-width: 140px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text-secondary, #cbd5e1);
+  color: var(--text-secondary);
 }
 
+/* ─── Banners de status ────────────────────────────────────────────────── */
 .dev-menu-banner {
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  padding: 8px;
-  border-radius: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
   margin-bottom: 8px;
   font-size: 12px;
   line-height: 1.4;
 }
 
+/* Success: padrão tema claro com contraste alto */
 .dev-menu-banner--success {
+  background: rgba(22, 163, 74, 0.08);
+  border: 1px solid rgba(22, 163, 74, 0.25);
+  color: #15803d;
+}
+
+/* Info: padrão tema claro com contraste alto */
+.dev-menu-banner--info {
+  background: rgba(37, 99, 235, 0.08);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  color: #1d4ed8;
+}
+
+/* Error: padrão tema claro com contraste alto */
+.dev-menu-banner--error {
+  background: rgba(220, 38, 38, 0.08);
+  border: 1px solid rgba(220, 38, 38, 0.25);
+  color: #b91c1c;
+}
+
+/* Banners no tema escuro (modo escuro explícito ou sistema escuro) */
+[data-theme="dark"] .dev-menu-banner--success,
+[data-theme="dark"] .dev-menu-container .dev-menu-banner--success {
   background: rgba(34, 197, 94, 0.12);
   border: 1px solid rgba(34, 197, 94, 0.3);
   color: #4ade80;
 }
 
-.dev-menu-banner--info {
+[data-theme="dark"] .dev-menu-banner--info,
+[data-theme="dark"] .dev-menu-container .dev-menu-banner--info {
   background: rgba(59, 130, 246, 0.12);
   border: 1px solid rgba(59, 130, 246, 0.3);
   color: #60a5fa;
 }
 
-.dev-menu-banner--error {
+[data-theme="dark"] .dev-menu-banner--error,
+[data-theme="dark"] .dev-menu-container .dev-menu-banner--error {
   background: rgba(239, 68, 68, 0.12);
   border: 1px solid rgba(239, 68, 68, 0.3);
   color: #f87171;
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] .dev-menu-banner--success,
+  [data-theme="system"] .dev-menu-container .dev-menu-banner--success {
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.3);
+    color: #4ade80;
+  }
+
+  [data-theme="system"] .dev-menu-banner--info,
+  [data-theme="system"] .dev-menu-container .dev-menu-banner--info {
+    background: rgba(59, 130, 246, 0.12);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+  }
+
+  [data-theme="system"] .dev-menu-banner--error,
+  [data-theme="system"] .dev-menu-container .dev-menu-banner--error {
+    background: rgba(239, 68, 68, 0.12);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #f87171;
+  }
 }
 
 .dev-menu-banner-icon {
@@ -103,18 +165,21 @@
 
 .dev-menu-error-pre {
   margin: 4px 0 0 0;
-  padding: 4px;
-  background: rgba(0, 0, 0, 0.3);
+  padding: 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-primary);
   border-radius: 4px;
   font-size: 10px;
   max-height: 80px;
   overflow: auto;
 }
 
+/* ─── Ações ────────────────────────────────────────────────────────────── */
 .dev-menu-actions {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
 }
 
 .dev-menu-action-btn {
@@ -124,16 +189,16 @@
   width: 100%;
   padding: 8px 10px;
   background: transparent;
-  border: none;
-  border-radius: 6px;
-  color: var(--text-primary, #e2e8f0);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-primary);
   cursor: pointer;
   text-align: left;
-  transition: background 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
 .dev-menu-action-btn:hover:not(:disabled) {
-  background: var(--hover-bg, rgba(255, 255, 255, 0.08));
+  background: var(--hover-bg);
 }
 
 .dev-menu-action-btn:disabled {
@@ -141,21 +206,55 @@
   cursor: not-allowed;
 }
 
+/* Botão de ação primária (DevSync) */
 .dev-menu-action-btn--primary {
-  background: var(--bg-surface-elevated, rgba(255, 255, 255, 0.04));
+  background: rgba(120, 82, 238, 0.08);
+  border: 1px solid rgba(120, 82, 238, 0.2);
 }
 
 .dev-menu-action-btn--primary:hover:not(:disabled) {
-  background: var(--hover-bg, rgba(255, 255, 255, 0.1));
+  background: rgba(120, 82, 238, 0.15);
+  border-color: rgba(120, 82, 238, 0.35);
+}
+
+[data-theme="dark"] .dev-menu-action-btn--primary,
+[data-theme="dark"] .dev-menu-container .dev-menu-action-btn--primary {
+  background: rgba(120, 82, 238, 0.12);
+  border: 1px solid rgba(120, 82, 238, 0.25);
+}
+
+[data-theme="dark"] .dev-menu-action-btn--primary:hover:not(:disabled),
+[data-theme="dark"] .dev-menu-container .dev-menu-action-btn--primary:hover:not(:disabled) {
+  background: rgba(120, 82, 238, 0.2);
+  border-color: rgba(120, 82, 238, 0.45);
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] .dev-menu-action-btn--primary,
+  [data-theme="system"] .dev-menu-container .dev-menu-action-btn--primary {
+    background: rgba(120, 82, 238, 0.12);
+    border: 1px solid rgba(120, 82, 238, 0.25);
+  }
+
+  [data-theme="system"] .dev-menu-action-btn--primary:hover:not(:disabled),
+  [data-theme="system"] .dev-menu-container .dev-menu-action-btn--primary:hover:not(:disabled) {
+    background: rgba(120, 82, 238, 0.2);
+    border-color: rgba(120, 82, 238, 0.45);
+  }
 }
 
 .dev-menu-action-icon {
   flex-shrink: 0;
-  color: var(--text-secondary, #94a3b8);
+  color: var(--text-secondary);
+  transition: color 0.15s ease;
+}
+
+.dev-menu-action-btn--primary .dev-menu-action-icon {
+  color: var(--accent);
 }
 
 .dev-menu-action-btn:hover:not(:disabled) .dev-menu-action-icon {
-  color: var(--text-primary, #f1f5f9);
+  color: var(--accent-hover, var(--text-primary));
 }
 
 .dev-menu-action-content {
@@ -168,17 +267,17 @@
 .dev-menu-action-label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-primary, #f1f5f9);
+  color: var(--text-primary);
 }
 
 .dev-menu-action-desc {
   font-size: 11px;
-  color: var(--text-secondary, #94a3b8);
+  color: var(--text-secondary);
 }
 
 .dev-menu-divider {
   height: 1px;
-  background: var(--border-subtle, #33333d);
+  background: var(--border-subtle);
   margin: 4px 0;
 }
 
@@ -193,5 +292,5 @@
 
 .dev-menu-spin {
   animation: dev-menu-spin 1s linear infinite;
-  color: #60a5fa !important;
+  color: var(--accent) !important;
 }
