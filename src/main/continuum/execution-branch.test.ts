@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { join } from 'node:path'
 import { ArtifactStore } from './artifact-store'
 import { ContinuumService } from './continuum-service'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from './agent-authority'
 import type { RepositoryContinuumSession } from './project-continuum-session'
 import { GitService } from '../core/git-service'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
@@ -133,5 +134,60 @@ describe('execution binding with real Git and SQLite', () => {
     const snapshot = await observe()
     reads = 0
     await expect(service.bindExecutionBranch('execution-A', plan.artifactId, async () => { if (++reads === 2) current = false; return snapshot })).rejects.toThrow('REPOSITORY_CONTEXT_CHANGED')
+  }, 120000)
+  it('bootstraps executionId atomically without mutating PE markdown, resolves durable checkout context across reopen, supports second worktree join, and fails closed on conflicts/revocation', async () => {
+    const { reader, observe } = await setup()
+    const rawPlan = '---\nname: Plan without executionId\ndescription: U1 bootstrap fixture\nkind: EXECUTABLE_PLAN\n---\nBody without executionId'
+    const planReceipt = service.publish(rawPlan)
+    const originalHash = service.get(planReceipt.artifactId)!.contentHash
+
+    const first = await Promise.all([
+      service.bootstrapExecution({ planArtifactId: planReceipt.artifactId, expectedPlanRevision: 1 }, observe),
+      service.bootstrapExecution({ planArtifactId: planReceipt.artifactId, expectedPlanRevision: 1 }, observe)
+    ])
+    expect(first[0].executionId).toMatch(/^exec-/)
+    expect(first[1].executionId).toBe(first[0].executionId)
+    expect(first[1].artifactId).toBe(first[0].artifactId)
+    const planAfter = service.get(planReceipt.artifactId)!
+    expect(planAfter.contentHash).toBe(originalHash)
+    expect(planAfter.revision).toBe(1)
+    expect((planAfter.provenance.executionIdentity as { executionId?: string })?.executionId).toBe(first[0].executionId)
+    expect(service.list({ metadata: { executionId: first[0].executionId }, metadataKeys: ['executionId'] }).artifacts.map(a => a.artifactId)).toContain(planReceipt.artifactId)
+
+    await expect(service.bootstrapExecution({ planArtifactId: planReceipt.artifactId, executionId: 'forged-exec' }, observe)).rejects.toThrow('EXECUTION_SOURCE_MISMATCH')
+    const secondPlan = service.publish('---\nname: Divergent plan\ndescription: Another PE\nkind: EXECUTABLE_PLAN\n---\nDivergent body')
+    await expect(service.bootstrapExecution({ planArtifactId: secondPlan.artifactId }, observe)).rejects.toThrow('EXECUTION_ACTIVATION_CONFLICT')
+
+    store.close(); store = new ArtifactStore(join(root, '.git', 'binding.db'), 'fixture'); service = new ContinuumService(store, undefined, () => current)
+    expect((service.get(planReceipt.artifactId)!.provenance.executionIdentity as { executionId?: string })?.executionId).toBe(first[0].executionId)
+    const snapshot = await observe()
+    const principal = authenticatedAgentPrincipal('MCP', () => current)
+    const scopedAuthority = authorizeArtifactAgent(principal, 'fixture', () => current, snapshot.worktreeId)
+    const resolvedDurable = await service.resolveExecutionContext(scopedAuthority, undefined, observe)
+    expect(resolvedDurable.source).toBe('DURABLE_ACTIVATION')
+    expect(resolvedDurable.anchor?.executionId).toBe(first[0].executionId)
+
+    const unscopedAuthority = authorizeArtifactAgent(principal, 'fixture', () => current)
+    const resolvedUnscoped = await service.resolveExecutionContext(unscopedAuthority, undefined, observe)
+    expect(resolvedUnscoped).toEqual({ anchor: undefined, source: 'UNMANAGED' })
+
+    const worktreeTwo = join(root, 'linked-u1')
+    await gitExec(root, ['worktree', 'add', '-b', 'executor-2', worktreeTwo])
+    const treeTwo = (await reader.inventory()).worktrees.find(w => w.branch === 'executor-2')!
+    const observeTwo = () => reader.executionSnapshot(treeTwo.worktreeId, treeTwo.generation)
+    const joined = await service.bootstrapExecution({ planArtifactId: planReceipt.artifactId, scopeKind: 'REMOTE_DELEGATED' }, observeTwo)
+    expect(joined.executionId).toBe(first[0].executionId)
+    expect(joined.artifactId).not.toBe(first[0].artifactId)
+
+    service.revokeExecutionActivation({ worktreeId: snapshot.worktreeId, status: 'REVOKED', reason: 'done' })
+    const afterRevoke = await service.resolveExecutionContext(scopedAuthority, undefined, observe)
+    expect(afterRevoke).toEqual({ anchor: undefined, source: 'UNMANAGED' })
+    await expect(service.prepareDeliveryContext(scopedAuthority, {
+      bindingArtifactId: first[0].artifactId,
+      bindingRevision: first[0].revision,
+      planArtifactId: planReceipt.artifactId,
+      planRevision: 1,
+      executionId: first[0].executionId
+    }, observe)).rejects.toThrow('DELIVERY_CONTEXT_REVOKED')
   }, 120000)
 })

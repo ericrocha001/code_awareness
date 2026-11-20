@@ -35,6 +35,7 @@ export interface SupervisorLaunchOptions {
   maxOutputBytes?: number
   maxTotalOutputBytes?: number
   ownerPath?: string
+  env?: Record<string, string>
   handshakeTimeoutMs?: number
   drainTimeoutMs?: number
   authorizeResume?: () => Promise<boolean>
@@ -60,12 +61,19 @@ const SAFE_ENV_VARS = [
   'NODE_ENV'
 ]
 
-export function buildSafeEnvironment(): NodeJS.ProcessEnv {
+const ALLOWED_PROPAGATED_ENV = new Set(['CODE_AWARENESS_DELIVERY_CONTEXT', 'CODE_AWARENESS_WORKTREE_ID', 'CODE_AWARENESS_SESSION_WITNESS'])
+
+export function buildSafeEnvironment(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {}
   for (const key of SAFE_ENV_VARS) {
     const foundKey = Object.keys(process.env).find((k) => k.toUpperCase() === key.toUpperCase())
     if (foundKey && process.env[foundKey] !== undefined) {
       env[key] = process.env[foundKey]
+    }
+  }
+  if (extra) {
+    for (const [key, value] of Object.entries(extra)) {
+      if (ALLOWED_PROPAGATED_ENV.has(key) && typeof value === 'string') env[key] = value
     }
   }
   return env
@@ -259,7 +267,7 @@ export class CliProcessSupervisor {
       server.listen('\\\\.\\pipe\\' + pipeName, () => {
         try {
           const spawned = spawn(executable, [pipeName], { shell: false, windowsHide: true,
-            env: buildSafeEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] })
+            env: buildSafeEnvironment(options.env), stdio: ['ignore', 'pipe', 'pipe'] })
           this.owner = spawned
           spawned.stdout?.on('data', chunk => this.buffer?.appendStdout(chunk))
           spawned.stderr?.on('data', chunk => this.buffer?.appendStderr(chunk))

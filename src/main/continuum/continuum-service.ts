@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { deliveryAnchor, deliveryContextRequest, resolveEffectiveDeliveryContext, sameDeliveryRequest, type DeliveryContextRequest, type DeliveryAnchor, type DeliveryProjectionPage, type ObserveDelivery } from '../../shared/types/delivery-context-types'
+import { deliveryAnchor, deliveryContextRequest, resolveEffectiveDeliveryContext, sameDeliveryRequest, type DeliveryContextRequest, type DeliveryAnchor, type DeliveryProjectionPage, type ExecutionActivationScopeKind, type ObserveDelivery } from '../../shared/types/delivery-context-types'
 import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-suggestion-types'
@@ -28,14 +28,8 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   get repositoryId() { return this.store.repositoryId }
   private async prepareAuthorityDelivery(authority: AgentAuthority | undefined, observeDelivery?: ObserveDelivery): Promise<PublicationReceiptContext | undefined> {
     if (!authority) return undefined
-    const resolved = resolveEffectiveDeliveryContext(undefined, authority.deliveryContext, authority.deliveryContextError)
-    if (!resolved.ok) throw new Error(resolved.reason === 'DELIVERY_CONTEXT_CONFLICT' ? 'DELIVERY_CONTEXT_CONFLICT' : 'DELIVERY_CONTEXT_INVALID')
-    let anchor: DeliveryAnchor | undefined
-    if (resolved.request) {
-      const obs = observeDelivery ?? (this.lifecycleDependencies.observeDelivery ? () => this.lifecycleDependencies.observeDelivery!(authority.worktreeId) : undefined)
-      if (!obs) throw new Error('DELIVERY_CONTEXT_INVALID')
-      anchor = await this.prepareDeliveryContext(authority, resolved.request, obs)
-    }
+    const resolved = await this.resolveExecutionContext(authority, undefined, observeDelivery)
+    const anchor = resolved.anchor
     return anchor || authority.sessionWitness
       ? { ...(anchor ? { deliveryContext: anchor } : {}), ...(authority.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
       : undefined
@@ -240,65 +234,200 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     if (artifact.revision !== receipt.revision) throw new Error('STALE_PUBLICATION_RECEIPT')
     return { ...this.receipt(artifact), publicationReceipt: receipt, replayed: true }
   }
-  async prepareDeliveryContext(authority: AgentAuthority | undefined, request: DeliveryContextRequest, observe: ObserveDelivery): Promise<DeliveryAnchor> {
+  async prepareDeliveryContext(authority: AgentAuthority | undefined, request: DeliveryContextRequest, observe: ObserveDelivery, options?: { worktreeId?: string }): Promise<DeliveryAnchor> {
     deliveryContextRequest.parse(request)
+    const targetWorktreeId = options?.worktreeId ?? authority?.worktreeId
+    if (authority?.worktreeId && options?.worktreeId && authority.worktreeId !== options.worktreeId) throw new Error('DELIVERY_CONTEXT_CONFLICT')
     const check = () => {
       this.assertActive(); assertArtifactAgent(authority, this.repositoryId)
       const binding = this.get(request.bindingArtifactId), plan = this.get(request.planArtifactId)
+      const planExecutionId = plan ? this.store.resolvePlanExecutionId(plan) : undefined
       if (!binding || binding.provenance.executionBranchBinding !== true || binding.metadata.bindingRole !== 'EXECUTION_BRANCH' || binding.metadata.repositoryId !== this.repositoryId ||
-        binding.metadata.sourceArtifactId !== request.planArtifactId || binding.metadata.executionId !== request.executionId || !plan || plan.metadata.kind !== 'EXECUTABLE_PLAN' || plan.metadata.executionId !== request.executionId) throw new Error('DELIVERY_CONTEXT_INVALID')
+        binding.metadata.sourceArtifactId !== request.planArtifactId || binding.metadata.executionId !== request.executionId || !plan || plan.metadata.kind !== 'EXECUTABLE_PLAN' || planExecutionId !== request.executionId) throw new Error('DELIVERY_CONTEXT_INVALID')
       if (binding.revision !== request.bindingRevision || plan.revision !== request.planRevision) throw new Error('DELIVERY_CONTEXT_STALE')
+      if (targetWorktreeId) {
+        const activeActivation = this.store.getActiveActivation(targetWorktreeId)
+        if (activeActivation) {
+          if (activeActivation.executionId !== request.executionId || activeActivation.planArtifactId !== request.planArtifactId || activeActivation.bindingArtifactId !== request.bindingArtifactId) {
+            throw new Error('DELIVERY_CONTEXT_CONFLICT')
+          }
+          if (activeActivation.planRevision !== request.planRevision || activeActivation.bindingRevision !== request.bindingRevision) {
+            throw new Error('DELIVERY_CONTEXT_STALE')
+          }
+        } else {
+          const priorActivation = this.store.getActivationForBinding(request.bindingArtifactId, targetWorktreeId)
+          if (priorActivation && priorActivation.status !== 'ACTIVE') {
+            throw new Error('DELIVERY_CONTEXT_REVOKED')
+          }
+        }
+      }
       return { binding, plan }
     }
     const initial = check(), before = await observe(), after = await observe(), current = check()
     const metadata = current.binding.metadata
-    if (JSON.stringify(before) !== JSON.stringify(after) || before.repositoryId !== this.repositoryId || authority?.worktreeId && authority.worktreeId !== before.worktreeId ||
+    if (JSON.stringify(before) !== JSON.stringify(after) || before.repositoryId !== this.repositoryId || targetWorktreeId && targetWorktreeId !== before.worktreeId ||
       metadata.worktreeId !== before.worktreeId || metadata.worktreeGeneration !== before.worktreeGeneration || metadata.branchRef !== before.branchRef || metadata.branchGeneration !== before.branchGeneration ||
       initial.binding.contentHash !== current.binding.contentHash || initial.plan.contentHash !== current.plan.contentHash) throw new Error('DELIVERY_CONTEXT_STALE')
     return { ...request, schemaVersion: 1, repositoryId: this.repositoryId, planDigest: current.plan.contentHash, bindingDigest: current.binding.contentHash,
       snapshot: before, classification: 'AUTHENTICATED_EXECUTION_CONTEXT' }
   }
-  async bindExecutionBranch(executionId: string, sourceArtifactId: string, observe: () => Promise<ExecutionBranchSnapshot>) {
+
+  async resolveExecutionContext(
+    authority: AgentAuthority | undefined,
+    explicitDeliveryContext?: unknown,
+    observeDelivery?: ObserveDelivery,
+    options?: { requireGoverned?: boolean; worktreeId?: string }
+  ): Promise<{ anchor?: DeliveryAnchor; source: 'EXPLICIT_OR_LAUNCH' | 'DURABLE_ACTIVATION' | 'UNMANAGED' }> {
     this.assertActive()
-    if (!executionId.trim() || executionId.length > 512 || /[\0\r\n]/.test(executionId)) throw new Error('INVALID_ARGUMENT')
-    const checkSource = () => {
-      this.assertActive()
-      const source = this.get(sourceArtifactId)
-      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN' || source.metadata.executionId !== executionId) throw new Error('EXECUTION_SOURCE_MISMATCH')
-      return source
+    if (authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+    if (authority?.worktreeId && options?.worktreeId && authority.worktreeId !== options.worktreeId) throw new Error('DELIVERY_CONTEXT_CONFLICT')
+    const targetWorktreeId = options?.worktreeId ?? authority?.worktreeId
+    const resolved = resolveEffectiveDeliveryContext(explicitDeliveryContext, authority?.deliveryContext, authority?.deliveryContextError)
+    if (!resolved.ok) throw new Error(resolved.reason === 'DELIVERY_CONTEXT_CONFLICT' ? 'DELIVERY_CONTEXT_CONFLICT' : 'DELIVERY_CONTEXT_INVALID')
+    const obs = observeDelivery ?? (this.lifecycleDependencies.observeDelivery && authority ? () => this.lifecycleDependencies.observeDelivery!(targetWorktreeId) : undefined)
+    if (resolved.request) {
+      if (!obs) throw new Error('DELIVERY_CONTEXT_INVALID')
+      const anchor = await this.prepareDeliveryContext(authority, resolved.request, obs, { worktreeId: targetWorktreeId })
+      return { anchor, source: 'EXPLICIT_OR_LAUNCH' }
     }
-    checkSource()
-    const before = await observe()
-    if (before.branchGeneration === 'UNKNOWN' || !before.branchRef.startsWith('refs/heads/')) throw new Error('BRANCH_IDENTITY_UNAVAILABLE')
-    const after = await observe()
-    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('EXECUTION_BINDING_DRIFT')
-    const source = checkSource()
-    const artifactId = 'artifact-execution-branch-' + createHash('sha256').update(JSON.stringify([before.repositoryId, executionId, before.branchRef, before.branchGeneration])).digest('hex')
-    const observedAt = new Date().toISOString()
-    const metadata = { name: `Execução ${executionId} · ${before.branchRef}`, description: 'Declaração explícita vinculada a uma instância Git observada; não comprova atividade, autoria ou conclusão.',
-      kind: 'OBSERVATION', date: observedAt, status: 'VERIFIED_AT_BINDING', bindingRole: 'EXECUTION_BRANCH', executionId, repositoryId: before.repositoryId, sourceArtifactId,
-      branchRef: before.branchRef, branchGeneration: before.branchGeneration, branchRevision: before.branchRevision, sourceHeadAtBinding: before.head,
-      worktreeId: before.worktreeId, worktreeGeneration: before.worktreeGeneration, worktreeFingerprint: before.fingerprint, observedAt,
-      evidenceKind: 'AUTHENTICATED_DECLARATION_GIT_VERIFIED', relations: [{ artifactId: sourceArtifactId, kind: 'related-to' }] }
-    const rawMarkdown = `---\n${JSON.stringify(metadata, null, 2)}\n---\n\nDeclaração autenticada de execução associada à instância Git observada. A seleção da Worktree não prova posse do processo. A verificação é pontual; não autoriza operações Git nem comprova implementação ou validação.\n`
-    const artifact = this.store.createExecutionBinding({ artifactId, metadata, rawMarkdown })
-    this.changed()
-    return {
-      ...this.receipt(artifact),
-      state: 'PERSISTED' as const,
-      executionId,
-      branchRef: artifact.metadata.branchRef,
-      branchGeneration: artifact.metadata.branchGeneration,
-      planArtifactId: sourceArtifactId,
-      planRevision: source.revision,
-      deliveryContext: {
-        bindingArtifactId: artifact.artifactId,
-        bindingRevision: artifact.revision,
-        planArtifactId: sourceArtifactId,
-        planRevision: source.revision,
-        executionId
+    if (targetWorktreeId) {
+      assertArtifactAgent(authority, this.repositoryId)
+      const active = this.store.getActiveActivation(targetWorktreeId)
+      if (active) {
+        if (!obs) throw new Error('DELIVERY_CONTEXT_INVALID')
+        const request: DeliveryContextRequest = {
+          bindingArtifactId: active.bindingArtifactId,
+          bindingRevision: active.bindingRevision,
+          planArtifactId: active.planArtifactId,
+          planRevision: active.planRevision,
+          executionId: active.executionId
+        }
+        const anchor = await this.prepareDeliveryContext(authority, request, obs, { worktreeId: targetWorktreeId })
+        return { anchor, source: 'DURABLE_ACTIVATION' }
       }
     }
+    if (options?.requireGoverned) throw new Error('DELIVERY_CONTEXT_MISSING')
+    return { anchor: undefined, source: 'UNMANAGED' }
+  }
+
+  getActiveExecutionContext(worktreeId: string) {
+    this.assertActive()
+    const activation = this.store.getActiveActivation(worktreeId)
+    if (!activation) return null
+    return {
+      activation,
+      deliveryContext: {
+        bindingArtifactId: activation.bindingArtifactId,
+        bindingRevision: activation.bindingRevision,
+        planArtifactId: activation.planArtifactId,
+        planRevision: activation.planRevision,
+        executionId: activation.executionId
+      } satisfies DeliveryContextRequest
+    }
+  }
+
+  revokeExecutionActivation(input: {
+    worktreeId: string
+    worktreeGeneration?: string
+    executionId?: string
+    expectedActivationRevision?: number
+    status?: 'REVOKED' | 'CLOSED'
+    reason?: string
+  }) {
+    this.assertActive()
+    const activation = this.store.revokeActivation(input)
+    this.changed()
+    return { state: 'PERSISTED' as const, ...activation }
+  }
+
+  async bootstrapExecution(
+    input: {
+      planArtifactId: string
+      expectedPlanRevision?: number
+      executionId?: string
+      scopeKind?: ExecutionActivationScopeKind
+      activate?: boolean
+      expectedActivationRevision?: number
+    },
+    observe: () => Promise<ExecutionBranchSnapshot>
+  ) {
+    this.assertActive()
+    if (!input.planArtifactId.trim() || input.planArtifactId.length > 512 || /[\0\r\n]/.test(input.planArtifactId)) throw new Error('INVALID_ARGUMENT')
+    if (input.executionId !== undefined && (!input.executionId.trim() || input.executionId.length > 512 || /[\0\r\n]/.test(input.executionId))) throw new Error('INVALID_ARGUMENT')
+    if (input.expectedPlanRevision !== undefined && (!Number.isSafeInteger(input.expectedPlanRevision) || input.expectedPlanRevision < 1)) throw new Error('INVALID_ARGUMENT')
+    const checkSource = () => {
+      this.assertActive()
+      const source = this.get(input.planArtifactId)
+      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN') throw new Error('EXECUTION_SOURCE_MISMATCH')
+      const knownExecutionId = this.store.resolvePlanExecutionId(source)
+      if (input.executionId !== undefined && input.executionId !== knownExecutionId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.activate === false && !knownExecutionId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      if (input.expectedPlanRevision !== undefined && source.revision !== input.expectedPlanRevision) {
+        throw new Error(`REVISION_CONFLICT: Artifact "${source.artifactId}" is at revision ${source.revision}; read again before updating`)
+      }
+      return source
+    }
+    const initialSource = checkSource()
+    const before = await observe()
+    if (before.branchGeneration === 'UNKNOWN' || !before.branchRef.startsWith('refs/heads/')) throw new Error('BRANCH_IDENTITY_UNAVAILABLE')
+    if (before.repositoryId !== this.repositoryId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+    const after = await observe()
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('EXECUTION_BINDING_DRIFT')
+    const currentSource = checkSource()
+    if (currentSource.revision !== initialSource.revision || currentSource.contentHash !== initialSource.contentHash) throw new Error('EXECUTION_BINDING_DRIFT')
+    const observedAt = new Date().toISOString()
+    const result = this.store.bootstrapExecutionBinding({
+      planArtifactId: input.planArtifactId,
+      expectedPlanRevision: input.expectedPlanRevision ?? currentSource.revision,
+      executionId: input.executionId,
+      snapshot: before,
+      scopeKind: input.scopeKind,
+      activate: input.activate,
+      expectedActivationRevision: input.expectedActivationRevision,
+      buildBinding: (executionId) => {
+        const artifactId = 'artifact-execution-branch-' + createHash('sha256').update(JSON.stringify([before.repositoryId, executionId, before.branchRef, before.branchGeneration])).digest('hex')
+        const metadata = {
+          name: `Execução ${executionId} · ${before.branchRef}`,
+          description: 'Declaração explícita vinculada a uma instância Git observada; não comprova atividade, autoria ou conclusão.',
+          kind: 'OBSERVATION', date: observedAt, status: 'VERIFIED_AT_BINDING', bindingRole: 'EXECUTION_BRANCH',
+          executionId, repositoryId: before.repositoryId, sourceArtifactId: input.planArtifactId,
+          branchRef: before.branchRef, branchGeneration: before.branchGeneration, branchRevision: before.branchRevision, sourceHeadAtBinding: before.head,
+          worktreeId: before.worktreeId, worktreeGeneration: before.worktreeGeneration, worktreeFingerprint: before.fingerprint, observedAt,
+          evidenceKind: 'AUTHENTICATED_DECLARATION_GIT_VERIFIED', relations: [{ artifactId: input.planArtifactId, kind: 'related-to' }]
+        }
+        const rawMarkdown = `---\n${JSON.stringify(metadata, null, 2)}\n---\n\nDeclaração autenticada de execução associada à instância Git observada. A seleção da Worktree não prova posse do processo. A verificação é pontual; não autoriza operações Git nem comprova implementação ou validação.\n`
+        return { artifactId, metadata, rawMarkdown }
+      }
+    })
+    this.changed()
+    return {
+      ...this.receipt(result.binding),
+      state: 'PERSISTED' as const,
+      reused: result.reused,
+      executionId: result.executionId,
+      branchRef: result.binding.metadata.branchRef,
+      branchGeneration: result.binding.metadata.branchGeneration,
+      planArtifactId: result.plan.artifactId,
+      planRevision: result.plan.revision,
+      bindingArtifactId: result.binding.artifactId,
+      bindingRevision: result.binding.revision,
+      ...(result.activation ? {
+        activationId: result.activation.activationId,
+        activationRevision: result.activation.revision,
+        activationStatus: result.activation.status
+      } : {}),
+      deliveryContext: {
+        bindingArtifactId: result.binding.artifactId,
+        bindingRevision: result.binding.revision,
+        planArtifactId: result.plan.artifactId,
+        planRevision: result.plan.revision,
+        executionId: result.executionId
+      }
+    }
+  }
+
+  async bindExecutionBranch(executionId: string, sourceArtifactId: string, observe: () => Promise<ExecutionBranchSnapshot>) {
+    return this.bootstrapExecution({ planArtifactId: sourceArtifactId, executionId, activate: false }, observe)
   }
   private publicationProvenance() {
     return { publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: this.store.repositoryId, sessionEvidence: 'UNAVAILABLE' } }

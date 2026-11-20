@@ -672,6 +672,28 @@ app.whenReady().then(async () => {
           return false
         }
         return true
+      },
+      resolveLaunchEnv: async target => {
+        if (activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) return undefined
+        const service = continuumSession.getActiveService()
+        if (!service || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) return undefined
+        let worktreeId = target?.identity.worktreeId
+        if (!worktreeId && gitOperations.worktrees) {
+          const discovered = await gitOperations.worktrees.discover().catch(() => undefined)
+          const normalizedRoot = process.platform === 'win32' ? realpathSync(project.path).toLowerCase() : realpathSync(project.path)
+          worktreeId = discovered?.worktrees.find(w => {
+            try {
+              const p = realpathSync(w.path)
+              return (process.platform === 'win32' ? p.toLowerCase() : p) === normalizedRoot
+            } catch { return false }
+          })?.worktreeId
+        }
+        if (!worktreeId) return undefined
+        const active = service.getActiveExecutionContext(worktreeId)
+        return {
+          CODE_AWARENESS_WORKTREE_ID: worktreeId,
+          ...(active ? { CODE_AWARENESS_DELIVERY_CONTEXT: JSON.stringify(active.deliveryContext) } : {})
+        }
       }
     })
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {

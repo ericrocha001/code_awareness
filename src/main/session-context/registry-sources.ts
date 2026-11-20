@@ -98,7 +98,8 @@ export function registrySources(options: {
       if (!parsed.success || parsed.data.repositoryId !== repositoryId) return null
       const anchor = parsed.data
       const binding = service?.provenanceSnapshot(anchor.bindingArtifactId, anchor.bindingRevision), plan = service?.provenanceSnapshot(anchor.planArtifactId, anchor.planRevision)
-      if (!binding?.provenance?.executionBranchBinding || binding.contentHash !== anchor.bindingDigest || plan?.contentHash !== anchor.planDigest || plan.metadata.executionId !== anchor.executionId || binding.metadata.sourceArtifactId !== anchor.planArtifactId || binding.metadata.executionId !== anchor.executionId || binding.metadata.repositoryId !== repositoryId || binding.metadata.worktreeId !== anchor.snapshot.worktreeId || binding.metadata.worktreeGeneration !== anchor.snapshot.worktreeGeneration || binding.metadata.branchRef !== anchor.snapshot.branchRef || binding.metadata.branchGeneration !== anchor.snapshot.branchGeneration) return null
+      const planExecutionId = (plan?.provenance?.executionIdentity as { executionId?: unknown } | undefined)?.executionId ?? plan?.metadata.executionId
+      if (!binding?.provenance?.executionBranchBinding || binding.contentHash !== anchor.bindingDigest || plan?.contentHash !== anchor.planDigest || planExecutionId !== anchor.executionId || binding.metadata.sourceArtifactId !== anchor.planArtifactId || binding.metadata.executionId !== anchor.executionId || binding.metadata.repositoryId !== repositoryId || binding.metadata.worktreeId !== anchor.snapshot.worktreeId || binding.metadata.worktreeGeneration !== anchor.snapshot.worktreeGeneration || binding.metadata.branchRef !== anchor.snapshot.branchRef || binding.metadata.branchGeneration !== anchor.snapshot.branchGeneration) return null
       return anchor
     }
     const deliveryExecutionEntity = (anchor: import('../../shared/types/delivery-context-types').DeliveryAnchor): RegistryEntity => ({
@@ -290,7 +291,8 @@ export function registrySources(options: {
       for (const id of extractArtifactReferences(artifact.rawMarkdown ?? '').slice(0, 20)) if (id !== artifact.artifactId && service?.get(id)) edges.push({ from, relation: 'references', to: { kind: 'ARTIFACT', id }, evidenceKind: 'CONTINUUM_REFERENCE', ...evidence })
       const nested = artifact.metadata.metadata
       const metadata = nested && typeof nested === 'object' && !Array.isArray(nested) ? { ...nested, ...artifact.metadata } : artifact.metadata
-      if (typeof metadata.executionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(metadata.executionId)) edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: metadata.executionId }, evidenceKind: 'EXECUTION_MEMBERSHIP', ...evidence })
+      const artifactExecutionId = (artifact.provenance?.executionIdentity as { executionId?: unknown } | undefined)?.executionId ?? metadata.executionId
+      if (typeof artifactExecutionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(artifactExecutionId)) edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: artifactExecutionId }, evidenceKind: 'EXECUTION_MEMBERSHIP', ...evidence })
       if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF') {
         const revisionRelations: RegistryEdge[] = []
         for (const relation of (artifact.metadata.relations ?? []).slice(0, 10)) {

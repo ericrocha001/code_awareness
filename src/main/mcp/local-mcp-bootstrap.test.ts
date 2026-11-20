@@ -108,4 +108,64 @@ describe('authenticated IPC to Desktop MCP over real STDIO', () => {
     await expect(client.callTool({ name: 'discover_repository', arguments: {} })).rejects.toThrow(/BACKEND_UNAVAILABLE|timed out/)
     await expect(client.listTools()).rejects.toThrow(/INVALIDATED/)
   }, 15000)
+
+  it('resolves active worktree execution context in launcher and refreshes headers cleanly across updates and reconnects', async () => {
+    const profile = mkdtempSync(join(tmpdir(), 'mcp-u1-context-'))
+    cleanups.push(() => rmSync(profile, { recursive: true, force: true }))
+    const repoCwd = mkdtempSync(join(tmpdir(), 'mcp-u1-cwd-'))
+    cleanups.push(() => rmSync(repoCwd, { recursive: true, force: true }))
+    const identity = new RuntimeIdentityProvider({ rootDir: profile, packaged: true })
+    const lifecycle = new McpLifecycle({ runtimeIdentity: identity, log: () => {} })
+    cleanups.push(() => lifecycle.dispose())
+    const seenWorktreeId = 'a'.repeat(64)
+    let activeDelivery: Record<string, unknown> | null = {
+      bindingArtifactId: 'artifact-bind-1',
+      bindingRevision: 1,
+      planArtifactId: 'artifact-plan-1',
+      planRevision: 2,
+      executionId: 'exec-123'
+    }
+    const continuumAdapter: import('../local-agent-channel/local-channel-types').LocalChannelAdapter = {
+      domain: 'continuum',
+      operations: {
+        status: {
+          execute: async () => ({ available: true, repository: { repositoryId: 'repo-1', checkout: repoCwd }, worktrees: [{ worktreeId: seenWorktreeId, generation: 'gen-1', path: repoCwd }] })
+        },
+        get_execution_context: {
+          execute: async () => activeDelivery
+            ? { activation: { revision: 1, status: 'ACTIVE', worktreeId: seenWorktreeId }, deliveryContext: activeDelivery }
+            : { activation: null, deliveryContext: null }
+        }
+      }
+    }
+    const navigation = {
+      discoverRepository: async () => ({ directories: [{ relativePath: '.', children: ['src/'] }] }),
+      readCode: async () => []
+    } as unknown as ProjectContextNavigation
+    await lifecycle.activate('project-u1', navigation)
+    const host = new LocalChannelHost([continuumAdapter], profile, () => lifecycle.getLocalEndpoint(identity.getInstanceId()))
+    await host.start()
+    cleanups.push(() => host.dispose())
+    const capturedHeaders: Array<{ worktree: string | null; delivery: string | null }> = []
+    const realFetch = globalThis.fetch
+    globalThis.fetch = (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const h = new Headers(init?.headers)
+      capturedHeaders.push({ worktree: h.get('x-code-awareness-worktree'), delivery: h.get('x-code-awareness-delivery-context') })
+      return realFetch(url, init)
+    }) as typeof fetch
+    cleanups.push(() => { globalThis.fetch = realFetch })
+    const input = new PassThrough(), output = new PassThrough()
+    const bootstrap = await start({ profile, projectId: 'project-u1', cwd: repoCwd, input, output, timeoutMs: 5000 })
+    cleanups.push(() => bootstrap.close())
+    const client = new Client({ name: 'context-proof', version: '1' })
+    await client.connect(new StdioServerTransport(output, input))
+    cleanups.push(() => client.close())
+    await client.callTool({ name: 'get_runtime_identity', arguments: {} })
+    expect(capturedHeaders.some(h => h.worktree === seenWorktreeId && h.delivery === JSON.stringify(activeDelivery))).toBe(true)
+    activeDelivery = null
+    await new Promise(resolve => setTimeout(resolve, 550))
+    await client.callTool({ name: 'get_runtime_identity', arguments: {} })
+    expect(capturedHeaders.at(-1)?.delivery).toBeNull()
+    expect(capturedHeaders.at(-1)?.worktree).toBe(seenWorktreeId)
+  }, 15000)
 })

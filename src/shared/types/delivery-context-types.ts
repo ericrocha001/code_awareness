@@ -70,6 +70,39 @@ export function resolveEffectiveDeliveryContext(
   return { ok: true, request: undefined }
 }
 
+export type ExecutionActivationStatus = 'ACTIVE' | 'REVOKED' | 'CLOSED'
+export type ExecutionActivationScopeKind = 'CHECKOUT' | 'REMOTE_DELEGATED'
+
+export interface ExecutionActivationRecord {
+  activationId: string
+  revision: number
+  repositoryId: string
+  worktreeId: string
+  worktreeGeneration: string
+  branchRef: string
+  branchGeneration: string
+  executionId: string
+  planArtifactId: string
+  planRevision: number
+  planContentHash: string
+  bindingArtifactId: string
+  bindingRevision: number
+  bindingContentHash: string
+  scopeKind: ExecutionActivationScopeKind
+  status: ExecutionActivationStatus
+  activatedAt: string
+  updatedAt: string
+  revokedAt?: string
+  revokedReason?: string
+}
+
+export interface ExecutionIdentityRecord {
+  executionId: string
+  source: 'PLAN_METADATA' | 'BACKEND_ASSIGNED'
+  assignedRevision: number
+  createdAt: string
+}
+
 export function sameDeliveryScope(before: DeliveryAnchor, after: DeliveryAnchor): boolean {
   return ['repositoryId','bindingArtifactId','bindingRevision','bindingDigest','planArtifactId','planRevision','planDigest','executionId'].every(key => before[key as keyof DeliveryAnchor] === after[key as keyof DeliveryAnchor]) &&
     ['repositoryId','worktreeId','worktreeGeneration','branchRef','branchGeneration'].every(key => before.snapshot[key as keyof DeliveryAnchor['snapshot']] === after.snapshot[key as keyof DeliveryAnchor['snapshot']])

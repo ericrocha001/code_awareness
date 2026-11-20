@@ -8,10 +8,10 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 
 async function main(args = process.argv.slice(2), channel = { directory: 'continuum-local', protocol: 'continuum-local/v1' }) {
   const operation = args.shift()
-  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions', 'bind_execution', 'inspect_artifact_structure', 'read_artifact_section', 'list_continuum_tags', 'create_continuum_tag', 'assign_continuum_tag', 'create_context_bundle', 'transition_artifact_lifecycle', 'repair_artifact_metadata'].includes(operation)) fail('INVALID_ARGUMENT')
+  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions', 'bind_execution', 'revoke_execution', 'get_execution_context', 'inspect_artifact_structure', 'read_artifact_section', 'list_continuum_tags', 'create_continuum_tag', 'assign_continuum_tag', 'create_context_bundle', 'transition_artifact_lifecycle', 'repair_artifact_metadata'].includes(operation)) fail('INVALID_ARGUMENT')
   const options = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output', '--execution', '--name', '--description', '--kind', '--delivery-context'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
+    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output', '--execution', '--name', '--description', '--kind', '--delivery-context', '--status', '--reason'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
     options[args[i]] = args[i + 1]
   }
   const descriptor = readDescriptor(options['--profile'], channel)
@@ -55,10 +55,25 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
     Object.assign(request, query, { artifactId: options['--id'] })
   }
   if (operation === 'bind_execution') {
-    if (!options['--execution'] || !options['--id'] || !worktree.generation) fail('INVALID_ARGUMENT')
-    request.executionId = options['--execution']
+    if (!options['--id'] || !worktree.generation) fail('INVALID_ARGUMENT')
     request.sourceArtifactId = options['--id']
     request.worktreeGeneration = worktree.generation
+    if (options['--execution'] !== undefined) request.executionId = options['--execution']
+    if (options['--revision'] !== undefined) {
+      request.expectedRevision = Number(options['--revision'])
+      if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1) fail('INVALID_ARGUMENT')
+    }
+  }
+  if (operation === 'revoke_execution') {
+    if (!worktree.generation) fail('INVALID_ARGUMENT')
+    request.worktreeGeneration = worktree.generation
+    if (options['--execution'] !== undefined) request.executionId = options['--execution']
+    if (options['--status'] !== undefined) request.status = options['--status']
+    if (options['--reason'] !== undefined) request.reason = options['--reason']
+    if (options['--revision'] !== undefined) {
+      request.expectedRevision = Number(options['--revision'])
+      if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1) fail('INVALID_ARGUMENT')
+    }
   }
   if (operation === 'list') {
     try { request.filter = options['--filter'] ? JSON.parse(options['--filter']) : {} } catch { fail('INVALID_ARGUMENT') }

@@ -430,4 +430,45 @@ describe('ChannelMcpAdapter', () => {
     expect(badVal.isError).toBe(true)
     expect(validationExecution.start).toHaveBeenCalledTimes(1)
   })
+
+  it('exposes worktree execution bootstrap/revoke tools without implicit unscoped inheritance', async () => {
+    const worktreeId = 'b'.repeat(64)
+    const continuum = {
+      repositoryId: 'repo-1',
+      get: vi.fn(),
+      list: vi.fn(),
+      publish: vi.fn((rawMarkdown: string, _fields?: unknown, _authority?: unknown, anchor?: unknown) => ({ success: true, artifactId: 'artifact-pub', revision: 1, updatedAt: '2026-11-20T00:00:00Z', anchor })),
+      update: vi.fn(),
+      bootstrapExecution: vi.fn(async (input: { planArtifactId: string; scopeKind?: string }) => ({ state: 'PERSISTED', artifactId: 'artifact-bind', revision: 1, executionId: 'exec-1', planArtifactId: input.planArtifactId, scopeKind: input.scopeKind })),
+      revokeExecutionActivation: vi.fn(async (input: { worktreeId: string; status?: string }) => ({ state: 'PERSISTED', worktreeId: input.worktreeId, status: input.status ?? 'REVOKED' })),
+      resolveExecutionContext: vi.fn(async (auth: { worktreeId?: string } | undefined) =>
+        auth?.worktreeId ? { anchor: { executionId: 'exec-1' }, source: 'DURABLE_ACTIVATION' as const } : { anchor: undefined, source: 'UNMANAGED' as const }
+      )
+    } as unknown as import('../continuum/continuum-types').IContinuumService
+    const gitOperations = {
+      deliverySnapshot: vi.fn(async (targetId?: string) => ({ repositoryId: 'repo-1', worktreeId: targetId ?? worktreeId, worktreeGeneration: 'gen-1', branchRef: 'refs/heads/feat', branchGeneration: 'bg-1' }))
+    } as unknown as import('../git-operations/git-operations-service').GitOperationsService
+    const adapter = new ChannelMcpAdapter({ projectId: 'repo-1', repoRoot: 'repo', navigation: bindProjectNavigation(createNavigation(), 'repo'), continuum, gitOperations })
+    expect(adapter.listTools().map(t => t.name)).toContain('bind_worktree_execution')
+    expect(adapter.listTools().map(t => t.name)).toContain('revoke_worktree_execution')
+
+    const principal = authenticatedAgentPrincipal('MCP', () => true)
+    const unscoped = authorizeArtifactAgent(principal, 'repo-1', () => true)
+    await adapter.callTool('publish_artifact', { rawMarkdown: '---\nname: Unscoped\nkind: TECHNICAL_SPEC\n---\nBody' }, undefined, unscoped)
+    expect(continuum.publish).toHaveBeenLastCalledWith(expect.any(String), expect.any(Object), unscoped, undefined)
+
+    const bound = await adapter.callTool('bind_worktree_execution', { worktreeId, planArtifactId: 'artifact-plan-1' }, undefined, unscoped)
+    expect(bound.isError).toBeUndefined()
+    expect(continuum.bootstrapExecution).toHaveBeenCalledWith(expect.objectContaining({ planArtifactId: 'artifact-plan-1', scopeKind: 'REMOTE_DELEGATED', activate: true }), expect.any(Function))
+    expect(gitOperations.deliverySnapshot).not.toHaveBeenCalled()
+
+    const otherWorktree = authorizeArtifactAgent(principal, 'repo-1', () => true, 'c'.repeat(64))
+    const conflict = await adapter.callTool('bind_worktree_execution', { worktreeId, planArtifactId: 'artifact-plan-1' }, undefined, otherWorktree)
+    expect(conflict.isError).toBe(true)
+    expect(textContent(conflict.content[0])).toBe('DELIVERY_CONTEXT_CONFLICT')
+
+    const revoked = await adapter.callTool('revoke_worktree_execution', { worktreeId, status: 'CLOSED', reason: 'finished' }, undefined, unscoped)
+    expect(revoked.isError).toBeUndefined()
+    expect(continuum.revokeExecutionActivation).toHaveBeenCalledWith(expect.objectContaining({ worktreeId, status: 'CLOSED', reason: 'finished' }))
+  })
 })

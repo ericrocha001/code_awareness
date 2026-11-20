@@ -21,6 +21,7 @@ export interface CliExecutionServiceOptions {
   enabledByDefault?: boolean
   ownerPath?: string
   resolveWorktree?: (selector: CliWorktreeSelector) => Promise<CliResolvedWorktree>
+  resolveLaunchEnv?: (worktree?: CliResolvedWorktree) => Promise<Record<string, string> | undefined>
 }
 const supervised: CliPolicy = { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: 'default', rule: 'native-command-consent' }
 const budgets = { commandTimeoutMs: 30000, totalTimeoutMs: 90000, stepOutputBytes: 65536, totalOutputBytes: 262144 }
@@ -43,6 +44,7 @@ export class CliExecutionService {
   private enabled: boolean
   private readonly ownerPath?: string
   private readonly resolveWorktree?: CliExecutionServiceOptions['resolveWorktree']
+  private readonly resolveLaunchEnv?: CliExecutionServiceOptions['resolveLaunchEnv']
   private readonly proposalWorktrees = new Map<string, CliResolvedWorktree>()
   private readonly proposalRuntimeIdentities = new Map<string, string>()
   private readonly proposals = new Map<string, CliProposal>()
@@ -69,6 +71,7 @@ export class CliExecutionService {
     this.enabled = options.enabledByDefault ?? false
     this.ownerPath = options.ownerPath
     this.resolveWorktree = options.resolveWorktree
+    this.resolveLaunchEnv = options.resolveLaunchEnv
   }
   setApprovalHandler(handler: CliApprovalHandler): void { this.approvalHandler = handler }
   isEnabled(): boolean { return this.enabled }
@@ -316,8 +319,10 @@ export class CliExecutionService {
         const launchToken = randomUUID()
         this.activeLaunchToken = launchToken
         let reconciledDuringRun = false
+        const launchEnv = this.resolveLaunchEnv ? await this.resolveLaunchEnv(this.proposalWorktrees.get(proposal.proposalId)).catch(() => undefined) : undefined
         const completion = this.supervisor.launch(command, {
           ownerPath: this.ownerPath,
+          ...(launchEnv ? { env: launchEnv } : {}),
           ...(steps
             ? { timeoutMs: Math.min(budgets.commandTimeoutMs, deadline - Date.now()), maxTimeoutMs: STANDARD_MAX_TIMEOUT_MS, maxTotalOutputBytes: Math.min(budgets.stepOutputBytes, budgets.totalOutputBytes - outputBytes) }
             : { timeoutMs: Math.min(proposal.timeoutMs ?? this.defaultTimeoutMs, unitTimeoutMaxMs), maxTimeoutMs: unitTimeoutMaxMs }),

@@ -109,6 +109,10 @@ export interface IArtifactStructureReader {
 }
 export interface IContinuumService extends IArtifactReader {
   prepareDeliveryContext?: import('./continuum-service').ContinuumService['prepareDeliveryContext']
+  resolveExecutionContext?: import('./continuum-service').ContinuumService['resolveExecutionContext']
+  bootstrapExecution?: import('./continuum-service').ContinuumService['bootstrapExecution']
+  revokeExecutionActivation?: import('./continuum-service').ContinuumService['revokeExecutionActivation']
+  getActiveExecutionContext?: import('./continuum-service').ContinuumService['getActiveExecutionContext']
   publicationDeliveryPage?: import('./continuum-service').ContinuumService['publicationDeliveryPage']
   readonly repositoryId?: string
   updateAgent?: import('./continuum-service').ContinuumService['updateAgent']

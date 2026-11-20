@@ -121,9 +121,21 @@ export class ValidationExecution {
       throw error
     } finally { this.startingRunId = null }
     const output = new BoundedOutput()
+    const deliveryEnv: NodeJS.ProcessEnv = {}
+    if (input.deliveryContext) {
+      deliveryEnv.CODE_AWARENESS_DELIVERY_CONTEXT = JSON.stringify(input.deliveryContext)
+      if ('snapshot' in input.deliveryContext && input.deliveryContext.snapshot?.worktreeId) {
+        deliveryEnv.CODE_AWARENESS_WORKTREE_ID = input.deliveryContext.snapshot.worktreeId
+      }
+    } else if (source?.worktreeId) {
+      deliveryEnv.CODE_AWARENESS_WORKTREE_ID = source.worktreeId
+    }
+    if (input.sessionWitness) {
+      deliveryEnv.CODE_AWARENESS_SESSION_WITNESS = JSON.stringify(input.sessionWitness)
+    }
     const child = spawn(resolved.command.executable, resolved.command.args, {
       cwd: resolved.command.cwd,
-      env: process.env,
+      env: Object.keys(deliveryEnv).length ? { ...process.env, ...deliveryEnv } : process.env,
       windowsHide: true,
       shell: false,
       stdio: 'pipe'

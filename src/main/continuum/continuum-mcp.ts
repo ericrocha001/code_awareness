@@ -9,8 +9,9 @@ import { publicationFields } from './artifact-publication'
 import { navigationQuery } from './artifact-navigation'
 import { countCanonicalTokens } from '../core/tokenizer'
 import { CONTINUUM_AGENT_TOOLS, parseAgentArtifactUpdate } from './continuum-agent'
-import type { AgentAuthority } from './agent-authority'
+import { assertArtifactAgent, type AgentAuthority } from './agent-authority'
 import type { IArtifactStructureReader } from './continuum-types'
+import type { GitOperationsService } from '../git-operations/git-operations-service'
 export { visualMarkdown } from './artifact-metadata'
 const string = { type: 'string', minLength: 1 }
 const includeTokenUsage = { type: 'boolean', default: false, description: 'Opt in to local estimated token counts using cl100k_base (not external model billing). Measures JSON.stringify(payload) before tokenUsage; get_artifact also measures literal rawMarkdown.' }
@@ -136,5 +137,61 @@ export function executeGetVisualArtifact(service: IVisualContinuumService, args:
     const values = argsFor(GET_VISUAL_ARTIFACT_TOOL, args)
     const { artifact, data, media } = service.getVisual(values.artifactId as string)
     return { content: [ { type: 'text', text: JSON.stringify({ artifactId: artifact.artifactId, name: artifact.metadata.name, description: artifact.metadata.description, media }) }, { type: 'image', mimeType: media.mimeType, data: data.toString('base64') } ] }
+  } catch (error) { return failure(error) }
+}
+
+const worktreeIdSchema = { type: 'string', pattern: '^[a-f0-9]{64}$', description: 'Explicit SHA-256 worktreeId; remote callers never inherit the active checkout.' }
+export const BIND_WORKTREE_EXECUTION_TOOL = tool('bind_worktree_execution', 'Bootstrap or resume an explicit worktree execution binding for an EXECUTABLE_PLAN without inheriting an active checkout.', {
+  worktreeId: worktreeIdSchema,
+  planArtifactId: string,
+  expectedPlanRevision: { type: 'integer', minimum: 1 },
+  executionId: string,
+  expectedActivationRevision: { type: 'integer', minimum: 1 }
+}, ['worktreeId', 'planArtifactId'])
+export const REVOKE_WORKTREE_EXECUTION_TOOL = tool('revoke_worktree_execution', 'Explicitly revoke or close an active worktree execution binding.', {
+  worktreeId: worktreeIdSchema,
+  worktreeGeneration: string,
+  executionId: string,
+  expectedActivationRevision: { type: 'integer', minimum: 1 },
+  status: { type: 'string', enum: ['REVOKED', 'CLOSED'] },
+  reason: string
+}, ['worktreeId'])
+export const WORKTREE_EXECUTION_TOOLS = [BIND_WORKTREE_EXECUTION_TOOL, REVOKE_WORKTREE_EXECUTION_TOOL] as const
+
+export async function executeWorktreeExecutionTool(
+  service: IContinuumService,
+  gitOperations: Pick<GitOperationsService, 'deliverySnapshot'> | undefined,
+  name: string,
+  args: unknown,
+  authority?: AgentAuthority
+): Promise<McpToolResult<McpTextContent>> {
+  try {
+    assertArtifactAgent(authority, service.repositoryId ?? '')
+    const definition = WORKTREE_EXECUTION_TOOLS.find(entry => entry.name === name)
+    if (!definition) throw new Error('UNKNOWN_TOOL')
+    const values = argsFor(definition, args)
+    const worktreeId = values.worktreeId as string
+    if (!/^[a-f0-9]{64}$/.test(worktreeId)) throw new Error('INVALID_ARGUMENT: worktreeId')
+    if (authority.worktreeId && authority.worktreeId !== worktreeId) throw new Error('DELIVERY_CONTEXT_CONFLICT')
+    if (name === BIND_WORKTREE_EXECUTION_TOOL.name) {
+      if (!service.bootstrapExecution || !gitOperations) throw new Error('EXECUTION_BOOTSTRAP_UNAVAILABLE')
+      return ok(await service.bootstrapExecution({
+        planArtifactId: values.planArtifactId as string,
+        ...(values.expectedPlanRevision !== undefined ? { expectedPlanRevision: values.expectedPlanRevision as number } : {}),
+        ...(values.executionId !== undefined ? { executionId: values.executionId as string } : {}),
+        ...(values.expectedActivationRevision !== undefined ? { expectedActivationRevision: values.expectedActivationRevision as number } : {}),
+        scopeKind: 'REMOTE_DELEGATED',
+        activate: true
+      }, () => gitOperations.deliverySnapshot(worktreeId)))
+    }
+    if (!service.revokeExecutionActivation) throw new Error('EXECUTION_BOOTSTRAP_UNAVAILABLE')
+    return ok(service.revokeExecutionActivation({
+      worktreeId,
+      ...(values.worktreeGeneration !== undefined ? { worktreeGeneration: values.worktreeGeneration as string } : {}),
+      ...(values.executionId !== undefined ? { executionId: values.executionId as string } : {}),
+      ...(values.expectedActivationRevision !== undefined ? { expectedActivationRevision: values.expectedActivationRevision as number } : {}),
+      ...(values.status !== undefined ? { status: values.status as 'REVOKED' | 'CLOSED' } : {}),
+      ...(values.reason !== undefined ? { reason: values.reason as string } : {})
+    }))
   } catch (error) { return failure(error) }
 }

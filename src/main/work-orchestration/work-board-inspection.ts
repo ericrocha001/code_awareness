@@ -52,7 +52,7 @@ export async function inspectWorkBoard(continuum: Continuum, sources: WorkBoardI
   } catch {
     result.reconciliation.coverage = result.reconciliation.sources.length ? 'PARTIAL' : 'UNAVAILABLE'
   }
-  const executionId = selected.metadata.executionId
+  const executionId = (selected.provenance?.executionIdentity as { executionId?: unknown } | undefined)?.executionId ?? selected.metadata.executionId
   if (typeof executionId !== 'string' || !executionId) return result
   try {
     const bindings = continuum.listIndexedArtifacts({ metadata: { bindingRole: 'EXECUTION_BRANCH', executionId, sourceArtifactId: artifactId },

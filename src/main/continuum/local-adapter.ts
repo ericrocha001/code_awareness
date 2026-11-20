@@ -50,14 +50,26 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         return { ...request, query: navigationQuery(query, true) }
       }, async (request, context) => (await this.service(request, context)).readSection(request.query)),
       bind_execution: operation(input => {
-        const request = selection(input, ['executionId', 'sourceArtifactId', 'worktreeGeneration'])
-        return { ...request, executionId: text(request.value.executionId), sourceArtifactId: text(request.value.sourceArtifactId), generation: text(request.value.worktreeGeneration) }
+        const request = selection(input, ['executionId', 'sourceArtifactId', 'worktreeGeneration', 'expectedRevision'])
+        return {
+          ...request,
+          executionId: request.value.executionId !== undefined ? text(request.value.executionId) : undefined,
+          expectedRevision: request.value.expectedRevision !== undefined ? integer(request.value.expectedRevision) : undefined,
+          sourceArtifactId: text(request.value.sourceArtifactId),
+          generation: text(request.value.worktreeGeneration)
+        }
       }, async (request, context) => {
         const service = await this.service(request, context)
         const active = this.session.getActiveSession()!
         const git = new GitService(), identity = { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active && context.connected() }
         const reader = new GitBranchInventory(active.repositoryPath, git, this.getRegistry(active), identity)
-        const bound = await service.bindExecutionBranch(request.executionId, request.sourceArtifactId, async () => {
+        const bound = await service.bootstrapExecution({
+          planArtifactId: request.sourceArtifactId,
+          expectedPlanRevision: request.expectedRevision,
+          executionId: request.executionId,
+          scopeKind: 'CHECKOUT',
+          activate: true
+        }, async () => {
           if (await this.service(request, context, false) !== service) throw new Error('REPOSITORY_MISMATCH')
           return reader.executionSnapshot(String(request.worktreeId), request.generation)
         })
@@ -65,9 +77,37 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         const sessionPreflight = await this.executionPreflight({
           worktreeId: String(request.worktreeId),
           generation: request.generation,
-          executionId: request.executionId
+          executionId: bound.executionId
         }).catch(() => undefined)
         return sessionPreflight ? { ...bound, sessionPreflight } : bound
+      }),
+      revoke_execution: operation(input => {
+        const request = selection(input, ['executionId', 'worktreeGeneration', 'expectedRevision', 'status', 'reason'])
+        const status = request.value.status === undefined ? undefined : text(request.value.status)
+        if (status !== undefined && status !== 'REVOKED' && status !== 'CLOSED') throw new Error('INVALID_ARGUMENT')
+        return {
+          ...request,
+          executionId: request.value.executionId !== undefined ? text(request.value.executionId) : undefined,
+          generation: request.value.worktreeGeneration !== undefined ? text(request.value.worktreeGeneration) : undefined,
+          expectedRevision: request.value.expectedRevision !== undefined ? integer(request.value.expectedRevision) : undefined,
+          status: status as 'REVOKED' | 'CLOSED' | undefined,
+          reason: request.value.reason !== undefined ? text(request.value.reason) : undefined
+        }
+      }, async (request, context) => {
+        const service = await this.service(request, context)
+        return service.revokeExecutionActivation({
+          worktreeId: String(request.worktreeId),
+          worktreeGeneration: request.generation,
+          executionId: request.executionId,
+          expectedActivationRevision: request.expectedRevision,
+          status: request.status,
+          reason: request.reason
+        })
+      }),
+      get_execution_context: operation(input => selection(input, []), async (request, context) => {
+        const service = await this.service(request, context)
+        const active = service.getActiveExecutionContext(String(request.worktreeId))
+        return active ?? { activation: null, deliveryContext: null }
       }),
       suggestions: operation(input => {
         const request = selection(input, ['query'])
@@ -117,10 +157,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         const service = await this.service(request, context)
         const authority = this.authority(request, context)
         if (authority.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
-        let anchor: DeliveryAnchor | undefined
-        if (authority.deliveryContext) {
-          anchor = await service.prepareDeliveryContext(authority, authority.deliveryContext, this.observeDelivery(request, service, context))
-        }
+        const { anchor } = await service.resolveExecutionContext(authority, undefined, this.observeDelivery(request, service, context))
         const receipt = service.publish(request.rawMarkdown, request.fields, authority, anchor)
         const artifact = service.get(receipt.artifactId)!
         let sessionCoverage: object | undefined
