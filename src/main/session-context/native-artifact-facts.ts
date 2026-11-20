@@ -1,3 +1,4 @@
+import { authenticatedSessionWitness, deliveryAnchor } from '../../shared/types/delivery-context-types'
 import { publicationReceiptDigest, publicationRequestDigest, type PublicationReceipt, type PublicationRequest } from '../../shared/types/publication-provenance-types'
 
 export const nativeArtifactTools = {
@@ -40,10 +41,12 @@ export function nativeArtifactFact(payload: Record<string, unknown>, repositoryI
   if (result.success !== true || typeof result.replayed !== 'boolean' || !object(result.publicationReceipt)) return fact
   const receipt = result.publicationReceipt
   const { digest, ...body } = receipt
-  if (Object.keys(receipt).some(key => !['schemaVersion','receiptId','repositoryId','artifactId','revision','contentHash','requestDigest','action','digest'].includes(key)) ||
+  if (Object.keys(receipt).some(key => !['schemaVersion','receiptId','repositoryId','artifactId','revision','contentHash','requestDigest','action','deliveryContext','sessionWitness','digest'].includes(key)) ||
     receipt.schemaVersion !== 1 || typeof receipt.receiptId !== 'string' || !/^publication-[a-f0-9-]{36}$/.test(receipt.receiptId) || receipt.repositoryId !== repositoryId ||
     !artifactId(receipt.artifactId) || !Number.isSafeInteger(receipt.revision) || Number(receipt.revision) < 1 || !hash(receipt.contentHash) || !hash(digest) ||
     receipt.action !== action || receipt.requestDigest !== requestDigest || result.artifactId !== receipt.artifactId || result.revision !== receipt.revision ||
+    (receipt.deliveryContext !== undefined && !deliveryAnchor.safeParse(receipt.deliveryContext).success) ||
+    (receipt.sessionWitness !== undefined && !authenticatedSessionWitness.safeParse(receipt.sessionWitness).success) ||
     action === 'UPDATE' && (input.artifactId !== receipt.artifactId || Number(input.expectedRevision) + 1 !== receipt.revision) ||
     publicationReceiptDigest(body as unknown as Omit<PublicationReceipt, 'digest'>) !== digest) return fact
   return { ...fact, outcome: 'SUCCESS', receipt: { receiptId: receipt.receiptId, artifactId: receipt.artifactId, revision: Number(receipt.revision), digest, replayed: result.replayed } }

@@ -9,6 +9,10 @@ import { captureValidationSource, validationSourceFingerprint } from '../validat
 import type { ValidationLedger } from './validation-ledger'
 import type { RecordProofInput, ValidationProof } from './validation-ledger-types'
 import { receiptDigest } from '../../shared/validation/test-output-receipt.cjs'
+import { authenticatedSessionWitness, deliveryContextRequest, sameDeliveryRequest, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
+import { authorizeArtifactAgent, authenticatedAgentPrincipal } from '../continuum/agent-authority'
+import { GitBranchInventory } from '../git-operations/git-branch-inventory'
+import type { LocalRequestContext } from '../local-agent-channel/local-channel-types'
 
 const hash = z.string().regex(/^[a-f0-9]{64}$/)
 const selection = z.object({ repositoryId: z.string().min(1), worktreeId: hash, generation: hash })
@@ -41,7 +45,7 @@ const schema = z.object({ version: z.literal(1), id: z.string().uuid(), digest: 
   finishedAt: z.string().datetime(), durationMs: z.number().int().nonnegative(), exitCode: z.number().int().nullable(), signal: z.string().nullable().optional(),
   state: z.string(), processState: z.string(), validation: z.object({ state: z.string(), runs: z.array(counts).max(100).optional() }).passthrough(),
   acceptance: acceptanceSchema.optional(),
-  ledger: z.object({ association, identity: selection.nullable(), before: source.nullable(), after: source.nullable() }).strict() }).passthrough()
+  ledger: z.object({ association, identity: selection.nullable(), before: source.nullable(), after: source.nullable(), deliveryContext: deliveryContextRequest.optional() }).strict() }).passthrough()
 
 async function readReceipt(root: string, id: string): Promise<z.infer<typeof schema>> {
   let directory = root
@@ -81,7 +85,7 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       const assertCurrent = () => { if (!current()) throw new Error('PROJECT_CONTEXT_CHANGED') }
       const git = new GitService()
       const registry = new GitWorktreeRegistry(active.repositoryPath, git, { repositoryId: active.repositoryId, isActive: current })
-      return { active, assertCurrent, git, registry }
+      return { active, current, assertCurrent, git, registry }
     }
     const resolveTree = async (cwd: string, current: ReturnType<typeof scope>) => {
       const absolute = resolve(cwd)
@@ -117,9 +121,9 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         throw error
       }
     }
-    const receiptRequest = target.extend({ receiptId: z.string().uuid(), digest: hash.optional(), association: association.optional() }).strict()
-    const prepareReceipt = async (request: z.infer<typeof receiptRequest>, connected: () => boolean) => {
-      const { tree, assertCurrent } = await select(request, connected)
+    const receiptRequest = target.extend({ receiptId: z.string().uuid(), digest: hash.optional(), association: association.optional(), deliveryContext: deliveryContextRequest.optional(), sessionWitness: authenticatedSessionWitness.optional() }).strict()
+    const prepareReceipt = async (request: z.infer<typeof receiptRequest>, context: LocalRequestContext, isLookup = false) => {
+      const { active, current, git, registry, tree, assertCurrent } = await select(request, context.connected)
       const receipt = await readReceipt(await realpath(tree.path), request.receiptId)
       if (request.digest && request.digest !== receipt.digest) throw new Error('RECEIPT_CHANGED')
       if (receipt.id !== request.receiptId || !samePath(resolve(receipt.cwd), resolve(await realpath(tree.path)))) throw new Error('RECEIPT_IDENTITY_MISMATCH')
@@ -129,7 +133,26 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       }
       const declared = request.association ?? receipt.ledger.association
       if (request.association && receipt.ledger.association.evidenceFor.length && JSON.stringify(request.association) !== JSON.stringify(receipt.ledger.association)) throw new Error('RECEIPT_ASSOCIATION_CONFLICT')
+      if (request.deliveryContext && receipt.ledger.deliveryContext && !sameDeliveryRequest(request.deliveryContext, receipt.ledger.deliveryContext)) throw new Error('RECEIPT_ASSOCIATION_CONFLICT')
+      const effectiveDelivery = request.deliveryContext ?? receipt.ledger.deliveryContext
       const before = receipt.ledger.before, after = receipt.ledger.after
+      let anchor: DeliveryAnchor | undefined
+      if (effectiveDelivery && !isLookup) {
+        const continuum = session.getActiveService()
+        if (!continuum) throw new Error('DELIVERY_CONTEXT_INVALID')
+        const authority = authorizeArtifactAgent(
+          context.principal ?? authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', current),
+          request.repositoryId,
+          current,
+          tree.worktreeId
+        )
+        const inventory = new GitBranchInventory(active.repositoryPath, git, registry, { repositoryId: request.repositoryId, isActive: current })
+        anchor = await continuum.prepareDeliveryContext(authority, effectiveDelivery, () => inventory.executionSnapshot(tree.worktreeId, tree.generation))
+        if (anchor.repositoryId !== request.repositoryId || anchor.snapshot.worktreeId !== tree.worktreeId || anchor.snapshot.worktreeGeneration !== tree.generation ||
+          (before && (anchor.snapshot.head !== before.head || anchor.snapshot.repositoryId !== before.repositoryId))) {
+          throw new Error('DELIVERY_CONTEXT_STALE')
+        }
+      }
       const changed = before && after && validationSourceFingerprint(before) !== validationSourceFingerprint(after)
       const tests = ['TARGETED_TEST', 'SUBSYSTEM_TEST', 'E2E'].includes(declared.kind)
       const runs = receipt.validation.runs
@@ -156,15 +179,18 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         ? `; provider=${receipt.acceptance.provider}@${receipt.acceptance.version ?? 'unverified'}; pin=${receipt.acceptance.pin}; outcome=${receipt.acceptance.outcome}`
         : ''
       const input: RecordProofInput = { kind: declared.kind, producer: 'IMPLEMENTER', status,
-        startedAt: receipt.startedAt, finishedAt: receipt.finishedAt, durationMs: receipt.durationMs, scope: declared.scope, evidenceFor: declared.evidenceFor,
+        startedAt: receipt.startedAt, finishedAt: receipt.finishedAt, durationMs: receipt.durationMs, scope: declared.scope,
+        evidenceFor: declared.evidenceFor.length ? declared.evidenceFor : (anchor ? [anchor.planArtifactId] : []),
         sourceFingerprint: before ? validationSourceFingerprint(before) : null,
         summary: `Test Output: ${status}; EXECUTOR_REPORTED; ${changed ? 'SOURCE_CHANGED_DURING_RUN' : before && after ? 'SOURCE_REPORTED' : 'SOURCE_UNAVAILABLE'}${acceptanceSummary}`,
         metrics: { durationMs: receipt.durationMs, ...(sufficient ? { testsPassed: runs!.reduce((n, c) => n + c.passed, 0) } : {}) },
         deduplicationKey: `test-output:${request.repositoryId}:${tree.worktreeId}:${tree.generation}:${receipt.id}`,
         commandProfile: { command: 'test-output', cwd: receipt.cwd, exitCode: receipt.exitCode ?? undefined, ...(before ? { source: before } : {}),
+          ...(anchor ? { deliveryContext: anchor } : {}),
+          ...(request.sessionWitness ? { sessionWitness: request.sessionWitness } : {}),
           receipt: { id: receipt.id, digest: receipt.digest, trust: 'EXECUTOR_REPORTED', association: request.association ? 'POST_RUN_DECLARED' : 'RUN_CONFIGURED',
             ...(receipt.acceptance ? { acceptance: receipt.acceptance } : {}) } } }
-      await select(request, connected)
+      await select(request, context.connected)
       assertCurrent()
       return { input, assertCurrent }
     }
@@ -192,7 +218,7 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         }
       }),
       register: operation(input => receiptRequest.parse(input), async (request, context) => {
-        const { input, assertCurrent } = await prepareReceipt(request, context.connected)
+        const { input, assertCurrent } = await prepareReceipt(request, context, false)
         assertCurrent()
         const proof = ledger.recordReceiptProof(input)
         const confirmed = ledger.getProof(proof.proofId)
@@ -201,14 +227,14 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       }),
       lookup: operation(input => receiptRequest.extend({ digest: hash }).parse(input), async (request, context) => {
         try {
-          const { input, assertCurrent } = await prepareReceipt(request, context.connected)
+          const { input, assertCurrent } = await prepareReceipt(request, context, true)
           assertCurrent()
           const proof = ledger.lookupReceiptProof(input)
           return proof ? persisted(request.receiptId, proof) : { state: 'NOT_FOUND' }
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.message : '')
           if (code === 'RECEIPT_IDENTITY_CONFLICT' || code === 'RECEIPT_ASSOCIATION_CONFLICT') return { state: 'AMBIGUOUS', code }
-          if (['WORKTREE_STALE', 'PROJECT_CONTEXT_CHANGED', 'RECEIPT_CHANGED', 'RECEIPT_IDENTITY_MISMATCH', 'RECEIPT_INTEGRITY_ERROR', 'INVALID_RECEIPT_PATH', 'ENOENT'].includes(code)) return { state: 'SOURCE_CHANGED', code: code === 'ENOENT' ? 'RECEIPT_UNAVAILABLE' : code }
+          if (['WORKTREE_STALE', 'PROJECT_CONTEXT_CHANGED', 'RECEIPT_CHANGED', 'RECEIPT_IDENTITY_MISMATCH', 'RECEIPT_INTEGRITY_ERROR', 'INVALID_RECEIPT_PATH', 'DELIVERY_CONTEXT_STALE', 'ENOENT'].includes(code)) return { state: 'SOURCE_CHANGED', code: code === 'ENOENT' ? 'RECEIPT_UNAVAILABLE' : code }
           return { state: 'UNAVAILABLE' }
         }
       })

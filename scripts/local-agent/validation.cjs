@@ -20,15 +20,15 @@ async function validationConnection(cwd, profile) {
   }
   const identity = await send('resolve', { cwd })
   const selection = { ...identity, cwd }
-  const lookup = (receiptId, digest, association) => send('lookup', { ...selection, receiptId, digest, ...(association ? { association } : {}) })
-  const register = async (receiptId, digest, association) => {
-    try { return await send('register', { ...selection, receiptId, digest, ...(association ? { association } : {}) }) }
+  const lookup = (receiptId, digest, association, deliveryContext) => send('lookup', { ...selection, receiptId, digest, ...(association ? { association } : {}), ...(deliveryContext ? { deliveryContext } : {}) })
+  const register = async (receiptId, digest, association, deliveryContext) => {
+    try { return await send('register', { ...selection, receiptId, digest, ...(association ? { association } : {}), ...(deliveryContext ? { deliveryContext } : {}) }) }
     catch (error) {
       if (error.code !== 'IPC_TIMEOUT' || error.stage !== 'response') throw error
       let recovery
       try {
-        recovery = await lookup(receiptId, digest, association)
-        if (recovery.state === 'NOT_FOUND') recovery = await lookup(receiptId, digest, association)
+        recovery = await lookup(receiptId, digest, association, deliveryContext)
+        if (recovery.state === 'NOT_FOUND') recovery = await lookup(receiptId, digest, association, deliveryContext)
       } catch (lookupError) {
         recovery = { state: 'UNAVAILABLE', diagnostic: publicError(lookupError) }
       }
@@ -100,25 +100,26 @@ function identityConflict(receipt, connection) {
     recorded.generation !== current.generation
 }
 
-async function resolveRegistration(connection, receipt, association) {
+async function resolveRegistration(connection, receipt, association, deliveryContext) {
   const { id, digest } = receipt
+  const effectiveDelivery = deliveryContext || receipt.ledger?.deliveryContext
   if (identityConflict(receipt, connection)) return { state: 'SOURCE_CHANGED', reason: 'RECEIPT_IDENTITY_MISMATCH' }
   try {
-    let result = await connection.lookup(id, digest, association)
-    if (result.state === 'NOT_FOUND') result = await connection.lookup(id, digest, association)
+    let result = await connection.lookup(id, digest, association, effectiveDelivery)
+    if (result.state === 'NOT_FOUND') result = await connection.lookup(id, digest, association, effectiveDelivery)
     if (result.state === 'PERSISTED') return result
-    if (result.state === 'NOT_FOUND') return await connection.register(id, digest, association)
+    if (result.state === 'NOT_FOUND') return await connection.register(id, digest, association, effectiveDelivery)
     const reason = result.code || result.state || 'RECEIPT_LOOKUP_UNAVAILABLE'
     return honestCodes.has(result.state) ? { state: result.state, reason } : { state: 'REGISTRATION_PENDING', reason }
   } catch (error) { return failureRegistration(error) }
 }
 
-async function reconcileReceipt(id, { cwd, connection, association }) {
+async function reconcileReceipt(id, { cwd, connection, association, deliveryContext }) {
   const { file, receipt } = readReceipt(cwd, id)
   if (receipt.registration?.state === 'PERSISTED' && receipt.registration.proofId) {
     return { id, registration: receipt.registration, changed: false }
   }
-  const outcome = await resolveRegistration(connection, receipt, association)
+  const outcome = await resolveRegistration(connection, receipt, association, deliveryContext)
   return { id, registration: persistRegistration(file, receipt, outcome), changed: true }
 }
 
@@ -158,7 +159,7 @@ function pendingReceiptIds(cwd, { limit = 5, cursor, exclude, scanLimit } = {}) 
   return { ids: slice, pending: slice.length + extraPending, ...(nextCursor ? { nextCursor } : {}), ...(partialCoverage ? { partialCoverage: true } : {}) }
 }
 
-async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, cursor, scanLimit, association, connection, exclude } = {}) {
+async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, cursor, scanLimit, association, deliveryContext, connection, exclude } = {}) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw invalid('INVALID_LIMIT')
   if (scanLimit !== undefined && (!Number.isSafeInteger(scanLimit) || scanLimit < 1)) throw invalid('INVALID_LIMIT')
   if (id) readReceipt(cwd, id)
@@ -168,7 +169,7 @@ async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, 
   const active = connection || await validationConnection(cwd, profile)
   const reconciled = []
   for (const receiptId of selected.ids) {
-    const outcome = await reconcileReceipt(receiptId, { cwd, connection: active, association })
+    const outcome = await reconcileReceipt(receiptId, { cwd, connection: active, association, deliveryContext })
     const reg = outcome.registration
     reconciled.push({
       id: receiptId,
@@ -182,13 +183,14 @@ async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, 
   return { reconciled, remaining, ...tail }
 }
 
-async function registerReceipt(id, { cwd = process.cwd(), profile, association } = {}) {
+async function registerReceipt(id, { cwd = process.cwd(), profile, association, deliveryContext } = {}) {
   const { file, receipt } = readReceipt(cwd, id)
   const connection = await validationConnection(cwd, profile)
   if (identityConflict(receipt, connection)) throw invalid('RECEIPT_IDENTITY_MISMATCH')
-  let result = await connection.lookup(id, receipt.digest, association)
-  if (result.state === 'NOT_FOUND') result = await connection.lookup(id, receipt.digest, association)
-  if (result.state === 'NOT_FOUND') result = await connection.register(id, receipt.digest, association)
+  const effectiveDelivery = deliveryContext || receipt.ledger?.deliveryContext
+  let result = await connection.lookup(id, receipt.digest, association, effectiveDelivery)
+  if (result.state === 'NOT_FOUND') result = await connection.lookup(id, receipt.digest, association, effectiveDelivery)
+  if (result.state === 'NOT_FOUND') result = await connection.register(id, receipt.digest, association, effectiveDelivery)
   if (result.state === 'PERSISTED' || result.state === 'REGISTRATION_PENDING') {
     if (receipt.registration?.state !== 'PERSISTED') persistRegistration(file, receipt, result)
     return result

@@ -1,5 +1,7 @@
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { ValidationLedger } from './validation-ledger'
+import type { AgentAuthority } from '../continuum/agent-authority'
+import { deliveryAnchor, sameDeliveryRequest, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
 import type {
   ListProofsFilter,
   ProofFreshness,
@@ -188,11 +190,24 @@ export async function executeGetValidationProof(
 
 export function executeRecordValidationProof(
   ledger: ValidationLedger,
-  args: unknown
+  args: unknown,
+  authority?: AgentAuthority,
+  preparedAnchor?: DeliveryAnchor
 ): McpToolResult {
   const values = validateArgs(args)
   if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
-  if (values.commandProfile && typeof values.commandProfile === 'object' && ('checkout' in values.commandProfile || 'source' in values.commandProfile)) return err('INVALID_ARGUMENT: Checkout provenance is issued only by Validation Execution')
+  if (values.commandProfile && typeof values.commandProfile === 'object' && ['checkout', 'source', 'deliveryContext', 'sessionWitness'].some(k => k in (values.commandProfile as object))) return err('INVALID_ARGUMENT: Checkout provenance is issued only by Validation Execution')
+  if (authority?.deliveryContextError) return err('DELIVERY_CONTEXT_INVALID')
+  let verifiedAnchor: DeliveryAnchor | undefined
+  if (preparedAnchor !== undefined) {
+    const parsed = deliveryAnchor.safeParse(preparedAnchor)
+    if (!parsed.success) return err('DELIVERY_CONTEXT_INVALID')
+    if (authority?.deliveryContext && !sameDeliveryRequest(parsed.data, authority.deliveryContext)) return err('DELIVERY_CONTEXT_CONFLICT')
+    if (authority?.worktreeId && parsed.data.snapshot.worktreeId !== authority.worktreeId) return err('DELIVERY_CONTEXT_INVALID')
+    verifiedAnchor = parsed.data
+  } else if (authority?.deliveryContext) {
+    return err('DELIVERY_CONTEXT_INVALID')
+  }
 
   const required = ['kind', 'producer', 'status', 'startedAt', 'finishedAt', 'durationMs', 'scope', 'summary']
   for (const field of required) {
@@ -200,6 +215,11 @@ export function executeRecordValidationProof(
   }
 
   try {
+    const explicitEvidence = values.evidenceFor as string[] | undefined
+    const baseProfile = (values.commandProfile as RecordProofInput['commandProfile']) ?? null
+    const commandProfile: RecordProofInput['commandProfile'] = verifiedAnchor || authority?.sessionWitness
+      ? { ...(baseProfile ?? { command: 'record_validation_proof' }), ...(verifiedAnchor ? { deliveryContext: verifiedAnchor } : {}), ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
+      : baseProfile
     const input: RecordProofInput = {
       kind: values.kind as RecordProofInput['kind'],
       producer: values.producer as RecordProofInput['producer'],
@@ -212,8 +232,8 @@ export function executeRecordValidationProof(
       sourceFingerprint: (values.sourceFingerprint as string | undefined) ?? null,
       runtimeInstanceId: (values.runtimeInstanceId as string | undefined) ?? null,
       metrics: (values.metrics as RecordProofInput['metrics']) ?? null,
-      commandProfile: (values.commandProfile as RecordProofInput['commandProfile']) ?? null,
-      evidenceFor: (values.evidenceFor as string[] | undefined) ?? [],
+      commandProfile,
+      evidenceFor: explicitEvidence && explicitEvidence.length > 0 ? explicitEvidence : (verifiedAnchor ? [verifiedAnchor.planArtifactId] : []),
       deduplicationKey: (values.deduplicationKey as string | undefined) ?? null
     }
 

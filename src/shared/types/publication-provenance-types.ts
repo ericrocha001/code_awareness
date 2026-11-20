@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { AuthenticatedSessionWitness, DeliveryAnchor } from './delivery-context-types'
 export interface PublicationReceipt {
   schemaVersion: 1
   receiptId: string
@@ -8,6 +9,8 @@ export interface PublicationReceipt {
   contentHash: string
   requestDigest: string
   action: 'PUBLISH' | 'UPDATE'
+  deliveryContext?: DeliveryAnchor
+  sessionWitness?: AuthenticatedSessionWitness
   digest: string
 }
 export interface PublicationRequest { rawMarkdown: string; name?: string; description?: string; kind?: string; artifactId?: string; expectedRevision?: number }

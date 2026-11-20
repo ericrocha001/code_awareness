@@ -60,10 +60,20 @@ export type ContinuumAgentService = Pick<ContinuumService, 'tags' | 'createTag' 
 export function supportsContinuumAgent(service: unknown): service is ContinuumAgentService {
   return !!service && ['tags', 'createTag', 'assignTag', 'createContextBundle'].every(key => typeof (service as Record<string, unknown>)[key] === 'function')
 }
-export async function executeContinuumAgent(service: ContinuumAgentService, operation: string, input: unknown, connected?: () => boolean, authority?: AgentAuthority) {
+export async function executeContinuumAgent(
+  service: ContinuumAgentService,
+  operation: string,
+  input: unknown,
+  connected?: () => boolean,
+  authority?: AgentAuthority,
+  observeDelivery?: import('../../shared/types/delivery-context-types').ObserveDelivery
+) {
   const args = parseContinuumAgentRequest(operation, input)
   const readOnly = operation === 'list_continuum_tags' || (operation === 'transition_artifact_lifecycle' && (args as { action: string }).action === 'ASSESS') || (operation === 'create_context_bundle' && (args as { action: string }).action === 'preview')
-  if (!readOnly) assertArtifactAgent(authority, service.repositoryId ?? authority?.repositoryId ?? '')
+  if (!readOnly) {
+    assertArtifactAgent(authority, service.repositoryId ?? authority?.repositoryId ?? '')
+    if (authority?.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
+  }
   if (operation === 'repair_artifact_metadata') {
     if (!service.repairMetadata) throw new Error('CANONICAL_PRODUCER_UNAVAILABLE')
     assertArtifactAgent(authority, authority?.repositoryId ?? '')
@@ -74,7 +84,7 @@ export async function executeContinuumAgent(service: ContinuumAgentService, oper
     if (!service.transitionLifecycle) throw new Error('LIFECYCLE_SERVICE_UNAVAILABLE')
     const request = args as z.infer<typeof schemas.transition_artifact_lifecycle>
     if (request.action === 'TRANSITION') assertArtifactAgent(authority, authority?.repositoryId ?? '')
-    return service.transitionLifecycle(request, connected, authority)
+    return service.transitionLifecycle(request, connected, authority, observeDelivery)
   }
   if (operation === 'list_continuum_tags') return { tags: service.tags() }
   if (operation === 'create_continuum_tag') return service.createTag(args as z.infer<typeof schemas.create_continuum_tag>)

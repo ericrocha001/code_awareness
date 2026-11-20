@@ -47,7 +47,7 @@ function workDiagnostics(graph: Graph, root: string, selector: ExecutionSelector
     const limited = sourceCoverage.filter(row => scope(row.source) &&
       ['PARTIAL','UNAVAILABLE','UNSUPPORTED','NETWORK_NOT_AUTHORIZED','CONFLICT'].includes(row.status))
     return [...(graph.bounded ? ['GRAPH_LIMIT_REACHED'] : []), ...(!allowed ? ['GATE_REQUIRED'] : []),
-      ...limited.map(row => row.source + '_' + row.status)]
+      ...limited.flatMap(row => [(row as any).reasonCode ? `${row.source}_${(row as any).reasonCode}` : null, row.source + '_' + row.status].filter(Boolean) as string[])]
   }
   const workCoverage = coverageFor(source => ['CONTINUUM','GITHUB','DELIVERY_GIT','DELIVERY_PR'].includes(source))
   const causalCoverage = coverageFor(source => source.startsWith('NATIVE_') || selector.type === 'PR' && source === 'GITHUB')
@@ -79,7 +79,7 @@ function workDiagnostics(graph: Graph, root: string, selector: ExecutionSelector
   }))
   if (!appropriate || !commits.size) causalCoverage.push('COMMIT_SCOPE_NOT_OBSERVED')
   const causalSession = verified.length ? { state: 'VERIFIED_CAUSAL', evidenceRefs: [...new Set(verified.map(edge => edge.evidenceRef))].sort().slice(0, 6) }
-    : { state: causalCoverage.length ? 'UNRESOLVED' : contextual ? 'CONTEXTUAL_ONLY' : 'NOT_OBSERVED_IN_SNAPSHOT', nextStep: expand }
+    : { state: causalCoverage.length ? 'UNRESOLVED' : contextual ? 'CONTEXTUAL_ONLY' : 'NOT_OBSERVED_IN_SNAPSHOT', ...(causalCoverage.length ? { reason: causalCoverage[0] } : {}), nextStep: expand }
   return { workLink, causalSession, relevantCoverage: {
     workLink: { state: workCoverage.length ? 'PARTIAL' : 'SELECTED_SCOPE', reasons: workCoverage },
     causalSession: { state: causalCoverage.length ? 'PARTIAL' : 'SELECTED_SCOPE', reasons: causalCoverage }

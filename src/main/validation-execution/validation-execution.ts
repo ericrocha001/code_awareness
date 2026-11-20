@@ -41,10 +41,14 @@ export interface StartValidationInput {
   targets?: string[]
   producer: ProofProducer
   evidenceFor?: string[]
+  deliveryContext?: import('../../shared/types/delivery-context-types').DeliveryAnchor
+  sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
 }
 
 interface ActiveRun {
   source?: ValidationSource
+  deliveryContext?: import('../../shared/types/delivery-context-types').DeliveryAnchor
+  sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
   completion?: Promise<void>
   proofDeduplicationKey: string
   publicRun: ValidationRun
@@ -126,13 +130,15 @@ export class ValidationExecution {
     })
     const active: ActiveRun = {
       source,
+      ...(input.deliveryContext ? { deliveryContext: input.deliveryContext } : {}),
+      ...(input.sessionWitness ? { sessionWitness: input.sessionWitness } : {}),
       proofDeduplicationKey: this.checkout ? `${runId}:${randomUUID()}` : runId,
       publicRun,
       profile: resolved.profile,
       targets: resolved.targets,
       command: resolved.command,
       producer: input.producer,
-      evidenceFor: input.evidenceFor ?? [],
+      evidenceFor: input.evidenceFor?.length ? input.evidenceFor : (input.deliveryContext ? [input.deliveryContext.planArtifactId] : []),
       startFingerprint: this.checkout?.startFingerprint ?? validationSourceFingerprint(source!),
       child,
       timeout: setTimeout(() => this.finish(active, 'ERROR', undefined, 'VALIDATION_TIMEOUT'), resolved.profile.timeoutMs),
@@ -219,7 +225,7 @@ export class ValidationExecution {
         sourceFingerprint: active.startFingerprint,
         runtimeInstanceId: this.runtimeIdentity.getInstanceId(),
         summary: finalDiagnostic ? `${summary}: ${finalDiagnostic}` : summary,
-        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode, ...(active.source ? { source: active.source } : {}), ...(this.checkout ? { checkout: { ...this.checkout.binding, issuer: 'VALIDATION_EXECUTION' as const, runId: active.publicRun.runId } } : {}) },
+        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode, ...(active.source ? { source: active.source } : {}), ...(this.checkout ? { checkout: { ...this.checkout.binding, issuer: 'VALIDATION_EXECUTION' as const, runId: active.publicRun.runId } } : {}), ...(active.deliveryContext ? { deliveryContext: active.deliveryContext } : {}), ...(active.sessionWitness ? { sessionWitness: active.sessionWitness } : {}) },
         evidenceFor: active.evidenceFor,
         deduplicationKey: active.proofDeduplicationKey
       })

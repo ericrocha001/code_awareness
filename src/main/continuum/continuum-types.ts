@@ -109,8 +109,9 @@ export interface IArtifactStructureReader {
 }
 export interface IContinuumService extends IArtifactReader {
   prepareDeliveryContext?: import('./continuum-service').ContinuumService['prepareDeliveryContext']
+  publicationDeliveryPage?: import('./continuum-service').ContinuumService['publicationDeliveryPage']
   readonly repositoryId?: string
   updateAgent?: import('./continuum-service').ContinuumService['updateAgent']
-  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: import('./agent-authority').AgentAuthority): ArtifactReceipt
+  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: import('./agent-authority').AgentAuthority, anchor?: import('../../shared/types/delivery-context-types').DeliveryAnchor): ArtifactReceipt
   update(artifactId: string, expectedRevision: number, rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt
 }

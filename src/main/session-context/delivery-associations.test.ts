@@ -281,3 +281,31 @@ it('keeps a binding on a shared branch contextual and rejects a delivery observa
   await expect(operations.deliverySnapshot()).rejects.toThrow('DELIVERY_CONTEXT_STALE')
   expect(f.service.get(f.binding.artifactId)?.provenance.executionBranchBinding).toBe(true)
 }, 60000)
+
+it('returns deliveryContext from bindExecutionBranch and projects Continuum publications and Ledger proofs with delivery anchors', async () => {
+  const f = await fixture()
+  expect(f.binding).toMatchObject({
+    planArtifactId: f.plan.artifactId,
+    planRevision: 1,
+    deliveryContext: f.request
+  })
+  const anchor = await f.prepare()
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation.db')); cleanup.push(async () => ledger.close())
+  const published = f.service.publish('---\nname: Execution Note\ndescription: Linked publication\nkind: TECHNICAL_SPEC\n---\nBody', {}, f.authority, anchor)
+  expect(published.publicationReceipt?.deliveryContext).toEqual(anchor)
+  expect(f.service.get(published.artifactId)?.metadata).not.toHaveProperty('deliveryContext')
+  expect(f.service.publicationDeliveryPage().observations).toMatchObject([{ operation: 'PUBLISH_ARTIFACT', artifactId: published.artifactId, artifactRevision: 1, anchor }])
+  const proof = ledger.recordProof({
+    kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED', startedAt: '2026-11-19T00:00:00Z', finishedAt: '2026-11-19T00:00:01Z',
+    durationMs: 100, scope: ['unit'], summary: 'ok', evidenceFor: [f.plan.artifactId],
+    commandProfile: { command: 'vitest', deliveryContext: anchor }
+  })
+  const read = registrySources({ repositoryId: 'fixture', root: f.root, continuum: () => f.service, ledger, github: { commitPullRequests: async () => [], getPullRequest: async () => ({}) as any, pullRequestCommits: async () => ({}) as any } as any, networkAllowed: () => false, assertCurrent: () => {} })
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+  const graph = sessions.registry.contextGraph({ kind: 'ARTIFACT', id: f.plan.artifactId + ':' + f.plan.revision }, undefined, 3)
+  expect(graph.edges).toEqual(expect.arrayContaining([
+    expect.objectContaining({ evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: published.artifactId + ':1' }),
+    expect.objectContaining({ evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: proof.proofId })
+  ]))
+}, 60000)

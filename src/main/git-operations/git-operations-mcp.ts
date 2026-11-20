@@ -3,7 +3,10 @@ import { GitOperationsError, type GitOperationsService, type BranchRequest, type
 import { isReceiptedGitMutation } from './git-operation-receipts'
 import { gitGuidance, operationalFailure } from '../mcp/operational-guidance'
 
-import { DELIVERY_CONTEXT_SCHEMA, deliveryContextRequest, type PrepareDelivery } from '../../shared/types/delivery-context-types'
+import { DELIVERY_CONTEXT_SCHEMA, deliveryContextRequest, resolveEffectiveDeliveryContext, type DeliveryAnchor, type DeliveryContextRequest } from '../../shared/types/delivery-context-types'
+import type { AgentAuthority } from '../continuum/agent-authority'
+
+export type PrepareScopedDelivery = (request: DeliveryContextRequest, worktreeId?: string) => Promise<DeliveryAnchor>
 
 const string = { type: 'string', minLength: 1 }
 const expectedHead = { type: ['string', 'null'], pattern: '^[a-f0-9]{40,64}$' }
@@ -70,7 +73,7 @@ function validate(schema: Record<string, any>, value: unknown): boolean {
   return false
 }
 
-export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareDelivery): Promise<McpToolResult> {
+export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareScopedDelivery, authority?: AgentAuthority): Promise<McpToolResult> {
   const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
   if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   const { operationId, ...values } = args as Record<string, unknown>
@@ -80,15 +83,22 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
     if (name === 'integrate_worktree') Object.assign(expectedFields, { APPLY: ['previewId'], PROMOTE: ['previewId', 'integrationWorktreeId', 'proofIds'] })
     const extra = name === 'resolve_worktree_conflict' ? ['path', 'resolution', 'expectedConflictRevision'] : name === 'start_worktree_validation' ? ['profileId'] : name === 'publish_worktree' ? ['branch', 'remote'] : expectedFields[String(values.action)]
     if (!extra || extra.some(key => !Object.prototype.hasOwnProperty.call(values, key)) || ['paths', 'message', 'branch', 'startPoint', 'preservedBranch', 'previewId', 'integrationWorktreeId', 'proofIds', 'remote'].some(key => Object.prototype.hasOwnProperty.call(values, key) && !extra.includes(key))) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+    const resolved = resolveEffectiveDeliveryContext(undefined, authority?.deliveryContext, authority?.deliveryContextError)
+    if (!resolved.ok || (authority?.worktreeId && typeof values.worktreeId === 'string' && authority.worktreeId !== values.worktreeId)) {
+      return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID', ...(!resolved.ok ? { reason: resolved.reason } : { reason: 'WORKTREE_SCOPE_CONFLICT' }) }) }], isError: true }
+    }
+    const worktreeId = typeof values.worktreeId === 'string' ? values.worktreeId : undefined
+    const prepareScoped = resolved.request ? (prepareDelivery ? () => prepareDelivery(resolved.request!, worktreeId) : null) : undefined
+    if (prepareScoped === null) return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID' }) }], isError: true }
     try {
       if (name === 'resolve_worktree_conflict') {
         if (values.resolution === 'CONTENT' ? typeof values.content !== 'string' : Object.prototype.hasOwnProperty.call(values, 'content')) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
         return await service.resolveWorktreeConflict(args as Parameters<GitOperationsService['resolveWorktreeConflict']>[0])
       }
-      if (name === 'start_worktree_validation') return await service.startWorktreeValidation(args as Parameters<GitOperationsService['startWorktreeValidation']>[0])
-      if (name === 'mutate_worktree') return await service.mutateWorktree(args as Parameters<GitOperationsService['mutateWorktree']>[0])
-      if (name === 'integrate_worktree') return await service.integrateWorktree(args as Parameters<GitOperationsService['integrateWorktree']>[0])
-      if (name === 'publish_worktree') return await service.publishWorktree(args as Parameters<GitOperationsService['publishWorktree']>[0])
+      if (name === 'start_worktree_validation') return await service.startWorktreeValidation(args as Parameters<GitOperationsService['startWorktreeValidation']>[0], prepareScoped)
+      if (name === 'mutate_worktree') return await service.mutateWorktree(args as Parameters<GitOperationsService['mutateWorktree']>[0], prepareScoped)
+      if (name === 'integrate_worktree') return await service.integrateWorktree(args as Parameters<GitOperationsService['integrateWorktree']>[0], prepareScoped)
+      if (name === 'publish_worktree') return await service.publishWorktree(args as Parameters<GitOperationsService['publishWorktree']>[0], prepareScoped)
       return await service.manageWorktree(args as Parameters<GitOperationsService['manageWorktree']>[0])
     }
     catch (error) { return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED' }) }], isError: true } }
@@ -100,10 +110,14 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
   if (typeof operationId !== 'string') return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   try {
     const { deliveryContext, ...mutation } = values
-    if (deliveryContext !== undefined && (name !== 'commit_git_changes' || !deliveryContextRequest.safeParse(deliveryContext).success || !prepareDelivery)) return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
+    const resolved = resolveEffectiveDeliveryContext(deliveryContext, authority?.deliveryContext, authority?.deliveryContextError)
+    if (!resolved.ok) return operationalFailure({ code: resolved.reason === 'DELIVERY_CONTEXT_CONFLICT' ? 'DELIVERY_CONTEXT_CONFLICT' : 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
+    if (deliveryContext !== undefined && name !== 'commit_git_changes') return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
+    const useDelivery = name === 'commit_git_changes' ? resolved.request : undefined
+    if (useDelivery && !prepareDelivery) return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
     const mutate = () => dispatchGitOperationsTool(service, name, mutation)
-    return deliveryContext === undefined ? await service.executeReceipted(operationId, name, values, mutate)
-      : await service.executeReceipted(operationId, name, values, mutate, () => prepareDelivery!(deliveryContextRequest.parse(deliveryContext)))
+    return !useDelivery ? await service.executeReceipted(operationId, name, values, mutate)
+      : await service.executeReceipted(operationId, name, values, mutate, () => prepareDelivery!(useDelivery, authority?.worktreeId))
   }
   catch (caught) {
     const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED', 'DELIVERY_CONTEXT_INVALID', 'DELIVERY_CONTEXT_STALE', 'AGENT_UNAUTHORIZED', 'REPOSITORY_MISMATCH'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
