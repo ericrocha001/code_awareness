@@ -1,6 +1,7 @@
 const nativeTestFiles = Object.freeze([
   'src/main/mcp/channel-usage-native.test.ts',
   'src/main/intelligence-center/evidence-evaluation.test.ts',
+  'src/main/intelligence-center/intelligence-projections.test.ts',
   'src/main/session-context/delivery-associations.test.ts',
   'src/main/session-context/github-discovery.test.ts',
   'src/main/session-context/native-artifact-correlation.test.ts',
