@@ -218,6 +218,14 @@ function runHook() {
     if (binding) recordNativeGap(binding.spool, reason, 'READ', explicitEvent ?? 'UNKNOWN')
   }
 
+  const admitSpool = (envelope: ReturnType<typeof normalizeNativeHook>, spool: string, phase: NativeGapPhase, eventType: NativeGap['eventType']) => {
+    const remainingMs = Math.max(50, nativeHookLimits.timeoutMs - 75 - Math.round(performance.now() - tStart))
+    const outcome = spoolNativeHook(envelope, spool, { deadlineMs: Date.now() + remainingMs })
+    if (outcome === 'FULL') recordNativeGap(spool, 'SPOOL_FULL', phase, eventType)
+    else if (outcome === 'PROBE_BUDGET') recordNativeGap(spool, 'SPOOL_PROBE_BUDGET', phase, eventType)
+    else if (outcome === 'CLAIM_CONFLICT') recordNativeGap(spool, 'SPOOL_CLAIM_CONFLICT', phase, eventType)
+  }
+
   let responded = false
   let bytes = 0
   const chunks: Buffer[] = []
@@ -319,7 +327,7 @@ function runHook() {
         const envelope = stampNativeCapture(normalized, binding)
         tStamp = performance.now()
         phase = 'WRITE'
-        if (spoolNativeHook(envelope, binding.spool) === 'FULL') recordNativeGap(binding.spool, 'SPOOL_FULL', phase, eventType)
+        admitSpool(envelope, binding.spool, phase, eventType)
         tSpool = performance.now()
       } else {
         binding = executionBinding()
@@ -335,7 +343,7 @@ function runHook() {
         const envelope = stampNativeCapture(normalizeNativeHook(payload, binding, new Date(), activation ? { activation } : undefined), binding)
         tStamp = performance.now()
         phase = 'WRITE'
-        if (spoolNativeHook(envelope, binding.spool) === 'FULL') recordNativeGap(binding.spool, 'SPOOL_FULL', phase, eventType)
+        admitSpool(envelope, binding.spool, phase, eventType)
         tSpool = performance.now()
       }
       if (process.env.CA_HOOK_TIMING === '1') {

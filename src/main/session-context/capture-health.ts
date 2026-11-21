@@ -39,8 +39,9 @@ export function inspectNativeCaptureHealth(store: SessionStore, root: string, ta
   const discovery = readiness.trust.loadedSource
     ? { state: 'OBSERVED', loadedSource: readiness.trust.loadedSource }
     : { state: 'UNKNOWN', reasonCode: readiness.trust.reasonCode }
+  const causalityBoundary = agent === 'antigravity' ? 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' : 'RECEIPT_CORRELATION_SUPPORTED'
   return { feature: 'session_context', source: 'native', version: 1, repositoryId, ...target, agent, state, reason,
-    nativeCapture: { source: nativeHookSource(agent), independentOfEntire: true, ...diagnostics, readiness, discovery, causality: 'NOT_EVALUATED' } }
+    nativeCapture: { source: nativeHookSource(agent), independentOfEntire: true, ...diagnostics, readiness, discovery, causality: 'NOT_EVALUATED', causalityBoundary } }
 }
 const pathsCache = new Map<string, { base: string; hooks: string[] }>()
 function smallText(path: string): string {

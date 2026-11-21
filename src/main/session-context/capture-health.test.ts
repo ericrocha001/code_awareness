@@ -348,3 +348,36 @@ it('recognizes official conditional Entire Git hooks with absolute paths while k
     hooks: { git: 'HOOK_INCOMPATIBLE' }
   })
 }, 30000)
+
+it('separates Antigravity installation, observed execution, pendingSpoolCount, historical gapCounts and causalityBoundary without erasing history', async () => {
+  const f = fixture()
+  const ag = installFixture(f, 'antigravity')
+  for (let i = 0; i < 13; i++) recordNativeGap(ag.spool, 'SPOOL_FULL', 'WRITE', 'PreToolUse')
+  const start = normalizeNativeHook({ conversationId: 'conv-health', workspacePaths: [f.root], hookEventName: 'SessionStart' }, ag)
+  const pre = normalizeNativeHook({ conversationId: 'conv-health', workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'tc-health', name: 'run_command', args: { CommandLine: 'echo ok' } } }, ag)
+  spoolNativeHook(start, ag.spool)
+  await ingestNativeHooks(f.store().registry, ag, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  spoolNativeHook(pre, ag.spool)
+
+  const adapter = new ChannelMcpAdapter({
+    projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), { inspectCapture: () => { throw new Error('NO_ENTIRE') } }, name, args, () => {}, f.target, [], () => { throw new Error('NO_GIT') }, f.root) }
+  })
+  const result = await adapter.callTool('get_system_health', { feature: 'session_context', source: 'native', agent: 'antigravity', inspectNativeTrust: true })
+  expect(result.isError).toBeFalsy()
+  const body = JSON.parse((result.content[0] as { text: string }).text)
+  expect(body).toMatchObject({
+    source: 'native', agent: 'antigravity', state: 'PARTIAL',
+    nativeCapture: {
+      source: 'ANTIGRAVITY_NATIVE_HOOK',
+      pendingSpoolCount: 1,
+      causality: 'NOT_EVALUATED',
+      causalityBoundary: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS',
+      lastIngestion: { state: 'OBSERVED' },
+      historicalCoverage: { state: 'PARTIAL', count: 13, resolution: 'UNACKNOWLEDGED', gapCounts: { spoolFull: 13, probeBudget: 0, claimConflict: 0 } },
+      pipeline: { accepted: 1, batchesAccepted: 1, recoveredCollisions: 0 },
+      readiness: { installation: { state: 'CONFIGURED', installed: 6 }, execution: { state: 'OBSERVED' } }
+    }
+  })
+  expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(8192)
+}, 20000)

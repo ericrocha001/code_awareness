@@ -79,8 +79,8 @@ export interface IngestNativeHooksOptions {
 }
 
 export async function ingestNativeHooks(registry: CheckpointRegistry, binding: NativeHookBinding, resolveTarget: SessionTargetResolver,
-  assertCurrent: () => void, now = Date.now(), onEvent?: (event: NativeHookEnvelope) => Promise<void>, options?: IngestNativeHooksOptions): Promise<{ state: 'DISABLED' | 'OBSERVED' | 'PARTIAL' | 'READY'; ingested: number; rejected: number; expired: number; deduplicated: number; pending: boolean; deferredByBudget?: boolean }> {
-  const receipt = { state: 'READY' as 'DISABLED' | 'OBSERVED' | 'PARTIAL' | 'READY', ingested: 0, rejected: 0, expired: 0, deduplicated: 0, pending: false, deferredByBudget: false }
+  assertCurrent: () => void, now = Date.now(), onEvent?: (event: NativeHookEnvelope) => Promise<void>, options?: IngestNativeHooksOptions): Promise<{ state: 'DISABLED' | 'OBSERVED' | 'PARTIAL' | 'READY'; ingested: number; rejected: number; expired: number; deduplicated: number; recoveredCollisions: number; batchesAccepted: number; pending: boolean; deferredByBudget?: boolean }> {
+  const receipt = { state: 'READY' as 'DISABLED' | 'OBSERVED' | 'PARTIAL' | 'READY', ingested: 0, rejected: 0, expired: 0, deduplicated: 0, recoveredCollisions: 0, batchesAccepted: 0, pending: false, deferredByBudget: false }
   const admitted: string[] = []
   if (!binding.enabled) return { ...receipt, state: 'DISABLED' }
   if (binding.repositoryId !== registry.repositoryId) throw new Error('REPOSITORY_MISMATCH')
@@ -134,8 +134,13 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
       const batch = nativeObservationBatch(event)
       const existing = registry.source(batch.source)
       registry.applyAll([...(existing ? [] : [batch]), ...windowAttempt(registry, event, existing ? 'deduplicated' : 'accepted')], assertCurrent)
-      if (!existing) admitted.push(batch.revision)
-      else receipt.deduplicated++
+      if (!existing) {
+        admitted.push(batch.revision)
+        const slotMatch = /^(\d+)\.json$/.exec(name)
+        if (slotMatch && Number(slotMatch[1]) !== parseInt(event.eventId.slice(0, 8), 16) % nativeHookLimits.slots) {
+          receipt.recoveredCollisions++
+        }
+      } else receipt.deduplicated++
       await onEvent?.(event)
       const currentSource = binding.provider === 'antigravity' ? `NATIVE_CURRENT:antigravity:${binding.worktreeId}:${binding.generation}` : `NATIVE_CURRENT:${binding.worktreeId}:${binding.generation}`
       const cursor = JSON.stringify({ runtimeId: nativeCaptureRuntimeId, eventId: event.eventId, sessionId: event.sessionId, epoch: event.capture?.epoch })
@@ -148,6 +153,7 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
     }
   }
   receipt.pending = files.length > attempted
+  receipt.batchesAccepted = receipt.ingested > 0 ? 1 : 0
   receipt.deferredByBudget = abortedByBudget
   const diagnostics = persistNativeCapture(registry, binding, receipt, assertCurrent)
   receipt.state = receipt.rejected || receipt.expired || receipt.pending || diagnostics.historicalCoverage.state === 'PARTIAL' ? 'PARTIAL' : receipt.ingested ? 'OBSERVED' : 'READY'

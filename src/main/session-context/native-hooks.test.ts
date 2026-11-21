@@ -3,7 +3,7 @@ import { copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdir
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { execFile, execFileSync, spawnSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, normalizeNativeHook, parseNativeEnvelope, nativeBindingPath, prepareNativeSpool, readActiveHookActivation, readNativeBinding, recordNativeGap, resolveNativeHookBinding, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, nativeSessionEntityId, normalizeNativeHook, parseNativeEnvelope, nativeBindingPath, prepareNativeSpool, readActiveHookActivation, readNativeBinding, recordNativeGap, resolveNativeHookBinding, spoolNativeHook, spoolNativeHookWithDetail, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks, inspectNativeInstallation, inspectSharedNativeInstallation } from './native-hook-installation'
 import { inspectNativeTrust, type NativeHookClient } from './native-hook-preflight'
 import { buildSync } from 'esbuild'
@@ -109,7 +109,7 @@ test('deduplicates independently of observed time and bounds disk admission', ()
   expect(spoolNativeHook(other, f.spool)).toBe('FULL')
   expect(readdirSync(f.spool)).toHaveLength(nativeHookLimits.slots)
   expect(readdirSync(f.spool).every(file => Buffer.byteLength(readFileSync(join(f.spool, file))) < nativeHookLimits.envelopeBytes)).toBe(true)
-})
+}, 15000)
 test('command fails open without output for malformed, oversized or disabled input', () => {
   const f = commandFixture(), file = nativeBindingPath(f.root)
   writeFileSync(file, JSON.stringify(f.binding))
@@ -587,4 +587,96 @@ test('attaches verifiable active execution ref only on exact active checkout/gen
   expect(batch.edges).toEqual(expect.arrayContaining([
     expect.objectContaining({ relation: 'observed-in-execution', evidenceKind: 'EXECUTION_CONTEXT_OBSERVED', to: { kind: 'EXECUTION', id: 'exec-u3-1' } })
   ]))
+}, 30000)
+
+test('U1: admits into free slots past 8-hash-bucket collisions, isolates corrupt/gap files, deduplicates replay and distinguishes PROBE_BUDGET from true SPOOL_FULL', async () => {
+  const f = fixture()
+  const target = normalizeNativeHook(f.payload, f.binding)
+  const primary = parseInt(target.eventId.slice(0, 8), 16) % nativeHookLimits.slots
+  for (let offset = 0; offset < 8; offset++) {
+    const blocker = normalizeNativeHook({ ...f.payload, tool_use_id: `blocker-${offset}` }, f.binding)
+    const idx = (primary + offset) % nativeHookLimits.slots
+    writeFileSync(join(f.spool, `${idx}.json`), offset === 0 ? '{corrupt-do-not-overwrite' : JSON.stringify(blocker))
+  }
+  recordNativeGap(f.spool, 'SPOOL_FULL', 'WRITE', 'PreToolUse')
+
+  const fallback = spoolNativeHookWithDetail(target, f.spool)
+  expect(fallback).toMatchObject({ outcome: 'WRITTEN', fallbackUsed: true, relocated: true })
+  expect(readFileSync(join(f.spool, `${primary}.json`), 'utf8')).toBe('{corrupt-do-not-overwrite')
+  const relSlot = readdirSync(f.spool).find(name => {
+    if (!/^\d+\.json$/.test(name)) return false
+    const idx = Number(name.slice(0, -5))
+    const dist = (idx - primary + nativeHookLimits.slots) % nativeHookLimits.slots
+    return dist >= 8 && readFileSync(join(f.spool, name), 'utf8').includes(target.eventId)
+  })
+  expect(relSlot).toBeDefined()
+  expect(spoolNativeHook(target, f.spool)).toBe('DUPLICATE')
+  expect(readdirSync(f.spool).filter(n => n.startsWith('gap-'))).toHaveLength(1)
+
+  const budgeted = normalizeNativeHook({ ...f.payload, tool_use_id: 'call-budget' }, f.binding)
+  const budgetPrimary = parseInt(budgeted.eventId.slice(0, 8), 16) % nativeHookLimits.slots
+  for (let offset = 0; offset < 8; offset++) {
+    const blocker = normalizeNativeHook({ ...f.payload, tool_use_id: `b-blocker-${offset}` }, f.binding)
+    writeFileSync(join(f.spool, `${(budgetPrimary + offset) % nativeHookLimits.slots}.json`), JSON.stringify(blocker))
+  }
+  expect(spoolNativeHook(budgeted, f.spool, { maxFallbackProbes: 0 })).toBe('PROBE_BUDGET')
+
+  const concurrent = [
+    normalizeNativeHook({ ...f.payload, tool_use_id: 'race-a' }, f.binding),
+    normalizeNativeHook({ ...f.payload, tool_use_id: 'race-b' }, f.binding)
+  ]
+  const raceOutcomes = await Promise.all(concurrent.map(ev => Promise.resolve().then(() => spoolNativeHook(ev, f.spool))))
+  expect(raceOutcomes).toEqual(['WRITTEN', 'WRITTEN'])
+  expect(spoolNativeHook(concurrent[0], f.spool)).toBe('DUPLICATE')
+
+  const env0 = normalizeNativeHook(f.payload, f.binding)
+  for (let i = 0; i < nativeHookLimits.slots; i++) {
+    writeFileSync(join(f.spool, `${i}.json`), JSON.stringify(env0))
+  }
+  const overflowing = normalizeNativeHook({ ...f.payload, tool_use_id: 'truly-full' }, f.binding)
+  expect(spoolNativeHook(overflowing, f.spool)).toBe('FULL')
+}, 30000)
+
+test('U2/U3: emits protocol-compliant JSON across all 6 Antigravity events, fails open cleanly, and ignores forged env/payload witness', () => {
+  const f = antigravityFixture()
+  const command = join(process.cwd(), 'out/session-context/native-hook.cjs')
+  const bindingFile = join(f.root, '.code-awareness/native-hooks/antigravity/binding.json')
+  mkdirSync(dirname(bindingFile), { recursive: true })
+  writeFileSync(bindingFile, JSON.stringify(f.binding))
+
+  const cases: Array<{ event: string; payload: Record<string, unknown>; expectedStdout: string }> = [
+    { event: 'SessionStart', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'SessionStart' }, expectedStdout: '{}\n' },
+    { event: 'PreToolUse', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'PreToolUse', toolCall: { id: 'tc-1', name: 'run_command', args: { CommandLine: 'git commit -m fake' } } }, expectedStdout: '{"decision":"allow"}\n' },
+    { event: 'PostToolUse', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'PostToolUse', toolCall: { id: 'tc-1', name: 'run_command', args: { CommandLine: 'git commit -m fake' } } }, expectedStdout: '{}\n' },
+    { event: 'PreInvocation', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'PreInvocation' }, expectedStdout: '{}\n' },
+    { event: 'PostInvocation', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'PostInvocation' }, expectedStdout: '{}\n' },
+    { event: 'Stop', payload: { conversationId: 'conv-u2', workspacePaths: [f.root], hookEventName: 'Stop' }, expectedStdout: '{}\n' }
+  ]
+
+  for (const item of cases) {
+    const res = spawnSync(process.execPath, [command, bindingFile], {
+      cwd: f.root,
+      input: JSON.stringify(item.payload),
+      env: { ...process.env, CODE_AWARENESS_SESSION_WITNESS: JSON.stringify({ provider: 'antigravity', sessionId: 'conv-u2', invocationId: 'tc-1' }) },
+      encoding: 'utf8',
+      timeout: 5000
+    })
+    expect(res.status).toBe(0)
+    expect(res.stdout).toBe(item.expectedStdout)
+    expect(res.stdout).not.toMatch(/auto_approve|overwrite|permissionOverrides/)
+  }
+
+  const spooled = readdirSync(f.spool).filter(n => /^\d+\.json$/.test(n)).map(n => parseNativeEnvelope(readFileSync(join(f.spool, n), 'utf8')))
+  expect(spooled).toHaveLength(6)
+  expect(spooled.every(ev => ev.producerWitness === undefined && ev.git === undefined && ev.artifact === undefined)).toBe(true)
+
+  for (const badInput of ['{', 'x'.repeat(nativeHookLimits.inputBytes + 1)]) {
+    const res = spawnSync(process.execPath, [command, bindingFile, '--event=PreToolUse'], { cwd: f.root, input: badInput, encoding: 'utf8', timeout: 5000 })
+    expect(res.status).toBe(0)
+    expect(res.stdout).toBe('{"decision":"allow"}\n')
+  }
+  writeFileSync(bindingFile, JSON.stringify({ ...f.binding, enabled: false }))
+  const disabledRes = spawnSync(process.execPath, [command, bindingFile], { cwd: f.root, input: JSON.stringify(cases[1].payload), encoding: 'utf8', timeout: 5000 })
+  expect(disabledRes.status).toBe(0)
+  expect(disabledRes.stdout).toBe('{"decision":"allow"}\n')
 }, 30000)

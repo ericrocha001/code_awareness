@@ -2,7 +2,7 @@ import { existsSync, lstatSync, realpathSync, renameSync, unlinkSync, writeFileS
 import { join, resolve } from 'node:path'
 import type { CheckpointRegistry } from './checkpoint-registry'
 import { receiptDigest } from '../../shared/validation/test-output-receipt.cjs'
-import { boundedFile, nativeDigest, nativeGapReasons, nativeGitIdentity, nativeHookEvents, nativeHookProviders, readNativeBinding, type NativeGap, type NativeGapReason, type NativeHookBinding, type NativeHookProvider } from './native-hooks'
+import { boundedFile, nativeDigest, nativeGapReasons, nativeGitIdentity, nativeHookEvents, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeGap, type NativeGapReason, type NativeHookBinding, type NativeHookProvider } from './native-hooks'
 
 interface GapObservation extends Omit<NativeGap, 'phase' | 'observedAt'> { phase: NativeGap['phase'] | 'UNKNOWN'; observedAt: string | null; revision: string }
 interface GapAck { revision: string; proofDigest: string; qualifiedReason: NativeGapReason; verifiedAt: string }
@@ -101,21 +101,37 @@ export function acknowledgeCheckoutGaps(root: string, target: { repositoryId: st
 }
 
 export function persistNativeCapture(registry: CheckpointRegistry, binding: NativeHookBinding,
-  receipt: { ingested: number; rejected: number; expired: number; pending: boolean; deduplicated?: number }, assertCurrent: () => void) {
+  receipt: { ingested: number; rejected: number; expired: number; pending: boolean; deduplicated?: number; recoveredCollisions?: number; batchesAccepted?: number }, assertCurrent: () => void) {
   const history = readNativeGapHistory(binding.spool), source = nativeDiagnosticSource(binding), previous = registry.source(source)
-  let prior: { gapRevision?: string; currentOperationalCapture?: { state: string; observedAt?: string }; pipeline?: { ingress: number; accepted: number; rejected: number; expired: number; deduplicated: number } } = {}
+  let prior: { gapRevision?: string; currentOperationalCapture?: { state: string; observedAt?: string }; pipeline?: { ingress: number; accepted: number; rejected: number; expired: number; deduplicated: number; recoveredCollisions?: number; batchesAccepted?: number } } = {}
   try { prior = JSON.parse(previous?.cursor ?? '{}') } catch {}
   const currentOperationalCapture = receipt.rejected || receipt.expired || receipt.pending ? { state: 'DEGRADED' } : receipt.ingested ? { state: 'OBSERVED', observedAt: new Date().toISOString() } :
     prior.gapRevision === history.revision && prior.currentOperationalCapture ? prior.currentOperationalCapture : { state: history.entries.length ? 'DEGRADED' : 'UNOBSERVED' }
+  const countReason = (reason: NativeGapReason) => history.entries.filter(entry => entry.reasonCode === reason).length
+  const gapCounts = {
+    spoolFull: countReason('SPOOL_FULL'),
+    probeBudget: countReason('SPOOL_PROBE_BUDGET'),
+    claimConflict: countReason('SPOOL_CLAIM_CONFLICT'),
+    ioOrClaim: countReason('IO_FAILURE') + countReason('UNSAFE_SPOOL') + countReason('READ_FAILURE'),
+    inputLimit: countReason('INPUT_LIMIT'),
+    envelopeLimit: countReason('ENVELOPE_LIMIT'),
+    timeout: countReason('TIMEOUT'),
+    eventExpired: countReason('EVENT_EXPIRED')
+  }
   const historicalCoverage = { state: history.entries.length ? 'PARTIAL' : 'NO_GAPS_OBSERVED', revision: history.revision,
     count: history.entries.length, countCoverage: history.overflow ? 'LOWER_BOUND' : 'RETAINED_RECEIPTS', acknowledgedCount: history.acknowledgements.length,
     resolution: history.entries.length && history.acknowledgements.length === history.entries.length ? 'ACKNOWLEDGED' : history.entries.length ? 'UNACKNOWLEDGED' : 'NOT_APPLICABLE',
-    recoveredEvents: false, diagnostics: history.entries.slice(-8).map(entry => ({ ...entry, acknowledged: history.acknowledgements.some(ack => ack.revision === entry.revision) })),
+    recoveredEvents: false, gapCounts, diagnostics: history.entries.slice(-8).map(entry => ({ ...entry, acknowledged: history.acknowledgements.some(ack => ack.revision === entry.revision) })),
     omittedDiagnostics: Math.max(0, history.entries.length - 8) }
-  const previousCounts = prior.pipeline ?? { ingress: 0, accepted: 0, rejected: 0, expired: 0, deduplicated: 0 }
+  const previousCounts = prior.pipeline ?? { ingress: 0, accepted: 0, rejected: 0, expired: 0, deduplicated: 0, recoveredCollisions: 0, batchesAccepted: 0 }
+  const acceptedDelta = receipt.ingested - (receipt.deduplicated ?? 0)
+  const batchDelta = receipt.batchesAccepted ?? (receipt.ingested > 0 ? 1 : 0)
   const pipeline = { ingress: previousCounts.ingress + receipt.ingested + receipt.rejected + receipt.expired,
-    accepted: previousCounts.accepted + receipt.ingested - (receipt.deduplicated ?? 0), rejected: previousCounts.rejected + receipt.rejected,
-    expired: previousCounts.expired + receipt.expired, deduplicated: previousCounts.deduplicated + (receipt.deduplicated ?? 0), pending: receipt.pending }
+    accepted: previousCounts.accepted + acceptedDelta, rejected: previousCounts.rejected + receipt.rejected,
+    expired: previousCounts.expired + receipt.expired, deduplicated: previousCounts.deduplicated + (receipt.deduplicated ?? 0),
+    recoveredCollisions: (previousCounts.recoveredCollisions ?? 0) + (receipt.recoveredCollisions ?? 0),
+    batchesAccepted: (previousCounts.batchesAccepted ?? 0) + batchDelta,
+    pending: receipt.pending }
   const cursor = JSON.stringify({ version: 1, gapRevision: history.revision, currentOperationalCapture, historicalCoverage, pipeline })
   if (previous?.cursor !== cursor) registry.apply({ repositoryId: registry.repositoryId, source, revision: nativeDigest(cursor), status: currentOperationalCapture.state, cursor, edges: [] }, previous?.revision, assertCurrent)
   return { currentOperationalCapture, historicalCoverage }
@@ -136,16 +152,17 @@ export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: st
     if (!binding.enabled) return { currentOperationalCapture: { state: 'DISABLED' } }
     const identity = nativeGitIdentity(root)
     if (identity.directoryIdentity !== binding.directoryIdentity || identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory) return { currentOperationalCapture: { state: 'UNAVAILABLE', reasonCode: 'WORKTREE_STALE' } }
+    const pendingSpoolCount = spoolEventFiles(binding.spool).length
     const value = JSON.parse(registry.source(nativeDiagnosticSource(binding))?.cursor ?? '{}')
     if (summaryTarget && value.version === 1) {
       const history = value.historicalCoverage
       const diagnostics = history.diagnostics.slice(-3)
-      return { lastIngestion: value.currentOperationalCapture, historicalCoverage: {
+      return { lastIngestion: value.currentOperationalCapture, pendingSpoolCount, pipeline: value.pipeline, historicalCoverage: {
         state: history.state, count: history.count, countCoverage: history.countCoverage, acknowledgedCount: history.acknowledgedCount,
-        resolution: history.resolution, recoveredEvents: history.recoveredEvents, diagnostics, omittedDiagnostics: history.count - diagnostics.length
+        resolution: history.resolution, recoveredEvents: history.recoveredEvents, ...(history.gapCounts ? { gapCounts: history.gapCounts } : {}), diagnostics, omittedDiagnostics: history.count - diagnostics.length
       } }
     }
-    return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, historicalCoverage: value.historicalCoverage,
+    return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, pendingSpoolCount, historicalCoverage: value.historicalCoverage,
       pipeline: { ...value.pipeline, expected: null, coverage: 'COVERAGE_UNKNOWN', scope: 'INGEST_ATTEMPTS', countCoverage: 'COMPLETED_ROUNDS', lostBeforeIngest: 'UNKNOWN' },
       windows: registry.nativeCaptureWindows(binding.worktreeId, binding.generation).map(window => ({ ...window,
         integrity: window.gapRevision === value.gapRevision ? 'NO_NEW_GAPS_OBSERVED' : 'PARTIAL',

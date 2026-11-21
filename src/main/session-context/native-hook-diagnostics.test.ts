@@ -6,7 +6,7 @@ import Database from 'better-sqlite3'
 import { receiptDigest } from '../../shared/validation/test-output-receipt.cjs'
 import { SessionStore, sessionStorePath } from './store'
 import { ingestNativeHooks } from './native-hook-ingestion'
-import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, prepareNativeSpool, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { acknowledgeCheckoutGaps, acknowledgeNativeGaps, nativeCaptureDiagnostics, nativeDiagnosticSource, readNativeGapHistory } from './native-hook-diagnostics'
 import { correlateNativeGit } from './native-git-correlation'
 import { GitService } from '../core/git-service'
@@ -166,3 +166,33 @@ test.skipIf(!process.env.NATIVE_GIT_BASELINE_ROOT)('preserves the real 481bf891 
   expect(causal()).toEqual(before)
   expect(await correlateNativeGit(store.registry, binding, invocation, git, () => {})).toBe('VERIFIED')
 }, 30000)
+
+test('separates recovered slot collisions and batchesAccepted from preserved historical SPOOL_FULL and SPOOL_PROBE_BUDGET gaps', async () => {
+  const f = fixture()
+  for (let i = 0; i < 13; i++) recordNativeGap(f.spool, 'SPOOL_FULL', 'WRITE', 'PreToolUse')
+  recordNativeGap(f.spool, 'SPOOL_PROBE_BUDGET', 'WRITE', 'PostToolUse')
+  recordNativeGap(f.spool, 'SPOOL_CLAIM_CONFLICT', 'WRITE', 'PreToolUse')
+
+  const ev = normalizeNativeHook(f.payload, f.binding)
+  const primary = parseInt(ev.eventId.slice(0, 8), 16) % nativeHookLimits.slots
+  const fallbackSlot = (primary + 10) % nativeHookLimits.slots
+  writeFileSync(join(f.spool, `${fallbackSlot}.json`), JSON.stringify(ev))
+
+  const receipt = await f.ingest()
+  expect(receipt).toMatchObject({ ingested: 1, recoveredCollisions: 1, batchesAccepted: 1, pending: false, state: 'PARTIAL' })
+
+  const diag = nativeCaptureDiagnostics(f.store().registry, f.root)
+  expect(diag).toMatchObject({
+    currentOperationalCapture: { state: 'OBSERVED' },
+    pendingSpoolCount: 0,
+    historicalCoverage: {
+      state: 'PARTIAL',
+      count: 15,
+      acknowledgedCount: 0,
+      resolution: 'UNACKNOWLEDGED',
+      gapCounts: { spoolFull: 13, probeBudget: 1, claimConflict: 1 }
+    },
+    pipeline: { accepted: 1, rejected: 0, recoveredCollisions: 1, batchesAccepted: 1, pending: false }
+  })
+  expect(JSON.stringify(diag).length).toBeLessThan(4096)
+}, 20000)
