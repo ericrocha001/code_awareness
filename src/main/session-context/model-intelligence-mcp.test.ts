@@ -137,6 +137,33 @@ describe('Model Intelligence Q26 semantics, non-truncating aggregation & public 
       coverageStatus: (idx === 200 ? 'PARTIAL' : 'COMPLETE') as 'PARTIAL' | 'COMPLETE'
     }))
     store.modelIntelligence.recordFacts(longSessionId, { usageFacts: deltas })
+
+    // (e) 51 scope=call reported facts: first 50 report model A, 51st reports model B
+    const { sessionId: pagedSessionId } = store.ingest({
+      providerSessionId: 'mi-51-calls',
+      providerVersion: '0.13.4',
+      agent: 'claude-code',
+      state: 'ENDED',
+      endedAt: '2026-11-20T18:00:00.000Z',
+      coverage: 'COMPLETE',
+      importState: 'METADATA_ONLY',
+      sourceDigest: digest('mi-51-calls'),
+      sourceBytes: 0
+    }, [])
+    const callFacts51 = Array.from({ length: 51 }, (_, idx) => ({
+      scope: 'call' as const,
+      scopeId: `call:${idx + 1}`,
+      ordinal: idx + 1,
+      sourceSurface: 'entire_transcript_claude_code' as const,
+      sourceVersion: '0.13.4',
+      observability: 'reported' as const,
+      provider: 'anthropic',
+      client: 'claude-code',
+      model: idx < 50 ? 'claude-sonnet-4-6' : 'claude-opus-4-6',
+      effort: 'medium',
+      coverageStatus: 'COMPLETE' as const
+    }))
+    store.modelIntelligence.recordFacts(pagedSessionId, { modelFacts: callFacts51 })
     store.close()
 
     // (d) Reopen readOnly in authorized repo & verify cross-repo rejection
@@ -260,5 +287,47 @@ describe('Model Intelligence Q26 semantics, non-truncating aggregation & public 
     })
     expect(crossRepo.isError).toBe(true)
     expect(crossRepo.data.code).toBe('REPOSITORY_NOT_AUTHORIZED')
+
+    // (e) Multi-page Q26 (51 scope=call facts: 50 model A + 51st model B)
+    const q26Page1 = await mcpCall('inspect_intelligence_evidence', {
+      repositoryId: repoId,
+      questionId: 'Q26',
+      target: { sessionId: pagedSessionId }
+    })
+    expect(q26Page1.isError).toBe(false)
+    expect(q26Page1.data.coverage).toEqual({ model: 'PARTIAL', perCall: 'PARTIAL' })
+    expect(q26Page1.data.evidence.supportState).toBe('PARTIAL')
+    expect(q26Page1.data.evidence.modelSwitchReported).toBe('INDETERMINADO')
+    expect(q26Page1.data.evidence.modelFactsReturned).toBe(25)
+    expect(q26Page1.data.evidence.totalModelFacts).toBe(51)
+    expect(q26Page1.data.evidence.hasMoreModelFacts).toBe(true)
+    expect(q26Page1.data.pagination).toMatchObject({
+      modelFactsReturned: 25,
+      totalModelFacts: 51,
+      hasMoreModelFacts: true
+    })
+    expect(q26Page1.data.deepen?.tool).toBe('inspect_intelligence_evidence')
+
+    // Follow literal deepen selector across pages until call:51 is reached
+    let current = q26Page1
+    let hops = 0
+    while (current.data.pagination?.hasMoreModelFacts && current.data.deepen && hops < 5) {
+      current = await mcpCall(current.data.deepen.tool, current.data.deepen.arguments)
+      expect(current.isError).toBe(false)
+      hops++
+    }
+    expect(hops).toBe(2)
+    expect(current.data.pagination).toMatchObject({
+      modelFactsReturned: 1,
+      totalModelFacts: 51,
+      hasMoreModelFacts: false
+    })
+    expect(current.data.coverage).toEqual({ model: 'SUPPORTED', perCall: 'SUPPORTED' })
+    expect(current.data.evidence.supportState).toBe('SUPPORTED')
+    expect(current.data.evidence.modelSwitchReported).toBe(true)
+    expect(current.data.evidence.reportedSwitchEvidence).toMatchObject([
+      { scopeId: 'call:1', model: 'claude-sonnet-4-6' },
+      { scopeId: 'call:51', model: 'claude-opus-4-6' }
+    ])
   })
 })

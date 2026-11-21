@@ -53,7 +53,7 @@ const fileQuery = z.string().min(1).max(240).transform((value, ctx) => {
 const textQuery = z.string().min(1).max(256).refine(value => Buffer.byteLength(value) <= 256 && !value.includes('\0')).optional()
 const sessionFacets = z.enum(['SEGMENTS', 'TURNS', 'ORIGINS', 'INVOCATIONS', 'ERRORS', 'TOOLS', 'FILES', 'TIMELINE'])
 const facetName = z.enum(['TURNS', 'INVOCATIONS', 'ERRORS', 'TOOLS', 'FILES', 'TIMELINE'])
-const legacySessionDetail = z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: sessionFacets.optional(), facet: facetName.optional(), view: z.enum(['FOCAL', 'LEGACY']).optional() }).strict()
+const legacySessionDetail = z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: sessionFacets.optional(), facet: facetName.optional(), view: z.enum(['FOCAL', 'LEGACY']).optional(), modelFactOffset: z.number().int().min(0).optional() }).strict()
 const legacySessionEvents = z.object({ sessionId: id, expectedRevision: revision.optional(), types: z.array(z.enum(EVENT_TYPES)).min(1).max(9).optional(),
   tool: z.string().min(1).max(80).optional(), status: z.enum(['SUCCESS', 'FAILURE', 'REFUSAL', 'DANGLING', 'UNKNOWN']).optional(), isError: z.boolean().optional(), errorKind: z.string().min(1).max(80).optional(), invocationId: z.string().min(1).max(128).optional(), operation: z.enum(['READ', 'WRITE', 'EXECUTE', 'CALL']).optional(), ordinalFrom: revision.optional(), ordinalTo: revision.optional(), after: date, before: date,
   file: fileQuery, query: textQuery, turnId: z.string().regex(/^T[1-9]\d{0,14}$/).optional(), segmentId: z.string().max(30).regex(/^S[1-9]\d*$/).optional(), limit: z.number().int().min(1).max(15).default(15), cursor }).strict()
@@ -1335,7 +1335,9 @@ export async function executeSessionTool(
             turnCoverage: turns.length ? 'PARTIAL' : 'UNKNOWN' }, turn => turn, 'turns'))
         }
         const map = actualStore.map(row.id, offset, query.limit + 1)
-        const fullModelIntelligence = actualStore.modelIntelligence ? actualStore.modelIntelligence.summarizeSession(row.id) : undefined
+        const fullModelIntelligence = actualStore.modelIntelligence
+          ? actualStore.modelIntelligence.summarizeSession(row.id, { modelFactOffset: query.modelFactOffset })
+          : undefined
         const hasModelIntelligence = !!fullModelIntelligence && (
           fullModelIntelligence.models.length > 0 ||
           fullModelIntelligence.primaryUsage.scope !== 'unavailable' ||

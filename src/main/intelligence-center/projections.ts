@@ -188,18 +188,29 @@ function validateTarget(input: InspectIntelligenceEvidenceInput): {
   }
 }
 
+interface PriorCallAnchor {
+  scopeId: string
+  ordinal: number
+  sourceSurface: string
+  sourceVersion: string
+  observability: string
+  model: string
+  effort?: string
+}
+
 interface CursorPayload {
   v: 1
   scopeDigest: string
   revision: number
   offset: number
+  priorCall?: PriorCallAnchor
 }
 
 function encodeCursor(payload: CursorPayload): string {
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
 }
 
-function decodeCursor(token: string, expectedScopeDigest: string, currentRevision: number): number {
+function parseCursorBase(token: string, expectedScopeDigest: string): CursorPayload {
   let parsed: unknown
   try {
     parsed = JSON.parse(Buffer.from(token, 'base64url').toString('utf8'))
@@ -216,10 +227,15 @@ function decodeCursor(token: string, expectedScopeDigest: string, currentRevisio
   if (c.scopeDigest !== expectedScopeDigest) {
     throw new ProjectionError('CURSOR_SCOPE_MISMATCH')
   }
+  return c as CursorPayload
+}
+
+function decodeCursor(token: string, expectedScopeDigest: string, currentRevision: number): number {
+  const c = parseCursorBase(token, expectedScopeDigest)
   if (c.revision !== currentRevision) {
     throw new ProjectionError('REVISION_CONFLICT', { cursorRevision: c.revision, currentRevision })
   }
-  return c.offset!
+  return c.offset
 }
 
 function paginateItems<T>(
@@ -1087,12 +1103,15 @@ async function buildAcademyProjection(
 async function buildModelProjection(
   ports: EvidenceProjectionPorts,
   input: InspectIntelligenceEvidenceInput,
-  resolvedSession?: ResolvedSessionRef
+  resolvedSession?: ResolvedSessionRef,
+  cursorInfo?: CursorPayload
 ) {
   if (resolvedSession?.sessionId && !input.target.entireSession) {
+    const requestedOffset = cursorInfo?.offset ?? 0
     const inspected = await callSessionPort(ports, 'inspect_agent_session', {
       sessionId: resolvedSession.sessionId,
-      view: 'FOCAL'
+      view: 'FOCAL',
+      ...(requestedOffset > 0 ? { modelFactOffset: requestedOffset } : {})
     })
     const mi = inspected.ok && inspected.data.modelIntelligence && typeof inspected.data.modelIntelligence === 'object'
       ? (inspected.data.modelIntelligence as Record<string, unknown>)
@@ -1125,12 +1144,40 @@ async function buildModelProjection(
         .filter(f => (f.observability === 'reported' || f.observability === 'observed') && typeof f.effort === 'string')
         .map(f => f.effort as string)
     )]
-    const distinctReportedCallModels = [...new Set(reportedCallFacts.map(f => f.model as string))]
+    const modelFactsReturned = typeof mi?.modelFactsReturned === 'number' ? mi.modelFactsReturned : qualifiedFacts.length
+    const totalModelFacts = typeof mi?.totalModelFacts === 'number' ? mi.totalModelFacts : qualifiedFacts.length
+    const modelFactOffset = typeof mi?.modelFactOffset === 'number' ? mi.modelFactOffset : requestedOffset
+    const hasMoreModelFacts = mi?.hasMoreModelFacts === true
+
+    const combinedCallFacts: Array<Record<string, unknown>> = [
+      ...(cursorInfo?.priorCall ? [{
+        scope: 'call',
+        scopeId: cursorInfo.priorCall.scopeId,
+        ordinal: cursorInfo.priorCall.ordinal,
+        sourceSurface: cursorInfo.priorCall.sourceSurface,
+        sourceVersion: cursorInfo.priorCall.sourceVersion,
+        observability: cursorInfo.priorCall.observability,
+        model: cursorInfo.priorCall.model,
+        ...(cursorInfo.priorCall.effort ? { effort: cursorInfo.priorCall.effort } : {})
+      }] : []),
+      ...reportedCallFacts
+    ]
+    const distinctReportedCallModels = [...new Set(combinedCallFacts.map(f => f.model as string))]
+    const firstReportedCall = reportedCallFacts[0]
+    const nextPriorCall: PriorCallAnchor | undefined = cursorInfo?.priorCall ?? (firstReportedCall ? {
+      scopeId: String(firstReportedCall.scopeId),
+      ordinal: Number(firstReportedCall.ordinal ?? 0),
+      sourceSurface: String(firstReportedCall.sourceSurface),
+      sourceVersion: String(firstReportedCall.sourceVersion),
+      observability: String(firstReportedCall.observability),
+      model: String(firstReportedCall.model),
+      ...(typeof firstReportedCall.effort === 'string' ? { effort: firstReportedCall.effort } : {})
+    } : undefined)
 
     if (mi && (qualifiedFacts.length > 0 || models.length > 0 || (primaryUsage && primaryUsage.scope !== 'unavailable'))) {
       const localGaps = new Set<string>(unavailableReasons)
-      if (reportedCallFacts.length === 0) localGaps.add('PER_CALL_MODEL_INDETERMINADO')
-      if (reportedCallFacts.length === 0 && reportedNonCallFacts.length === 0 && requestedFacts.length > 0) {
+      if (reportedCallFacts.length === 0 && !cursorInfo?.priorCall) localGaps.add('PER_CALL_MODEL_INDETERMINADO')
+      if (reportedCallFacts.length === 0 && reportedNonCallFacts.length === 0 && requestedFacts.length > 0 && !cursorInfo?.priorCall) {
         localGaps.add('EFFECTIVE_MODEL_INDETERMINADO')
       }
       if (reportedEfforts.length === 0) {
@@ -1138,23 +1185,48 @@ async function buildModelProjection(
       }
       if (!primaryUsage || primaryUsage.scope === 'unavailable') localGaps.add('TOKEN_USAGE_UNAVAILABLE')
       if (mi.coverageStatus === 'PARTIAL') localGaps.add('USAGE_COVERAGE_PARTIAL')
+      if (hasMoreModelFacts) localGaps.add('MODEL_FACTS_PAGINATED_UNEXHAUSTED')
 
-      const supportState = reportedCallFacts.length > 0 && reportedEfforts.length > 0 && mi.coverageStatus === 'COMPLETE'
-        ? 'SUPPORTED'
-        : reportedCallFacts.length > 0
-          ? 'PARTIAL'
-          : reportedNonCallFacts.length > 0
-            ? 'SESSION_LEVEL_ONLY'
-            : requestedFacts.length > 0
-              ? 'PARTIAL'
-              : 'PARTIAL_PENDING_METADATA'
+      const supportState = hasMoreModelFacts
+        ? 'PARTIAL'
+        : reportedCallFacts.length > 0 && reportedEfforts.length > 0 && mi.coverageStatus === 'COMPLETE'
+          ? 'SUPPORTED'
+          : reportedCallFacts.length > 0
+            ? 'PARTIAL'
+            : reportedNonCallFacts.length > 0
+              ? 'SESSION_LEVEL_ONLY'
+              : requestedFacts.length > 0
+                ? 'PARTIAL'
+                : 'PARTIAL_PENDING_METADATA'
 
       const primaryReportedFact = reportedCallFacts[0] ?? reportedNonCallFacts[0]
-      const reportedModelsAll = [...new Set([...reportedCallFacts, ...reportedNonCallFacts].map(f => f.model as string))]
+      const reportedModelsAll = [...new Set([...combinedCallFacts, ...reportedNonCallFacts].map(f => f.model as string))]
+      const modelSwitchReported: boolean | 'INDETERMINADO' = distinctReportedCallModels.length > 1
+        ? true
+        : hasMoreModelFacts
+          ? 'INDETERMINADO'
+          : false
+
+      const reportedSwitchEvidence = distinctReportedCallModels.length > 1
+        ? distinctReportedCallModels.map(m => {
+            const match = combinedCallFacts.find(f => f.model === m)!
+            return {
+              scopeId: match.scopeId,
+              ordinal: match.ordinal,
+              sourceSurface: match.sourceSurface,
+              model: match.model
+            }
+          })
+        : undefined
 
       return {
         supportState,
         dependencyRefs: ['artifact-fafc5616-794d-4e71-9c9f-238e4750f00d'],
+        modelFactsReturned,
+        totalModelFacts,
+        modelFactOffset,
+        hasMoreModelFacts,
+        ...(nextPriorCall ? { _nextPriorCall: nextPriorCall } : {}),
         persistedModelIntelligence: mi,
         sessionLevelModel: primaryReportedFact
           ? {
@@ -1183,8 +1255,8 @@ async function buildModelProjection(
               }))
             }
           : {}),
-        perCallModels: reportedCallFacts.length > 0
-          ? reportedCallFacts.map(f => ({
+        perCallModels: combinedCallFacts.length > 0
+          ? combinedCallFacts.map(f => ({
               class: 'OBSERVADO',
               observability: String(f.observability).toUpperCase(),
               scope: f.scope,
@@ -1197,8 +1269,9 @@ async function buildModelProjection(
               ...(typeof f.provider === 'string' ? { provider: f.provider } : {})
             }))
           : null,
-        effectivePerCallState: reportedCallFacts.length > 0 ? 'REPORTED' : 'INDETERMINADO',
-        modelSwitchReported: distinctReportedCallModels.length > 1,
+        effectivePerCallState: combinedCallFacts.length > 0 ? (hasMoreModelFacts ? 'PARTIAL' : 'REPORTED') : 'INDETERMINADO',
+        modelSwitchReported,
+        ...(reportedSwitchEvidence ? { reportedSwitchEvidence } : {}),
         reportedUsage: primaryUsage && primaryUsage.scope !== 'unavailable'
           ? {
               class: 'OBSERVADO',
@@ -1463,13 +1536,35 @@ export async function inspectIntelligenceEvidence(
         }
       }
     }
-    const modelProjection = await buildModelProjection(ports, input, resolvedSession)
+    const cursorInfo = input.cursor ? parseCursorBase(input.cursor, scopeDigest) : undefined
+    const modelProjection = await buildModelProjection(ports, input, resolvedSession, cursorInfo)
     const entireSessionRef = 'entireSession' in modelProjection ? modelProjection.entireSession : null
-    const stateRevision = parseInt(digestHex([graphSummary?.revision ?? null, entireSessionRef, modelProjection.sessionLevelModel?.model ?? null]).slice(0, 12), 16) || 1
+    const totalFactsForRev = 'totalModelFacts' in modelProjection ? modelProjection.totalModelFacts : 0
+    const stateRevision = parseInt(
+      digestHex([graphSummary?.revision ?? null, entireSessionRef, resolvedSession?.sessionId ?? null, totalFactsForRev]).slice(0, 12),
+      16
+    ) || 1
     if (input.expectedRevision !== undefined && input.expectedRevision !== stateRevision) {
       throw new ProjectionError('REVISION_CONFLICT', { expectedRevision: input.expectedRevision, currentRevision: stateRevision })
     }
-    if (input.cursor) decodeCursor(input.cursor, scopeDigest, stateRevision)
+    if (cursorInfo && cursorInfo.revision !== stateRevision) {
+      throw new ProjectionError('REVISION_CONFLICT', { cursorRevision: cursorInfo.revision, currentRevision: stateRevision })
+    }
+    const hasMoreModelFacts = 'hasMoreModelFacts' in modelProjection && modelProjection.hasMoreModelFacts === true
+    const modelFactsReturned = 'modelFactsReturned' in modelProjection ? modelProjection.modelFactsReturned : 0
+    const modelFactOffset = 'modelFactOffset' in modelProjection ? modelProjection.modelFactOffset : 0
+    const nextPriorCall = '_nextPriorCall' in modelProjection ? (modelProjection._nextPriorCall as PriorCallAnchor | undefined) : undefined
+    const cleanEvidence = { ...modelProjection } as Record<string, unknown>
+    delete cleanEvidence._nextPriorCall
+    const nextCursor = hasMoreModelFacts
+      ? encodeCursor({
+          v: 1,
+          scopeDigest,
+          revision: stateRevision,
+          offset: modelFactOffset + modelFactsReturned,
+          ...(nextPriorCall ? { priorCall: nextPriorCall } : {})
+        })
+      : undefined
     return {
       catalogVersion: EVIDENCE_EVALUATION_CATALOG_VERSION,
       questionId: 'Q26',
@@ -1478,10 +1573,38 @@ export async function inspectIntelligenceEvidence(
       scope: { repositoryId: ports.repositoryId, target: input.target },
       coverage: {
         model: modelProjection.supportState,
-        perCall: modelProjection.perCallModels ? 'SUPPORTED' : 'INDETERMINADO',
+        perCall: modelProjection.perCallModels ? (hasMoreModelFacts ? 'PARTIAL' : 'SUPPORTED') : 'INDETERMINADO',
         ...(graphSummary ? { graph: graphSummary.coverage } : {})
       },
-      evidence: modelProjection,
+      evidence: cleanEvidence,
+      ...(hasMoreModelFacts && nextCursor
+        ? {
+            pagination: {
+              modelFactsReturned,
+              totalModelFacts: totalFactsForRev,
+              offset: modelFactOffset,
+              hasMoreModelFacts: true,
+              nextCursor
+            },
+            deepen: {
+              tool: 'inspect_intelligence_evidence',
+              arguments: {
+                ...(ports.repositoryId ? { repositoryId: ports.repositoryId } : {}),
+                questionId: 'Q26',
+                target: input.target,
+                cursor: nextCursor,
+                ...(input.includeEntireUsage ? { includeEntireUsage: true } : {})
+              }
+            }
+          }
+        : {
+            pagination: {
+              modelFactsReturned,
+              totalModelFacts: totalFactsForRev,
+              offset: modelFactOffset,
+              hasMoreModelFacts: false
+            }
+          }),
       gaps: modelProjection.gaps
     }
   }
