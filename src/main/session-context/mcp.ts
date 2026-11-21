@@ -291,11 +291,31 @@ function compactModelIntelligence(store: SessionStore, sessionId: string) {
   ) {
     return undefined
   }
+  const reportedModels = [...new Set(
+    summary.qualifiedFacts
+      .filter(f => (f.observability === 'reported' || f.observability === 'observed') && f.model)
+      .map(f => f.model!)
+  )]
+  const requestedModels = [...new Set(
+    summary.qualifiedFacts
+      .filter(f => f.observability === 'requested' && f.model)
+      .map(f => f.model!)
+  )]
+  const authority = reportedModels.length > 0
+    ? (requestedModels.length > 0 ? 'MIXED' : 'REPORTED_OR_OBSERVED')
+    : (requestedModels.length > 0 ? 'REQUESTED_ONLY' : 'UNKNOWN')
   return {
     models: summary.models,
+    ...(reportedModels.length ? { reportedModels } : {}),
+    ...(requestedModels.length ? { requestedModels } : {}),
+    authority,
     ...(summary.efforts.length ? { efforts: summary.efforts } : {}),
     primaryUsage: summary.primaryUsage,
     coverageStatus: summary.coverageStatus,
+    totalModelFacts: summary.totalModelFacts,
+    hasMoreModelFacts: summary.hasMoreModelFacts,
+    totalUsageFacts: summary.totalUsageFacts,
+    hasMoreUsageFacts: summary.hasMoreUsageFacts,
     ...(summary.unavailableReasons.length ? { unavailableReasons: summary.unavailableReasons } : {})
   }
 }

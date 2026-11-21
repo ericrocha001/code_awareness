@@ -1097,6 +1097,9 @@ async function buildModelProjection(
     const mi = inspected.ok && inspected.data.modelIntelligence && typeof inspected.data.modelIntelligence === 'object'
       ? (inspected.data.modelIntelligence as Record<string, unknown>)
       : undefined
+    const qualifiedFacts = Array.isArray(mi?.qualifiedFacts)
+      ? (mi.qualifiedFacts as Array<Record<string, unknown>>).filter(f => f && typeof f === 'object')
+      : []
     const models = Array.isArray(mi?.models) ? mi.models.filter((m): m is string => typeof m === 'string') : []
     const efforts = Array.isArray(mi?.efforts) ? mi.efforts.filter((e): e is string => typeof e === 'string') : []
     const providers = Array.isArray(mi?.providers) ? mi.providers.filter((p): p is string => typeof p === 'string') : []
@@ -1108,31 +1111,94 @@ async function buildModelProjection(
       ? mi.unavailableReasons.filter((r): r is string => typeof r === 'string')
       : []
 
-    if (mi && (models.length > 0 || (primaryUsage && primaryUsage.scope !== 'unavailable'))) {
+    const reportedCallFacts = qualifiedFacts.filter(
+      f => f.scope === 'call' && (f.observability === 'reported' || f.observability === 'observed') && typeof f.model === 'string'
+    )
+    const reportedNonCallFacts = qualifiedFacts.filter(
+      f => f.scope !== 'call' && (f.observability === 'reported' || f.observability === 'observed') && typeof f.model === 'string'
+    )
+    const requestedFacts = qualifiedFacts.filter(
+      f => f.observability === 'requested' && (typeof f.model === 'string' || typeof f.effort === 'string')
+    )
+    const reportedEfforts = [...new Set(
+      qualifiedFacts
+        .filter(f => (f.observability === 'reported' || f.observability === 'observed') && typeof f.effort === 'string')
+        .map(f => f.effort as string)
+    )]
+    const distinctReportedCallModels = [...new Set(reportedCallFacts.map(f => f.model as string))]
+
+    if (mi && (qualifiedFacts.length > 0 || models.length > 0 || (primaryUsage && primaryUsage.scope !== 'unavailable'))) {
       const localGaps = new Set<string>(unavailableReasons)
-      if (efforts.length === 0) localGaps.add('EFFORT_UNAVAILABLE')
+      if (reportedCallFacts.length === 0) localGaps.add('PER_CALL_MODEL_INDETERMINADO')
+      if (reportedCallFacts.length === 0 && reportedNonCallFacts.length === 0 && requestedFacts.length > 0) {
+        localGaps.add('EFFECTIVE_MODEL_INDETERMINADO')
+      }
+      if (reportedEfforts.length === 0) {
+        localGaps.add(efforts.length > 0 ? 'EFFORT_REQUESTED_ONLY_UNOBSERVED' : 'EFFORT_UNAVAILABLE')
+      }
       if (!primaryUsage || primaryUsage.scope === 'unavailable') localGaps.add('TOKEN_USAGE_UNAVAILABLE')
-      const supportState = models.length > 0 && efforts.length > 0
+      if (mi.coverageStatus === 'PARTIAL') localGaps.add('USAGE_COVERAGE_PARTIAL')
+
+      const supportState = reportedCallFacts.length > 0 && reportedEfforts.length > 0 && mi.coverageStatus === 'COMPLETE'
         ? 'SUPPORTED'
-        : models.length > 0
-          ? 'SESSION_LEVEL_ONLY'
-          : 'PARTIAL_PENDING_METADATA'
+        : reportedCallFacts.length > 0
+          ? 'PARTIAL'
+          : reportedNonCallFacts.length > 0
+            ? 'SESSION_LEVEL_ONLY'
+            : requestedFacts.length > 0
+              ? 'PARTIAL'
+              : 'PARTIAL_PENDING_METADATA'
+
+      const primaryReportedFact = reportedCallFacts[0] ?? reportedNonCallFacts[0]
+      const reportedModelsAll = [...new Set([...reportedCallFacts, ...reportedNonCallFacts].map(f => f.model as string))]
+
       return {
         supportState,
         dependencyRefs: ['artifact-fafc5616-794d-4e71-9c9f-238e4750f00d'],
         persistedModelIntelligence: mi,
-        sessionLevelModel: models[0]
+        sessionLevelModel: primaryReportedFact
           ? {
               class: 'OBSERVADO',
-              granularity: efforts.length > 0 ? 'TURN_OR_SESSION' : 'SESSION_LEVEL',
-              model: models[0],
-              models,
-              ...(efforts.length ? { efforts } : {}),
-              provider: providers[0] ?? 'entire',
+              observability: String(primaryReportedFact.observability ?? 'reported').toUpperCase(),
+              granularity: reportedCallFacts.length > 0 ? 'CALL_REPORTED' : 'SESSION_LEVEL',
+              model: primaryReportedFact.model as string,
+              models: reportedModelsAll,
+              ...(reportedEfforts.length ? { efforts: reportedEfforts } : {}),
+              provider: (primaryReportedFact.provider as string | undefined) ?? providers[0] ?? 'entire',
               ...(clients[0] ? { client: clients[0] } : {})
             }
           : null,
-        perCallModels: efforts.length > 0 ? models : null,
+        ...(requestedFacts.length > 0
+          ? {
+              requestedChoices: requestedFacts.map(f => ({
+                class: 'SOLICITADO',
+                observability: 'REQUESTED',
+                scope: f.scope,
+                scopeId: f.scopeId,
+                ordinal: f.ordinal,
+                sourceSurface: f.sourceSurface,
+                sourceVersion: f.sourceVersion,
+                ...(typeof f.model === 'string' ? { model: f.model } : {}),
+                ...(typeof f.effort === 'string' ? { effort: f.effort } : {})
+              }))
+            }
+          : {}),
+        perCallModels: reportedCallFacts.length > 0
+          ? reportedCallFacts.map(f => ({
+              class: 'OBSERVADO',
+              observability: String(f.observability).toUpperCase(),
+              scope: f.scope,
+              scopeId: f.scopeId,
+              ordinal: f.ordinal,
+              sourceSurface: f.sourceSurface,
+              sourceVersion: f.sourceVersion,
+              model: f.model as string,
+              ...(typeof f.effort === 'string' ? { effort: f.effort } : {}),
+              ...(typeof f.provider === 'string' ? { provider: f.provider } : {})
+            }))
+          : null,
+        effectivePerCallState: reportedCallFacts.length > 0 ? 'REPORTED' : 'INDETERMINADO',
+        modelSwitchReported: distinctReportedCallModels.length > 1,
         reportedUsage: primaryUsage && primaryUsage.scope !== 'unavailable'
           ? {
               class: 'OBSERVADO',
@@ -1412,7 +1478,7 @@ export async function inspectIntelligenceEvidence(
       scope: { repositoryId: ports.repositoryId, target: input.target },
       coverage: {
         model: modelProjection.supportState,
-        perCall: modelProjection.perCallModels ? 'SUPPORTED' : 'UNAVAILABLE',
+        perCall: modelProjection.perCallModels ? 'SUPPORTED' : 'INDETERMINADO',
         ...(graphSummary ? { graph: graphSummary.coverage } : {})
       },
       evidence: modelProjection,
