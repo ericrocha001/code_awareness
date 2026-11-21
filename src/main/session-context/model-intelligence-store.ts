@@ -183,6 +183,8 @@ export interface SessionModelSummary {
   clients: string[]
   observabilities: FieldObservability[]
   qualifiedFacts: QualifiedModelFact[]
+  modelFactOffset: number
+  modelFactsReturned: number
   totalModelFacts: number
   hasMoreModelFacts: boolean
   totalUsageFacts: number
@@ -481,7 +483,7 @@ export class ModelIntelligenceStore {
 
   summarizeSession(sessionId: string, options: { modelFactOffset?: number; modelFactLimit?: number } = {}): SessionModelSummary {
     const modelOffset = Math.max(0, options.modelFactOffset ?? 0)
-    const modelLimit = Math.max(1, Math.min(200, options.modelFactLimit ?? 50))
+    const modelLimit = Math.max(1, Math.min(200, options.modelFactLimit ?? 25))
     const totalModelFacts = (
       this.db.prepare('SELECT COUNT(*) AS n FROM session_model_metadata WHERE sessionId = ?').get(sessionId) as { n: number }
     ).n
@@ -655,6 +657,8 @@ export class ModelIntelligenceStore {
       clients,
       observabilities,
       qualifiedFacts,
+      modelFactOffset: modelOffset,
+      modelFactsReturned: qualifiedFacts.length,
       totalModelFacts,
       hasMoreModelFacts: modelOffset + modelRows.length < totalModelFacts,
       totalUsageFacts,
