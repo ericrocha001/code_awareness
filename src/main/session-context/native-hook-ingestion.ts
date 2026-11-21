@@ -143,7 +143,7 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
       } else receipt.deduplicated++
       await onEvent?.(event)
       const currentSource = binding.provider === 'antigravity' ? `NATIVE_CURRENT:antigravity:${binding.worktreeId}:${binding.generation}` : `NATIVE_CURRENT:${binding.worktreeId}:${binding.generation}`
-      const cursor = JSON.stringify({ runtimeId: nativeCaptureRuntimeId, eventId: event.eventId, sessionId: event.sessionId, epoch: event.capture?.epoch })
+      const cursor = JSON.stringify({ runtimeId: nativeCaptureRuntimeId, eventId: event.eventId, sessionId: event.sessionId, epoch: event.capture?.epoch, ...(event.helperDigest ? { helperDigest: event.helperDigest } : {}) })
       if (!existing) registry.apply({ repositoryId: binding.repositoryId, source: currentSource, revision: nativeDigest(cursor), status: 'OBSERVED', cursor, edges: [] }, registry.source(currentSource)?.revision, assertCurrent)
       try {
         const unlinkStat = lstatSync(path, { bigint: true })

@@ -87,6 +87,7 @@ export interface NativeHookEnvelope {
   tool?: 'SHELL' | 'MCP' | 'OTHER'
   git?: { operationId: string; fingerprint: string; expectedHead: string | null; sha?: string; parent?: string | null; replayed?: boolean }
   artifact?: NativeArtifactFact
+  helperDigest?: string
   capture?: { epoch: string; configuration: string; gapRevision: string }
   observedAt: string
   eventId: string
@@ -318,6 +319,7 @@ export interface NormalizeHookOptions {
   expectedEvent?: NativeHookEvent
   activation?: NativeHookActivationRef
   producerWitness?: NativeProducerWitness
+  helperDigest?: string
 }
 
 export function readActiveHookActivation(
@@ -488,11 +490,13 @@ function normalizeAntigravityHook(
     }, binding.repositoryId)
   }
   const hasVerifiedCausalFact = Boolean(git || artifact)
+  const helperDigest = options?.helperDigest && hashPattern.test(options.helperDigest) ? options.helperDigest : undefined
   const facts = {
     schema: 1 as const, source: 'ANTIGRAVITY_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
     generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(tool ? { tool } : {}),
     ...(appTranscriptDigest ? { appTranscriptDigest } : {}),
     ...(activation ? { activation } : {}),
+    ...(helperDigest ? { helperDigest } : {}),
     ...(hasVerifiedCausalFact && producerWitness ? { producerWitness } : {}),
     ...(git ? { git } : {}),
     ...(artifact ? { artifact } : {})
@@ -527,8 +531,9 @@ export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding
   const git = toolEvent ? extractNativeGitFact(event, binding, payload.tool_name, payload.tool_input, payload.tool_response) : undefined
   const artifact = toolEvent ? nativeArtifactFact(payload, binding.repositoryId) : undefined
   const activation = options?.activation && validActivationRef(options.activation) ? options.activation : undefined
+  const helperDigest = options?.helperDigest && hashPattern.test(options.helperDigest) ? options.helperDigest : undefined
   const facts = { schema: 1 as const, source: 'CODEX_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
-    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(activation ? { activation } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}), ...(artifact ? { artifact } : {}) }
+    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(activation ? { activation } : {}), ...(helperDigest ? { helperDigest } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}), ...(artifact ? { artifact } : {}) }
   const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
   return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
 }
@@ -537,7 +542,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   if (Buffer.byteLength(text) > nativeHookLimits.envelopeBytes) throw new Error('ENVELOPE_LIMIT')
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
-  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'activation', 'producerWitness', 'tool', 'git', 'artifact', 'capture', 'appTranscriptDigest', 'observedAt', 'eventId', 'digest']
+  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'activation', 'producerWitness', 'tool', 'git', 'artifact', 'helperDigest', 'capture', 'appTranscriptDigest', 'observedAt', 'eventId', 'digest']
   const validEvent = value.source === 'CODEX_NATIVE_HOOK'
     ? codexHookEvents.includes(value.event as typeof codexHookEvents[number])
     : value.source === 'ANTIGRAVITY_NATIVE_HOOK'
@@ -547,6 +552,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
     typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) ||
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
     ['turnId','invocationId','subagentId'].some(k => value[k] !== undefined && (typeof value[k] !== 'string' || !hashPattern.test(value[k] as string))) ||
+    (value.helperDigest !== undefined && (typeof value.helperDigest !== 'string' || !hashPattern.test(value.helperDigest))) ||
     (value.activation !== undefined && !validActivationRef(value.activation)) ||
     (value.producerWitness !== undefined && (!validProducerWitness(value.producerWitness) || value.producerWitness.sessionId !== value.sessionId)) ||
     (value.source === 'ANTIGRAVITY_NATIVE_HOOK' && (value.subagentId !== undefined || ((value.git !== undefined || value.artifact !== undefined) && !value.producerWitness))) ||

@@ -11,6 +11,7 @@ import { captureHealthSources, type CaptureHealthObservation } from './capture-h
 import { nativeHookProviders, nativeHookSource, type NativeHookProvider } from './native-hooks'
 import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
+import type { CapturedRuntimeHelperState } from './native-hook-profile'
 import type { NativeTrustObservation } from './native-hook-preflight'
 
 export const captureHealthQuery = z.object({ worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
@@ -27,21 +28,216 @@ type Query = z.infer<typeof captureHealthQuery>
 export const nativeCaptureAgent = (query: Query): NativeHookProvider =>
   query.agent === 'antigravity' ? 'antigravity' : 'codex'
 
-export function inspectNativeCaptureHealth(store: SessionStore, root: string, target: SessionTargetSelection, agent: NativeHookProvider, trust?: NativeTrustObservation, profile?: string) {
+export interface NativeCaptureBoundaryDiagnostic {
+  stage: 'HELPER_BUNDLE' | 'HOOK_INSTALLATION' | 'SCOPE_BINDING' | 'HOST_EXECUTION' | 'SPOOL' | 'REGISTRY_INGESTION' | 'PROVENANCE_ASSOCIATION'
+  boundary: string
+  reasonCode: string
+  ownership: 'CODE_AWARENESS' | 'EXTERNAL_CLIENT'
+  recommendedAction: string
+  nextEvidence: string
+}
+
+const SCOPE_BINDING_REASONS = new Set(['WORKTREE_STALE', 'HOOK_BINDING_DRIFT', 'NATIVE_CAPTURE_DISABLED', 'INSTALLATION_OWNERSHIP_UNPROVEN'])
+
+function inspectNativeBoundary(
+  readiness: ReturnType<typeof nativeHookReadiness>,
+  diagnostics: ReturnType<typeof nativeCaptureDiagnostics>,
+  causalityBoundary: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' | 'RECEIPT_CORRELATION_SUPPORTED'
+): NativeCaptureBoundaryDiagnostic {
+  const { helperVersion, installation, bootstrap, trust, execution, captureReadiness } = readiness
+  const pendingSpoolCount = typeof (diagnostics as { pendingSpoolCount?: unknown }).pendingSpoolCount === 'number'
+    ? (diagnostics as { pendingSpoolCount: number }).pendingSpoolCount : 0
+  const historicalCoverage = (diagnostics as { historicalCoverage?: { state?: string } }).historicalCoverage
+  const lastIngestion = (diagnostics as { lastIngestion?: { state?: string; deferredByBudget?: boolean } }).lastIngestion
+
+  if (helperVersion.reasonCode === 'RUNTIME_SOURCE_STALE') {
+    return {
+      stage: 'HELPER_BUNDLE',
+      boundary: 'RUNTIME_HELPER_BUNDLE',
+      reasonCode: 'RUNTIME_SOURCE_STALE',
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'RESTART_CODE_AWARENESS_RUNTIME',
+      nextEvidence: 'RESTART_RUNTIME_TO_RELOAD_HELPER_BUNDLE'
+    }
+  }
+  if (installation.state === 'MISSING') {
+    if (bootstrap?.state === 'UNAVAILABLE' && bootstrap.reasonCode === 'HOOK_ENROLLMENT_REQUIRED') {
+      return {
+        stage: 'SCOPE_BINDING',
+        boundary: 'SCOPE_BINDING',
+        reasonCode: 'HOOK_ENROLLMENT_REQUIRED',
+        ownership: 'CODE_AWARENESS',
+        recommendedAction: 'ENROLL_NATIVE_HOOKS',
+        nextEvidence: 'ENROLL_REPOSITORY_FOR_NATIVE_HOOKS'
+      }
+    }
+    return {
+      stage: 'HOOK_INSTALLATION',
+      boundary: 'HOOK_INSTALLATION',
+      reasonCode: installation.reasonCode,
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'INSTALL_NATIVE_HOOKS',
+      nextEvidence: 'REQUEST_INSTALLATION_APPROVAL'
+    }
+  }
+  if (installation.state !== 'CONFIGURED') {
+    const scopeError = SCOPE_BINDING_REASONS.has(installation.reasonCode)
+    return {
+      stage: scopeError ? 'SCOPE_BINDING' : 'HOOK_INSTALLATION',
+      boundary: scopeError ? 'SCOPE_BINDING' : 'HOOK_INSTALLATION',
+      reasonCode: installation.reasonCode,
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: installation.repairability === 'REPAIRABLE' ? 'REPAIR_NATIVE_HOOKS'
+        : scopeError ? 'INSPECT_INSTALLATION_READ_ONLY' : 'RESOLVE_NATIVE_HOOK_INSTALLATION',
+      nextEvidence: readiness.nextEvidence
+    }
+  }
+  if (helperVersion.state === 'STALE') {
+    return {
+      stage: 'HOOK_INSTALLATION',
+      boundary: 'INSTALLED_HELPER_VERSION',
+      reasonCode: 'HOOK_HELPER_STALE',
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'REINSTALL_NATIVE_HOOKS',
+      nextEvidence: 'REINSTALL_HELPER_AND_RELOAD_CLIENT'
+    }
+  }
+  if (helperVersion.state === 'UNKNOWN') {
+    return {
+      stage: 'HELPER_BUNDLE',
+      boundary: 'RUNTIME_HELPER_BUNDLE',
+      reasonCode: helperVersion.reasonCode,
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'VERIFY_RUNTIME_HELPER_BUNDLE',
+      nextEvidence: 'VERIFY_RUNTIME_HELPER_BUNDLE'
+    }
+  }
+  if (bootstrap?.state === 'UNAVAILABLE') {
+    return {
+      stage: 'SCOPE_BINDING',
+      boundary: 'SCOPE_BINDING',
+      reasonCode: bootstrap.reasonCode,
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: bootstrap.reasonCode === 'HOOK_ENROLLMENT_REQUIRED' ? 'ENROLL_NATIVE_HOOKS' : 'INSPECT_INSTALLATION_READ_ONLY',
+      nextEvidence: readiness.nextEvidence
+    }
+  }
+  if (captureReadiness.state === 'OBSERVED') {
+    if (pendingSpoolCount > 0) {
+      return {
+        stage: 'SPOOL',
+        boundary: 'SPOOL_BACKLOG',
+        reasonCode: lastIngestion?.deferredByBudget ? 'SPOOL_BACKPRESSURE' : 'INGESTION_PENDING',
+        ownership: 'CODE_AWARENESS',
+        recommendedAction: 'RECONCILE_CHECKPOINT_REGISTRY',
+        nextEvidence: 'DRAIN_NATIVE_SPOOL'
+      }
+    }
+    if (historicalCoverage?.state === 'PARTIAL') {
+      return {
+        stage: 'REGISTRY_INGESTION',
+        boundary: 'REGISTRY_INGESTION',
+        reasonCode: 'CAPTURE_PARTIAL',
+        ownership: 'CODE_AWARENESS',
+        recommendedAction: 'INSPECT_AND_ACKNOWLEDGE_GAPS',
+        nextEvidence: 'ACKNOWLEDGE_HISTORICAL_GAPS'
+      }
+    }
+    return {
+      stage: 'PROVENANCE_ASSOCIATION',
+      boundary: 'PROVENANCE_ASSOCIATION',
+      reasonCode: causalityBoundary === 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' ? 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' : 'CURRENT_WINDOW_INGESTED',
+      ownership: causalityBoundary === 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' ? 'EXTERNAL_CLIENT' : 'CODE_AWARENESS',
+      recommendedAction: causalityBoundary === 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' ? 'CONTEXTUAL_PROVENANCE_ONLY' : 'NONE',
+      nextEvidence: 'NONE'
+    }
+  }
+  if (pendingSpoolCount > 0) {
+    return {
+      stage: 'SPOOL',
+      boundary: 'SPOOL_BACKLOG',
+      reasonCode: lastIngestion?.deferredByBudget ? 'SPOOL_BACKPRESSURE' : 'INGESTION_PENDING',
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'RECONCILE_CHECKPOINT_REGISTRY',
+      nextEvidence: 'DRAIN_NATIVE_SPOOL'
+    }
+  }
+  if (captureReadiness.state === 'PARTIAL' || lastIngestion?.state === 'PARTIAL') {
+    return {
+      stage: 'REGISTRY_INGESTION',
+      boundary: 'REGISTRY_INGESTION',
+      reasonCode: 'CAPTURE_PARTIAL',
+      ownership: 'CODE_AWARENESS',
+      recommendedAction: 'INSPECT_AND_ACKNOWLEDGE_GAPS',
+      nextEvidence: 'ACKNOWLEDGE_HISTORICAL_GAPS'
+    }
+  }
+  if (execution.state === 'FAILED') {
+    return {
+      stage: 'HOST_EXECUTION',
+      boundary: 'HOST_EXECUTION',
+      reasonCode: execution.reasonCode,
+      ownership: 'EXTERNAL_CLIENT',
+      recommendedAction: 'INSPECT_FAILED_EVENT_READ_ONLY',
+      nextEvidence: 'INSPECT_FAILED_EVENT_READ_ONLY'
+    }
+  }
+  if (trust.state === 'UNTRUSTED' || trust.state === 'PARTIAL') {
+    return {
+      stage: 'HOST_EXECUTION',
+      boundary: 'HOST_EXECUTION',
+      reasonCode: trust.reasonCode,
+      ownership: 'EXTERNAL_CLIENT',
+      recommendedAction: 'CLIENT_REVIEW_REQUIRED',
+      nextEvidence: 'REQUEST_CLIENT_AUTHORIZATION_REVIEW'
+    }
+  }
+  return {
+    stage: 'HOST_EXECUTION',
+    boundary: 'HOST_EXECUTION',
+    reasonCode: 'WAITING_FOR_REAL_CLIENT_EVENT',
+    ownership: 'EXTERNAL_CLIENT',
+    recommendedAction: 'CLIENT_REVIEW_REQUIRED',
+    nextEvidence: 'OBSERVE_REAL_WORKFLOW_WITH_CONSENT'
+  }
+}
+
+export function inspectNativeCaptureHealth(
+  store: SessionStore,
+  root: string,
+  target: SessionTargetSelection,
+  agent: NativeHookProvider,
+  trust?: NativeTrustObservation,
+  profile?: string,
+  runtimeHelper?: CapturedRuntimeHelperState
+) {
   const { registry, repositoryId } = store
-  const readiness = nativeHookReadiness(registry, root, target, trust, agent, profile ? { profile } : undefined)
+  const readinessOptions = {
+    ...(profile ? { profile } : {}),
+    ...(runtimeHelper ? { runtimeHelper } : {})
+  }
+  const readiness = nativeHookReadiness(registry, root, target, trust, agent, Object.keys(readinessOptions).length ? readinessOptions : undefined)
   const diagnostics = nativeCaptureDiagnostics(registry, root, agent, target)
+  const helperStale = readiness.helperVersion.state === 'STALE'
+  const runtimeSourceStale = readiness.helperVersion.reasonCode === 'RUNTIME_SOURCE_STALE'
   const partial = diagnostics.historicalCoverage?.state === 'PARTIAL' || readiness.captureReadiness.state === 'PARTIAL'
-  const state = partial ? 'PARTIAL' : readiness.captureReadiness.state === 'OBSERVED' ? 'OBSERVED' :
-    readiness.installation.state === 'CONFIGURED' ? 'CONFIGURED' : readiness.installation.state === 'UNKNOWN' ? 'UNKNOWN' : 'UNAVAILABLE'
-  const reason = partial ? 'CAPTURE_PARTIAL' : readiness.installation.state === 'CONFIGURED'
-    ? readiness.captureReadiness.reasonCode : readiness.installation.reasonCode
+  const state = helperStale ? 'UNAVAILABLE'
+    : runtimeSourceStale ? 'UNKNOWN'
+    : partial ? 'PARTIAL'
+    : readiness.captureReadiness.state === 'OBSERVED' ? 'OBSERVED'
+    : readiness.installation.state === 'CONFIGURED' ? 'CONFIGURED'
+    : readiness.installation.state === 'UNKNOWN' ? 'UNKNOWN' : 'UNAVAILABLE'
+  const reason = helperStale ? 'HOOK_HELPER_STALE'
+    : runtimeSourceStale ? 'RUNTIME_SOURCE_STALE'
+    : partial ? 'CAPTURE_PARTIAL'
+    : readiness.installation.state === 'CONFIGURED' ? readiness.captureReadiness.reasonCode : readiness.installation.reasonCode
   const discovery = readiness.trust.loadedSource
     ? { state: 'OBSERVED', loadedSource: readiness.trust.loadedSource }
     : { state: 'UNKNOWN', reasonCode: readiness.trust.reasonCode }
   const causalityBoundary = agent === 'antigravity' ? 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' : 'RECEIPT_CORRELATION_SUPPORTED'
+  const boundary = inspectNativeBoundary(readiness, diagnostics, causalityBoundary)
   return { feature: 'session_context', source: 'native', version: 1, repositoryId, ...target, agent, state, reason,
-    nativeCapture: { source: nativeHookSource(agent), independentOfEntire: true, ...diagnostics, readiness, discovery, causality: 'NOT_EVALUATED', causalityBoundary } }
+    nativeCapture: { source: nativeHookSource(agent), independentOfEntire: true, ...diagnostics, readiness, boundary, discovery, causality: 'NOT_EVALUATED', causalityBoundary } }
 }
 const pathsCache = new Map<string, { base: string; hooks: string[] }>()
 function smallText(path: string): string {

@@ -79,12 +79,41 @@ export interface UserHookSnapshot {
   updatedAt: string
 }
 
+export type HelperBundleKind = 'PORTABLE' | 'CHECKOUT'
+
+export interface RuntimeHelperBundleOptions {
+  packaged: boolean
+  appPath: string
+  resourcesPath?: string
+}
+
+export interface CapturedHelperBundleSource {
+  kind: HelperBundleKind
+  status: 'CAPTURED' | 'UNAVAILABLE'
+  digest?: string
+  sourcePath?: string
+  statKey?: string
+}
+
+export interface CapturedRuntimeHelperState {
+  portable: CapturedHelperBundleSource
+  checkout: CapturedHelperBundleSource
+}
+
+export interface RuntimeHelperExpectation {
+  state: 'AVAILABLE' | 'RUNTIME_SOURCE_STALE' | 'UNAVAILABLE'
+  reasonCode: 'HELPER_BUNDLE_AVAILABLE' | 'RUNTIME_SOURCE_STALE' | 'HOOK_HELPER_UNAVAILABLE'
+  expectedDigest?: string
+}
+
 export interface UserCodexInstallationInspection extends NativeInstallationInspection {
   codexHome: string
   configHome: string
   configPath: string
   snapshotPath: string
   enabled: boolean
+  scope?: 'USER' | 'CHECKOUT'
+  helperKind?: HelperBundleKind
   helperPath?: string
   helperDigest?: string
   nodePath?: string
@@ -253,14 +282,84 @@ export function resolveDistributableNodeRuntime(options: {
   throw new Error('NODE_RUNTIME_UNAVAILABLE')
 }
 
-export function resolvePortableHelperContent(options: { packaged: boolean; appPath: string; resourcesPath?: string }): string {
-  const candidates = options.packaged && options.resourcesPath
+export function portableHelperCandidatePaths(
+  options: RuntimeHelperBundleOptions,
+  kind: HelperBundleKind = 'PORTABLE'
+): string[] {
+  const filename = kind === 'PORTABLE' ? 'native-hook-portable.cjs' : 'native-hook.cjs'
+  return options.packaged && options.resourcesPath
     ? [
-        join(options.resourcesPath, 'app.asar.unpacked', 'out', 'session-context', 'native-hook-portable.cjs'),
-        join(options.appPath, 'out', 'session-context', 'native-hook-portable.cjs')
+        join(options.resourcesPath, 'app.asar.unpacked', 'out', 'session-context', filename),
+        join(options.appPath, 'out', 'session-context', filename)
       ]
-    : [join(options.appPath, 'out', 'session-context', 'native-hook-portable.cjs')]
-  for (const candidate of candidates) {
+    : [join(options.appPath, 'out', 'session-context', filename)]
+}
+
+function bundleStatKey(path: string): string {
+  const stat = lstatSync(path, { bigint: true })
+  return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+}
+
+function captureBundleKind(
+  options: RuntimeHelperBundleOptions,
+  kind: HelperBundleKind
+): CapturedHelperBundleSource {
+  for (const candidate of portableHelperCandidatePaths(options, kind)) {
+    try {
+      if (existsSync(candidate) && lstatSync(candidate).isFile()) {
+        const statKey = bundleStatKey(candidate)
+        const content = boundedFile(candidate, MAX_SNAPSHOT_BYTES)
+        return { kind, status: 'CAPTURED', digest: nativeDigest(content), sourcePath: candidate, statKey }
+      }
+    } catch {}
+  }
+  return { kind, status: 'UNAVAILABLE' }
+}
+
+export function captureRuntimeHelperSource(options: RuntimeHelperBundleOptions): CapturedRuntimeHelperState {
+  return {
+    portable: captureBundleKind(options, 'PORTABLE'),
+    checkout: captureBundleKind(options, 'CHECKOUT')
+  }
+}
+
+export function resolveRuntimeHelperExpectation(
+  kind: HelperBundleKind,
+  captured?: CapturedRuntimeHelperState,
+  fallbackOptions?: RuntimeHelperBundleOptions
+): RuntimeHelperExpectation {
+  if (captured) {
+    const entry = kind === 'CHECKOUT' ? captured.checkout : captured.portable
+    if (entry.status !== 'CAPTURED' || !entry.sourcePath || !entry.digest || !entry.statKey) {
+      return { state: 'UNAVAILABLE', reasonCode: 'HOOK_HELPER_UNAVAILABLE' }
+    }
+    try {
+      const stat = lstatSync(entry.sourcePath, { bigint: true })
+      if (!stat.isFile()) return { state: 'RUNTIME_SOURCE_STALE', reasonCode: 'RUNTIME_SOURCE_STALE' }
+      const currentStatKey = `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
+      if (currentStatKey === entry.statKey) {
+        return { state: 'AVAILABLE', reasonCode: 'HELPER_BUNDLE_AVAILABLE', expectedDigest: entry.digest }
+      }
+      const diskDigest = nativeDigest(boundedFile(entry.sourcePath, MAX_SNAPSHOT_BYTES))
+      if (diskDigest !== entry.digest) {
+        return { state: 'RUNTIME_SOURCE_STALE', reasonCode: 'RUNTIME_SOURCE_STALE' }
+      }
+      return { state: 'AVAILABLE', reasonCode: 'HELPER_BUNDLE_AVAILABLE', expectedDigest: entry.digest }
+    } catch {
+      return { state: 'RUNTIME_SOURCE_STALE', reasonCode: 'RUNTIME_SOURCE_STALE' }
+    }
+  }
+  if (fallbackOptions) {
+    const live = captureBundleKind(fallbackOptions, kind)
+    if (live.status === 'CAPTURED' && live.digest) {
+      return { state: 'AVAILABLE', reasonCode: 'HELPER_BUNDLE_AVAILABLE', expectedDigest: live.digest }
+    }
+  }
+  return { state: 'UNAVAILABLE', reasonCode: 'HOOK_HELPER_UNAVAILABLE' }
+}
+
+export function resolvePortableHelperContent(options: { packaged: boolean; appPath: string; resourcesPath?: string }): string {
+  for (const candidate of portableHelperCandidatePaths(options, 'PORTABLE')) {
     if (existsSync(candidate) && lstatSync(candidate).isFile()) {
       return boundedFile(candidate, MAX_SNAPSHOT_BYTES)
     }
@@ -868,14 +967,14 @@ export function inspectUserHookInstallation(
       const reason = handlers.length !== expected ? 'NATIVE_HANDLERS_MISSING' : 'HOOK_CONFIG_DRIFT'
       return {
         ...result('INCOMPATIBLE', reason, handlers.length),
-        repairability: 'REPAIRABLE', enabled: true,
+        repairability: 'REPAIRABLE', enabled: true, scope: 'USER', helperKind: 'PORTABLE',
         helperPath: snapshot.helperPath, helperDigest: snapshot.helperDigest,
         nodePath: snapshot.nodePath, runAsNode: snapshot.runAsNode, clientPath: snapshot.clientPath, clientVersion: snapshot.clientVersion
       }
     }
     return {
       state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: snapshot.installedDigest, installed: expected, expected, handlers,
-      codexHome: configHome, configHome, configPath, snapshotPath, enabled: true,
+      codexHome: configHome, configHome, configPath, snapshotPath, enabled: true, scope: 'USER', helperKind: 'PORTABLE',
       helperPath: snapshot.helperPath, helperDigest: snapshot.helperDigest,
       nodePath: snapshot.nodePath, runAsNode: snapshot.runAsNode, clientPath: snapshot.clientPath, clientVersion: snapshot.clientVersion
     }

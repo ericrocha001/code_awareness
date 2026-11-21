@@ -187,9 +187,13 @@ function runHook() {
     : (bindingArgument.endsWith('/native-hooks/antigravity/binding.json') ? 'antigravity' : 'codex')
   let legacyAntigravity = false
   let cachedProfileIdentity: { profile: string; digest: string } | undefined
-
   function helperProfile() {
     return cachedProfileIdentity ??= distributedHelperIdentity(__filename)
+  }
+
+  function selfHelperDigest(): string | undefined {
+    if (!distributed) return undefined
+    try { return helperProfile().digest } catch { return undefined }
   }
 
   function executionBinding(): NativeHookBinding | undefined {
@@ -321,7 +325,8 @@ function runHook() {
           new Date(),
           {
             ...(provider === 'antigravity' && explicitEvent ? { expectedEvent: explicitEvent } : {}),
-            ...(activation ? { activation } : {})
+            ...(activation ? { activation } : {}),
+            helperDigest: digest
           }
         )
         const envelope = stampNativeCapture(normalized, binding)
@@ -340,7 +345,11 @@ function runHook() {
         phase = 'NORMALIZE'
         const legacyProfile = process.env.CODE_AWARENESS_PROFILE || (distributed ? helperProfile().profile : undefined)
         const activation = readActiveHookActivation(legacyProfile, binding, process.env)
-        const envelope = stampNativeCapture(normalizeNativeHook(payload, binding, new Date(), activation ? { activation } : undefined), binding)
+        const helperDigest = selfHelperDigest()
+        const envelope = stampNativeCapture(normalizeNativeHook(payload, binding, new Date(), {
+          ...(activation ? { activation } : {}),
+          ...(helperDigest ? { helperDigest } : {})
+        }), binding)
         tStamp = performance.now()
         phase = 'WRITE'
         admitSpool(envelope, binding.spool, phase, eventType)
