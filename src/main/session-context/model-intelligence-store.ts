@@ -162,12 +162,31 @@ export interface AggregatedTokenUsageSummary {
   apiCalls?: number
 }
 
+export interface QualifiedModelFact {
+  scope: FieldGranularity
+  scopeId: string
+  ordinal: number
+  sourceSurface: SourceSurface
+  sourceVersion: string
+  observability: FieldObservability
+  provider?: string
+  client?: string
+  model?: string
+  effort?: string
+  coverageStatus: MetadataCoverageStatus
+}
+
 export interface SessionModelSummary {
   models: string[]
   efforts: string[]
   providers: string[]
   clients: string[]
   observabilities: FieldObservability[]
+  qualifiedFacts: QualifiedModelFact[]
+  totalModelFacts: number
+  hasMoreModelFacts: boolean
+  totalUsageFacts: number
+  hasMoreUsageFacts: boolean
   primaryUsage: AggregatedTokenUsageSummary
   checkpointUsage: Array<{
     scopeId: string
@@ -200,18 +219,6 @@ function cleanLabel(value: string | undefined, max = 160): string | null {
 function cleanInt(value: number | undefined): number | null {
   if (value === undefined || value === null) return null
   return Number.isSafeInteger(value) && value >= 0 ? value : null
-}
-
-function sumNullable(values: Array<number | null>): number | undefined {
-  let seen = false
-  let sum = 0
-  for (const v of values) {
-    if (v !== null && v !== undefined) {
-      seen = true
-      sum += v
-    }
-  }
-  return seen ? sum : undefined
 }
 
 function usageSummaryFromRow(
@@ -472,68 +479,146 @@ export class ModelIntelligenceStore {
       .all(sessionId, limit, offset) as SessionUsageFactRow[]
   }
 
-  summarizeSession(sessionId: string): SessionModelSummary {
-    const modelRows = this.listModelFacts(sessionId, { limit: 200 })
-    const usageRows = this.listUsageFacts(sessionId, { limit: 200 })
+  summarizeSession(sessionId: string, options: { modelFactOffset?: number; modelFactLimit?: number } = {}): SessionModelSummary {
+    const modelOffset = Math.max(0, options.modelFactOffset ?? 0)
+    const modelLimit = Math.max(1, Math.min(200, options.modelFactLimit ?? 50))
+    const totalModelFacts = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM session_model_metadata WHERE sessionId = ?').get(sessionId) as { n: number }
+    ).n
+    const totalUsageFacts = (
+      this.db.prepare('SELECT COUNT(*) AS n FROM session_usage_facts WHERE sessionId = ?').get(sessionId) as { n: number }
+    ).n
 
-    const models = [...new Set([...modelRows.map(r => r.model), ...usageRows.map(r => r.model)].filter((v): v is string => !!v))]
-    const efforts = [...new Set([...modelRows.map(r => r.effort), ...usageRows.map(r => r.effort)].filter((v): v is string => !!v))]
-    const providers = [...new Set(modelRows.map(r => r.provider).filter((v): v is string => !!v))]
-    const clients = [...new Set(modelRows.map(r => r.client).filter((v): v is string => !!v))]
-    const observabilities = [...new Set([...modelRows.map(r => r.observability), ...usageRows.map(r => r.observability)])]
+    const modelRows = this.listModelFacts(sessionId, { offset: modelOffset, limit: modelLimit })
+    const qualifiedFacts: QualifiedModelFact[] = modelRows.map(r => ({
+      scope: r.scope,
+      scopeId: r.scopeId,
+      ordinal: r.ordinal,
+      sourceSurface: r.sourceSurface,
+      sourceVersion: r.sourceVersion,
+      observability: r.observability,
+      ...(r.provider ? { provider: r.provider } : {}),
+      ...(r.client ? { client: r.client } : {}),
+      ...(r.model ? { model: r.model } : {}),
+      ...(r.effort ? { effort: r.effort } : {}),
+      coverageStatus: r.coverageStatus
+    }))
 
-    const sessionTotals = usageRows.filter(r => r.usageScope === 'session_total')
-    const sessionCumulatives = usageRows.filter(r => r.usageScope === 'session_cumulative')
-    const callDeltas = usageRows.filter(r => r.usageScope === 'call_delta')
+    const distinctModels = (
+      this.db.prepare(
+        `SELECT model AS v FROM (
+          SELECT model, ordinal, id FROM session_model_metadata WHERE sessionId = ? AND model IS NOT NULL
+          UNION ALL
+          SELECT model, ordinal, id FROM session_usage_facts WHERE sessionId = ? AND model IS NOT NULL
+        ) ORDER BY ordinal ASC, id ASC`
+      ).all(sessionId, sessionId) as Array<{ v: string }>
+    ).map(r => r.v)
+    const models = [...new Set(distinctModels)]
+
+    const efforts = (
+      this.db.prepare(
+        `SELECT effort AS v FROM (
+          SELECT effort, ordinal, id FROM session_model_metadata WHERE sessionId = ? AND effort IS NOT NULL
+          UNION ALL
+          SELECT effort, ordinal, id FROM session_usage_facts WHERE sessionId = ? AND effort IS NOT NULL
+        ) ORDER BY ordinal ASC, id ASC`
+      ).all(sessionId, sessionId) as Array<{ v: string }>
+    ).map(r => r.v).filter((v, i, arr) => arr.indexOf(v) === i)
+
+    const providers = (
+      this.db.prepare('SELECT DISTINCT provider AS v FROM session_model_metadata WHERE sessionId = ? AND provider IS NOT NULL ORDER BY ordinal ASC, id ASC')
+        .all(sessionId) as Array<{ v: string }>
+    ).map(r => r.v)
+    const clients = (
+      this.db.prepare('SELECT DISTINCT client AS v FROM session_model_metadata WHERE sessionId = ? AND client IS NOT NULL ORDER BY ordinal ASC, id ASC')
+        .all(sessionId) as Array<{ v: string }>
+    ).map(r => r.v)
+    const observabilities = [
+      ...new Set(
+        (
+          this.db.prepare(
+            `SELECT DISTINCT observability AS v FROM session_model_metadata WHERE sessionId = ?
+             UNION
+             SELECT DISTINCT observability AS v FROM session_usage_facts WHERE sessionId = ?`
+          ).all(sessionId, sessionId) as Array<{ v: FieldObservability }>
+        ).map(r => r.v)
+      )
+    ]
+
+    const latestSessionTotal = this.db
+      .prepare("SELECT * FROM session_usage_facts WHERE sessionId = ? AND usageScope = 'session_total' ORDER BY ordinal DESC, id DESC LIMIT 1")
+      .get(sessionId) as SessionUsageFactRow | undefined
+    const latestCumulative = this.db
+      .prepare("SELECT * FROM session_usage_facts WHERE sessionId = ? AND usageScope = 'session_cumulative' ORDER BY ordinal DESC, id DESC LIMIT 1")
+      .get(sessionId) as SessionUsageFactRow | undefined
 
     let primaryUsage: AggregatedTokenUsageSummary = { scope: 'unavailable' }
-    if (sessionTotals.length > 0) {
-      primaryUsage = usageSummaryFromRow('session_total', sessionTotals[sessionTotals.length - 1]!)
-    } else if (sessionCumulatives.length > 0) {
-      primaryUsage = usageSummaryFromRow('session_cumulative', sessionCumulatives[sessionCumulatives.length - 1]!)
-    } else if (callDeltas.length > 0) {
-      const input = sumNullable(callDeltas.map(r => r.inputTokens))
-      const output = sumNullable(callDeltas.map(r => r.outputTokens))
-      const cacheRead = sumNullable(callDeltas.map(r => r.cacheReadTokens))
-      const cacheWrite = sumNullable(callDeltas.map(r => r.cacheWriteTokens))
-      const reasoningOutput = sumNullable(callDeltas.map(r => r.reasoningOutputTokens))
-      const total = sumNullable(callDeltas.map(r => r.totalTokens))
-      primaryUsage = {
-        scope: 'call_delta_sum',
-        ...(input !== undefined ? { input } : {}),
-        ...(output !== undefined ? { output } : {}),
-        ...(cacheRead !== undefined ? { cacheRead } : {}),
-        ...(cacheWrite !== undefined ? { cacheWrite } : {}),
-        ...(reasoningOutput !== undefined ? { reasoningOutput } : {}),
-        ...(total !== undefined ? { total } : {}),
-        apiCalls: callDeltas.length
+    if (latestSessionTotal) {
+      primaryUsage = usageSummaryFromRow('session_total', latestSessionTotal)
+    } else if (latestCumulative) {
+      primaryUsage = usageSummaryFromRow('session_cumulative', latestCumulative)
+    } else {
+      const deltaAgg = this.db.prepare(`
+        SELECT
+          COUNT(*) AS rowCount,
+          SUM(inputTokens) AS inputSum, COUNT(inputTokens) AS inputCount,
+          SUM(outputTokens) AS outputSum, COUNT(outputTokens) AS outputCount,
+          SUM(cacheReadTokens) AS cacheReadSum, COUNT(cacheReadTokens) AS cacheReadCount,
+          SUM(cacheWriteTokens) AS cacheWriteSum, COUNT(cacheWriteTokens) AS cacheWriteCount,
+          SUM(reasoningOutputTokens) AS reasoningSum, COUNT(reasoningOutputTokens) AS reasoningCount,
+          SUM(totalTokens) AS totalSum, COUNT(totalTokens) AS totalCount
+        FROM session_usage_facts
+        WHERE sessionId = ? AND usageScope = 'call_delta'
+      `).get(sessionId) as {
+        rowCount: number
+        inputSum: number | null; inputCount: number
+        outputSum: number | null; outputCount: number
+        cacheReadSum: number | null; cacheReadCount: number
+        cacheWriteSum: number | null; cacheWriteCount: number
+        reasoningSum: number | null; reasoningCount: number
+        totalSum: number | null; totalCount: number
+      }
+      if (deltaAgg && deltaAgg.rowCount > 0) {
+        primaryUsage = {
+          scope: 'call_delta_sum',
+          ...(deltaAgg.inputCount > 0 && deltaAgg.inputSum !== null ? { input: deltaAgg.inputSum } : {}),
+          ...(deltaAgg.outputCount > 0 && deltaAgg.outputSum !== null ? { output: deltaAgg.outputSum } : {}),
+          ...(deltaAgg.cacheReadCount > 0 && deltaAgg.cacheReadSum !== null ? { cacheRead: deltaAgg.cacheReadSum } : {}),
+          ...(deltaAgg.cacheWriteCount > 0 && deltaAgg.cacheWriteSum !== null ? { cacheWrite: deltaAgg.cacheWriteSum } : {}),
+          ...(deltaAgg.reasoningCount > 0 && deltaAgg.reasoningSum !== null ? { reasoningOutput: deltaAgg.reasoningSum } : {}),
+          ...(deltaAgg.totalCount > 0 && deltaAgg.totalSum !== null ? { total: deltaAgg.totalSum } : {}),
+          apiCalls: deltaAgg.rowCount
+        }
       }
     }
 
-    const checkpointUsage = usageRows
-      .filter(r => r.usageScope === 'checkpoint_window')
-      .map(r => ({
-        scopeId: r.scopeId,
-        ...(r.model ? { model: r.model } : {}),
-        ...(r.inputTokens !== null ? { input: r.inputTokens } : {}),
-        ...(r.outputTokens !== null ? { output: r.outputTokens } : {}),
-        ...(r.cacheReadTokens !== null ? { cacheRead: r.cacheReadTokens } : {}),
-        ...(r.cacheWriteTokens !== null ? { cacheWrite: r.cacheWriteTokens } : {}),
-        ...(r.totalTokens !== null ? { total: r.totalTokens } : {})
-      }))
+    const checkpointUsage = this.listUsageFacts(sessionId, { usageScope: 'checkpoint_window', limit: 50 }).map(r => ({
+      scopeId: r.scopeId,
+      ...(r.model ? { model: r.model } : {}),
+      ...(r.inputTokens !== null ? { input: r.inputTokens } : {}),
+      ...(r.outputTokens !== null ? { output: r.outputTokens } : {}),
+      ...(r.cacheReadTokens !== null ? { cacheRead: r.cacheReadTokens } : {}),
+      ...(r.cacheWriteTokens !== null ? { cacheWrite: r.cacheWriteTokens } : {}),
+      ...(r.totalTokens !== null ? { total: r.totalTokens } : {})
+    }))
 
-    const subagentUsage = usageRows
-      .filter(r => r.usageScope === 'subagent_total')
-      .map(r => ({
-        ...(r.parentSessionId ? { parentSessionId: r.parentSessionId } : {}),
-        scopeId: r.scopeId,
-        ...(r.model ? { model: r.model } : {}),
-        ...(r.inputTokens !== null ? { input: r.inputTokens } : {}),
-        ...(r.outputTokens !== null ? { output: r.outputTokens } : {}),
-        ...(r.totalTokens !== null ? { total: r.totalTokens } : {})
-      }))
+    const subagentUsage = this.listUsageFacts(sessionId, { usageScope: 'subagent_total', limit: 50 }).map(r => ({
+      ...(r.parentSessionId ? { parentSessionId: r.parentSessionId } : {}),
+      scopeId: r.scopeId,
+      ...(r.model ? { model: r.model } : {}),
+      ...(r.inputTokens !== null ? { input: r.inputTokens } : {}),
+      ...(r.outputTokens !== null ? { output: r.outputTokens } : {}),
+      ...(r.totalTokens !== null ? { total: r.totalTokens } : {})
+    }))
 
-    const statuses = [...modelRows.map(r => r.coverageStatus), ...usageRows.map(r => r.coverageStatus)]
+    const statuses = (
+      this.db.prepare(
+        `SELECT DISTINCT coverageStatus AS s FROM session_model_metadata WHERE sessionId = ?
+         UNION
+         SELECT DISTINCT coverageStatus AS s FROM session_usage_facts WHERE sessionId = ?`
+      ).all(sessionId, sessionId) as Array<{ s: MetadataCoverageStatus }>
+    ).map(r => r.s)
+
     const coverageStatus: MetadataCoverageStatus = statuses.length === 0
       ? 'UNAVAILABLE'
       : statuses.includes('COMPLETE') && !statuses.includes('PARTIAL') && !statuses.includes('UNAVAILABLE')
@@ -542,13 +627,13 @@ export class ModelIntelligenceStore {
           ? 'PARTIAL'
           : 'UNAVAILABLE'
 
-    const unavailableReasons = [
-      ...new Set(
-        [...modelRows.map(r => r.unavailableReason), ...usageRows.map(r => r.unavailableReason)].filter(
-          (v): v is string => !!v
-        )
-      )
-    ]
+    const unavailableReasons = (
+      this.db.prepare(
+        `SELECT DISTINCT unavailableReason AS r FROM session_model_metadata WHERE sessionId = ? AND unavailableReason IS NOT NULL
+         UNION
+         SELECT DISTINCT unavailableReason AS r FROM session_usage_facts WHERE sessionId = ? AND unavailableReason IS NOT NULL`
+      ).all(sessionId, sessionId) as Array<{ r: string }>
+    ).map(r => r.r)
 
     const unknownFieldPaths = [
       ...new Set(
@@ -569,6 +654,11 @@ export class ModelIntelligenceStore {
       providers,
       clients,
       observabilities,
+      qualifiedFacts,
+      totalModelFacts,
+      hasMoreModelFacts: modelOffset + modelRows.length < totalModelFacts,
+      totalUsageFacts,
+      hasMoreUsageFacts: totalUsageFacts > 50,
       primaryUsage,
       checkpointUsage,
       subagentUsage,
