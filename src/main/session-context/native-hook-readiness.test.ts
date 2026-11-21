@@ -6,6 +6,7 @@ import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, parseNativeE
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { SessionStore, sessionStorePath } from './store'
 import { nativeHookReadiness } from './native-hook-readiness'
+import { captureRuntimeHelperSource } from './native-hook-profile'
 import { buildSync } from 'esbuild'
 import { execFileSync } from 'node:child_process'
 import { SessionContextClient } from './client'
@@ -429,3 +430,86 @@ it('diagnoses only the selected Antigravity IDE source and never reads an unqual
   expect(diagnose()).toBe('FORMAT_UNSUPPORTED')
   expect(diagnose(() => writeFileSync(path, 'source changed'))).toBe('SOURCE_STALE')
 }, 20000)
+
+it('detects helper version drift, runtime source staleness, local tamper/drift non-regression, and Codex checkout vs portable parity', async () => {
+  const f = fixture()
+  const bundleDir = createTempDir('hook-bundle-')
+  cleanup.push(() => cleanupTempRepo(bundleDir, { strict: true }))
+  const bundleOut = join(bundleDir, 'out', 'session-context')
+  mkdirSync(bundleOut, { recursive: true })
+  const portablePath = join(bundleOut, 'native-hook-portable.cjs')
+  const checkoutBundlePath = join(bundleOut, 'native-hook.cjs')
+  writeFileSync(portablePath, '// v1 portable helper\n')
+  writeFileSync(checkoutBundlePath, '// v1 checkout helper\n')
+
+  const v1Runtime = captureRuntimeHelperSource({ packaged: false, appPath: bundleDir })
+  const v1PortableDigest = v1Runtime.portable.digest!
+
+  // (h) Codex checkout-local native-hook.cjs matches checkout bundle
+  const localHelperDir = join(f.root, 'out', 'session-context')
+  mkdirSync(localHelperDir, { recursive: true })
+  const installedCheckoutHelper = join(localHelperDir, 'native-hook.cjs')
+  writeFileSync(installedCheckoutHelper, '// v1 checkout helper\n')
+  installNativeHooks({ repositoryId: 'repo', record: { path: f.root, ...f.target, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }, commandPath: installedCheckoutHelper, nodePath: process.execPath, authorized: true })
+  const checkoutCurrent = nativeHookReadiness(f.store().registry, f.root, f.target, unknownNativeTrust('TRUST_NOT_INSPECTED'), 'codex', { runtimeHelper: v1Runtime })
+  expect(checkoutCurrent.helperVersion).toMatchObject({ state: 'CURRENT', reasonCode: 'HELPER_VERSION_CURRENT', sourceScope: 'CHECKOUT', helperKind: 'CHECKOUT', installedDigest: v1Runtime.checkout.digest, expectedDigest: v1Runtime.checkout.digest })
+
+  // (a) Distributed portable helper installed at v1, runtime booted at v2 + historical observed event -> STALE takes priority
+  const oldPortablePath = join(f.root, `native-hook-${v1PortableDigest}.cjs`)
+  writeFileSync(oldPortablePath, '// v1 portable helper\n')
+  installNativeHooks({ repositoryId: 'repo', record: { path: f.root, ...f.target, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }, commandPath: oldPortablePath, nodePath: process.execPath, authorized: true })
+  const binding = readNativeBinding(f.bindingPath)
+  const c = clientFixture(f)
+  const trust = await inspectNativeTrust(f.root, f.target, true, c.client)
+  const v1Event = stampNativeCapture(normalizeNativeHook({ session_id: c.scope().sessionId, hook_event_name: 'SessionStart', cwd: f.root }, binding, new Date(), { helperDigest: v1PortableDigest }), binding)
+  spoolNativeHook(v1Event, binding.spool)
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+
+  writeFileSync(portablePath, '// v2 portable helper\n')
+  const v2Runtime = captureRuntimeHelperSource({ packaged: false, appPath: bundleDir })
+  const stale = nativeHookReadiness(f.store().registry, f.root, f.target, trust, 'codex', { runtimeHelper: v2Runtime })
+  expect(stale.installation.state).toBe('CONFIGURED')
+  expect(stale.helperVersion).toMatchObject({
+    state: 'STALE',
+    reasonCode: 'HOOK_HELPER_STALE',
+    installedDigest: v1PortableDigest,
+    expectedDigest: v2Runtime.portable.digest,
+    sourceScope: 'CHECKOUT',
+    helperKind: 'PORTABLE',
+    nextAction: 'REINSTALL_NATIVE_HOOKS'
+  })
+  expect(stale.captureReadiness).toEqual({ state: 'NOT_VERIFIED', reasonCode: 'HOOK_HELPER_STALE' })
+  expect(stale.nextEvidence).toBe('REINSTALL_HELPER_AND_RELOAD_CLIENT')
+
+  // (d) Bundle modified on disk AFTER runtime initialization -> RUNTIME_SOURCE_STALE (never false HOOK_HELPER_STALE)
+  writeFileSync(portablePath, '// v3 modified after boot\n')
+  const runtimeStale = nativeHookReadiness(f.store().registry, f.root, f.target, trust, 'codex', { runtimeHelper: v2Runtime })
+  expect(runtimeStale.helperVersion).toMatchObject({ state: 'UNKNOWN', reasonCode: 'RUNTIME_SOURCE_STALE', installedDigest: v1PortableDigest, nextAction: 'RESTART_CODE_AWARENESS_RUNTIME' })
+  expect(runtimeStale.captureReadiness).toEqual({ state: 'NOT_VERIFIED', reasonCode: 'RUNTIME_SOURCE_STALE' })
+
+  // (d) Unavailable runtime bundle -> UNKNOWN / HOOK_HELPER_UNAVAILABLE
+  const missingBundleDir = createTempDir('hook-missing-bundle-')
+  cleanup.push(() => cleanupTempRepo(missingBundleDir, { strict: true }))
+  const unavailable = nativeHookReadiness(f.store().registry, f.root, f.target, trust, 'codex', { runtimeHelper: captureRuntimeHelperSource({ packaged: false, appPath: missingBundleDir }) })
+  expect(unavailable.helperVersion).toMatchObject({ state: 'UNKNOWN', reasonCode: 'HOOK_HELPER_UNAVAILABLE', installedDigest: v1PortableDigest })
+
+  // (c) Stale worktree / config drift / tampered helper -> preserve local reason codes (not false HOOK_HELPER_STALE)
+  const v2Digest = v2Runtime.portable.digest!
+  const v2HelperPath = join(f.root, `native-hook-${v2Digest}.cjs`)
+  writeFileSync(portablePath, '// v2 portable helper\n')
+  writeFileSync(v2HelperPath, '// v2 portable helper\n')
+  installNativeHooks({ repositoryId: 'repo', record: { path: f.root, ...f.target, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }, commandPath: v2HelperPath, nodePath: process.execPath, authorized: true })
+  const latestRuntime = captureRuntimeHelperSource({ packaged: false, appPath: bundleDir })
+  expect(nativeHookReadiness(f.store().registry, f.root, { ...f.target, generation: '3'.repeat(64) }, trust, 'codex', { runtimeHelper: latestRuntime }).helperVersion)
+    .toMatchObject({ state: 'UNKNOWN', reasonCode: 'WORKTREE_STALE' })
+
+  const origConfig = readFileSync(f.configPath, 'utf8')
+  writeFileSync(f.configPath, origConfig + '\n')
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust, 'codex', { runtimeHelper: latestRuntime }).helperVersion)
+    .toMatchObject({ state: 'UNKNOWN', reasonCode: 'HOOK_CONFIG_DRIFT' })
+  writeFileSync(f.configPath, origConfig)
+
+  writeFileSync(v2HelperPath, '// tampered\n')
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust, 'codex', { runtimeHelper: latestRuntime }).helperVersion)
+    .toMatchObject({ state: 'UNKNOWN', reasonCode: 'HOOK_COMMAND_DIGEST_MISMATCH' })
+}, 30000)
