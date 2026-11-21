@@ -46,6 +46,7 @@ import { WorktreeStructureNavigation } from './core/context/worktree-structure-n
 import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
+import { captureRuntimeHelperSource } from './session-context/native-hook-profile'
 import { sessionTargetResolver } from './session-context/target'
 import { sessionRepositoryReader } from './session-context/session-repository-read'
 import { registrySources } from './session-context/registry-sources'
@@ -542,6 +543,11 @@ app.whenReady().then(async () => {
       dataOrigin: { at: previewContext.data.at, digest: previewContext.data.digest, artifacts: previewContext.data.artifacts, media: previewContext.data.media } } : { mode: 'HOST' })
   const gitManagement = new GitManagementController(activeProjects)
   registerGitManagementHandlers(gitManagement)
+  const runtimeHelperSource = captureRuntimeHelperSource({
+    packaged: app.isPackaged,
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath
+  })
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
@@ -749,7 +755,7 @@ app.whenReady().then(async () => {
           if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
           continuumSession.getActiveService()!.invalidatePublication(invocationId, state)
         }
-      })
+      }, undefined, false, runtimeHelperSource)
     if (activeSessionContext) {
       const sessionContext = activeSessionContext
       void sessionContext.call('list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1 }).catch(() => {})

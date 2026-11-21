@@ -13,6 +13,7 @@ import { readExecutionSessionAssociations, sessionStorePath } from './store'
 import type { SessionAssociation } from './associations'
 import { nativeCaptureAgent } from './capture-health'
 import { hasNativeBindingFile, nativeBindingPath, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
+import type { CapturedRuntimeHelperState } from './native-hook-profile'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface NativeIngestionTargetReport {
@@ -55,7 +56,8 @@ export class SessionContextClient implements SessionContextPort {
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
     private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort,
-    private readonly nativeHookClient?: NativeHookClient, private readonly readOnlyStore = false) {}
+    private readonly nativeHookClient?: NativeHookClient, private readonly readOnlyStore = false,
+    private readonly runtimeHelper?: CapturedRuntimeHelperState) {}
   setMaintenanceTrigger(trigger: () => void): void {
     this.onMaintenanceNeeded = trigger
   }
@@ -99,7 +101,7 @@ export class SessionContextClient implements SessionContextPort {
   }
   private createGeneration(): Generation {
     const cancellation = new Int32Array(new SharedArrayBuffer(4))
-    const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer, readOnlyStore: this.readOnlyStore }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
+    const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer, readOnlyStore: this.readOnlyStore, ...(this.runtimeHelper ? { runtimeHelper: this.runtimeHelper } : {}) }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
     const generation = { worker, cancellation, closing: false }
     this.generation = generation
     worker.on('message', async (message: { id: number; result?: McpToolResult; nativeReports?: NativeIngestionTargetReport[]; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] }; publication?: { token: number; action: 'read' | 'associate' | 'invalidate'; receiptId?: string; association?: PublicationAssociation; invocationId?: string; state?: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS' } }) => {

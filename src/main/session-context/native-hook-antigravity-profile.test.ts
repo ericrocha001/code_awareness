@@ -34,7 +34,8 @@ import {
   inspectUserAntigravityInstallation,
   installUserAntigravityHooks,
   qualifyAntigravityBinary,
-  resolvePortableHelperContent
+  resolvePortableHelperContent,
+  captureRuntimeHelperSource
 } from './native-hook-profile'
 import {
   disableUserProfileAntigravity,
@@ -656,3 +657,106 @@ test('Antigravity client discovery, honest trust, settings auto-enroll & real IP
   expect(disableUserProfileAntigravity).toBeTypeOf('function')
   expect(createHash('sha256').update('ok').digest('hex')).toHaveLength(64)
 }, 30_000)
+
+test('Antigravity user-profile tracks v1->v2 helper drift, waiting-for-real-client-event before execution, and v2 current capture', async () => {
+  const base = tempDir('ca-ag-ver-')
+  const repo = createRepo(join(base, 'repo-ver'))
+  const configHome = join(base, 'GeminiHome')
+  mkdirSync(configHome, { recursive: true })
+  const { profile, recordsByPath } = await createProfileWithRepos(base, [{ path: repo }])
+  const rec = recordsByPath.get(repo)!
+
+  const appDir = join(base, 'runtime-app')
+  mkdirSync(join(appDir, 'out', 'session-context'), { recursive: true })
+  const realPortable = resolvePortableHelperContent({ packaged: false, appPath: process.cwd() })
+  const v1Content = realPortable + '\n/* ag-profile-v1 */\n'
+  const v2Content = realPortable + '\n/* ag-profile-v2 */\n'
+  const portablePath = join(appDir, 'out', 'session-context', 'native-hook-portable.cjs')
+  writeFileSync(portablePath, v1Content)
+  const runtimeV1 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+
+  // 1. Install v1 helper into user profile & enroll repo
+  const v1Install = enrollUserProfileAntigravity({
+    profile,
+    configHome,
+    helperContent: v1Content,
+    nodePath: findNodeBinary().path,
+    runAsNode: findNodeBinary().runAsNode,
+    repositoryIds: [rec.id],
+    authorized: true
+  })
+  expect(v1Install.state).toBe('CONFIGURED')
+
+  // Fire real v1 hook script so repo bootstraps & ingests v1 event
+  const cmd = JSON.parse(readFileSync(join(configHome, 'hooks.json'), 'utf8'))[ANTIGRAVITY_HOOK_NAME].SessionStart[0].command
+  const v1Exec = runAntigravityCommand(cmd, configHome, { conversationId: 'conv-v1', workspacePaths: [repo] })
+  expect(JSON.parse(v1Exec.stdout.trim())).toEqual({})
+  const bindingPath = join(repo, '.code-awareness', 'native-hooks', 'antigravity', 'binding.json')
+  const bindingV1 = readNativeBinding(bindingPath)
+  const store = new SessionStore(sessionStorePath(join(profile, 'continuum'), rec.id), rec.id)
+  try {
+    const target = { worktreeId: bindingV1.worktreeId, generation: bindingV1.generation }
+    await ingestNativeHooks(store.registry, bindingV1, async () => ({ root: repo, fingerprint: '', validate: async () => {} }), () => {})
+
+    // Verify v1 health while runtime is v1 -> clean CURRENT + OBSERVED -> boundary PROVENANCE_ASSOCIATION (CONTEXTUAL_ONLY_NO_HOST_WITNESS)
+    const v1Healthy = inspectNativeCaptureHealth(store, repo, target, 'antigravity', { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' }, profile, runtimeV1)
+    expect(v1Healthy).toMatchObject({
+      state: 'OBSERVED',
+      nativeCapture: {
+        readiness: { helperVersion: { state: 'CURRENT', sourceScope: 'USER', helperKind: 'PORTABLE' }, captureReadiness: { state: 'OBSERVED' } },
+        boundary: { stage: 'PROVENANCE_ASSOCIATION', reasonCode: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS', ownership: 'EXTERNAL_CLIENT' }
+      }
+    })
+
+    // 2. Runtime boots on v2 bundle while host user-profile still runs v1 -> STALE
+    writeFileSync(portablePath, v2Content)
+    const runtimeV2 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+    const staleView = inspectNativeCaptureHealth(store, repo, target, 'antigravity', { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' }, profile, runtimeV2)
+    expect(staleView).toMatchObject({
+      state: 'UNAVAILABLE',
+      reason: 'HOOK_HELPER_STALE',
+      nativeCapture: {
+        readiness: {
+          installation: { state: 'CONFIGURED', installed: 6 },
+          helperVersion: { state: 'STALE', reasonCode: 'HOOK_HELPER_STALE', installedDigest: runtimeV1.portable.digest, expectedDigest: runtimeV2.portable.digest, sourceScope: 'USER' },
+          captureReadiness: { state: 'NOT_VERIFIED', reasonCode: 'HOOK_HELPER_STALE' }
+        },
+        boundary: { stage: 'HOOK_INSTALLATION', boundary: 'INSTALLED_HELPER_VERSION', reasonCode: 'HOOK_HELPER_STALE', ownership: 'CODE_AWARENESS', recommendedAction: 'REINSTALL_NATIVE_HOOKS' }
+      }
+    })
+
+    // 3. Reinstall user-profile to v2, BEFORE any v2 hook event runs -> CURRENT + WAITING_FOR_REAL_CLIENT_EVENT
+    enrollUserProfileAntigravity({
+      profile,
+      configHome,
+      helperContent: v2Content,
+      nodePath: findNodeBinary().path,
+      runAsNode: findNodeBinary().runAsNode,
+      repositoryIds: [rec.id],
+      authorized: true
+    })
+    const beforeV2Event = inspectNativeCaptureHealth(store, repo, target, 'antigravity', { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' }, profile, runtimeV2)
+    expect(beforeV2Event).toMatchObject({
+      state: 'CONFIGURED',
+      nativeCapture: {
+        readiness: { helperVersion: { state: 'CURRENT', sourceScope: 'USER' }, captureReadiness: { state: 'NOT_VERIFIED', reasonCode: 'CURRENT_CAPTURE_UNPROVEN' } },
+        boundary: { stage: 'HOST_EXECUTION', reasonCode: 'WAITING_FOR_REAL_CLIENT_EVENT', ownership: 'EXTERNAL_CLIENT', recommendedAction: 'CLIENT_REVIEW_REQUIRED' }
+      }
+    })
+
+    // 4. Fire real v2 hook binary & ingest -> CURRENT + OBSERVED
+    const cmdV2 = JSON.parse(readFileSync(join(configHome, 'hooks.json'), 'utf8'))[ANTIGRAVITY_HOOK_NAME].SessionStart[0].command
+    expect(JSON.parse(runAntigravityCommand(cmdV2, configHome, { conversationId: 'conv-v2', workspacePaths: [repo] }).stdout.trim())).toEqual({})
+    await ingestNativeHooks(store.registry, readNativeBinding(bindingPath), async () => ({ root: repo, fingerprint: '', validate: async () => {} }), () => {})
+    const afterV2Event = inspectNativeCaptureHealth(store, repo, target, 'antigravity', { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' }, profile, runtimeV2)
+    expect(afterV2Event).toMatchObject({
+      state: 'OBSERVED',
+      nativeCapture: {
+        readiness: { helperVersion: { state: 'CURRENT', installedDigest: runtimeV2.portable.digest, expectedDigest: runtimeV2.portable.digest }, captureReadiness: { state: 'OBSERVED', reasonCode: 'CURRENT_WINDOW_INGESTED' } },
+        boundary: { stage: 'PROVENANCE_ASSOCIATION', reasonCode: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' }
+      }
+    })
+  } finally {
+    store.close()
+  }
+}, 45_000)

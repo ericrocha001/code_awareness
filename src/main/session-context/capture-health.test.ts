@@ -12,9 +12,11 @@ import { digest } from './privacy'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import { executeSessionTool } from './mcp'
-import { nativeBindingPath, normalizeNativeHook, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookProvider } from './native-hooks'
+import { nativeBindingPath, nativeDigest, normalizeNativeHook, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookProvider } from './native-hooks'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { installNativeHooks } from './native-hook-installation'
+import { captureRuntimeHelperSource } from './native-hook-profile'
+import { stampNativeCapture } from './native-capture-window'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
@@ -380,4 +382,112 @@ it('separates Antigravity installation, observed execution, pendingSpoolCount, h
     }
   })
   expect(Buffer.byteLength(JSON.stringify(body))).toBeLessThan(8192)
+}, 20000)
+
+it('localizes helper drift, runtime staleness, empty spool with 13 historical gaps, and waiting-for-client-event read-only across Antigravity lifecycle', async () => {
+  const f = fixture()
+  const appDir = join(f.base, 'runtime-app')
+  mkdirSync(join(appDir, 'out', 'session-context'), { recursive: true })
+  const portableBundle = join(appDir, 'out', 'session-context', 'native-hook-portable.cjs')
+  writeFileSync(portableBundle, '// ag-v1\n')
+  const rtV1 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+  const dV1 = rtV1.portable.digest!
+
+  const helperV1 = join(f.root, `native-hook-${dV1}.cjs`)
+  writeFileSync(helperV1, '// ag-v1\n')
+  const record = { path: f.root, ...f.target, branch: 'main', head: f.git('rev-parse', 'HEAD'), detached: false, locked: false, missing: false, prunable: false }
+  installNativeHooks({ repositoryId: 'A', record, commandPath: helperV1, nodePath: process.execPath, provider: 'antigravity', authorized: true })
+  const agBindingV1 = readNativeBinding(nativeBindingPath(f.root, 'antigravity'))
+
+  // (f) 13 old SPOOL_FULL gaps + v1 event ingested + empty spool
+  for (let i = 0; i < 13; i++) recordNativeGap(agBindingV1.spool, 'SPOOL_FULL', 'WRITE', 'PreToolUse')
+  const evV1 = stampNativeCapture(normalizeNativeHook({ conversationId: 'conv-v1', workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBindingV1, new Date(), { helperDigest: dV1 }), agBindingV1)
+  spoolNativeHook(evV1, agBindingV1.spool)
+  await ingestNativeHooks(f.store().registry, agBindingV1, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+
+  // Boot v2 runtime while host still has v1 installed
+  writeFileSync(portableBundle, '// ag-v2\n')
+  const rtV2 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+  const dV2 = rtV2.portable.digest!
+  let currentRuntime = rtV2
+  const callHealth = () => new ChannelMcpAdapter({
+    projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
+    sessionContext: {
+      call: (name, args) => executeSessionTool(
+        f.store(),
+        { inspectCapture: () => { throw new Error('NO_ENTIRE') } },
+        name, args, () => {}, f.target, [],
+        () => { throw new Error('NO_GIT') },
+        f.root, undefined, undefined, undefined, undefined, undefined, false, undefined, undefined, undefined, currentRuntime
+      )
+    }
+  }).callTool('get_system_health', { feature: 'session_context', source: 'native', agent: 'antigravity', refresh: true })
+
+  const watched = [
+    join(f.root, '.agents/hooks.json'),
+    nativeBindingPath(f.root, 'antigravity'),
+    join(f.root, '.code-awareness/native-hooks/antigravity/installation.json'),
+    helperV1
+  ]
+  const snapshotBefore = watched.map(p => readFileSync(p, 'utf8'))
+
+  // (a)+(f)+(g) Stale helper prioritized over historical gaps/captures, while empty spool + 13 gaps stay separate and files stay untouched
+  const staleRes = await callHealth()
+  expect(staleRes.isError).toBeFalsy()
+  const staleBody = JSON.parse((staleRes.content[0] as { text: string }).text)
+  expect(staleBody).toMatchObject({
+    source: 'native', agent: 'antigravity', state: 'UNAVAILABLE', reason: 'HOOK_HELPER_STALE',
+    nativeCapture: {
+      pendingSpoolCount: 0,
+      historicalCoverage: { state: 'PARTIAL', count: 13, gapCounts: { spoolFull: 13 } },
+      readiness: {
+        installation: { state: 'CONFIGURED', installed: 6 },
+        helperVersion: { state: 'STALE', reasonCode: 'HOOK_HELPER_STALE', installedDigest: dV1, expectedDigest: dV2, nextAction: 'REINSTALL_NATIVE_HOOKS' },
+        captureReadiness: { state: 'NOT_VERIFIED', reasonCode: 'HOOK_HELPER_STALE' }
+      },
+      boundary: { stage: 'HOOK_INSTALLATION', boundary: 'INSTALLED_HELPER_VERSION', reasonCode: 'HOOK_HELPER_STALE', ownership: 'CODE_AWARENESS', recommendedAction: 'REINSTALL_NATIVE_HOOKS' }
+    }
+  })
+  expect(watched.map(p => readFileSync(p, 'utf8'))).toEqual(snapshotBefore)
+  expect(f.store().captureHealth(f.target, 'worktree')).toBeUndefined()
+
+  // (b)+(e)+(f) Governed reinstall to v2, BEFORE any real v2 event: CURRENT, waiting for client, empty spool + 13 gaps preserved
+  const helperV2 = join(f.root, `native-hook-${dV2}.cjs`)
+  writeFileSync(helperV2, '// ag-v2\n')
+  installNativeHooks({ repositoryId: 'A', record, commandPath: helperV2, nodePath: process.execPath, provider: 'antigravity', authorized: true })
+  const agBindingV2 = readNativeBinding(nativeBindingPath(f.root, 'antigravity'))
+
+  const waitingBody = JSON.parse(((await callHealth()).content[0] as { text: string }).text)
+  expect(waitingBody).toMatchObject({
+    source: 'native', agent: 'antigravity', state: 'PARTIAL', reason: 'CAPTURE_PARTIAL',
+    nativeCapture: {
+      pendingSpoolCount: 0,
+      discovery: { state: 'UNKNOWN', reasonCode: 'CLIENT_TRUST_UNSUPPORTED' },
+      historicalCoverage: { state: 'PARTIAL', count: 13, gapCounts: { spoolFull: 13 } },
+      readiness: {
+        helperVersion: { state: 'CURRENT', reasonCode: 'HELPER_VERSION_CURRENT', installedDigest: dV2, expectedDigest: dV2 },
+        trust: { state: 'UNSUPPORTED', reasonCode: 'CLIENT_TRUST_UNSUPPORTED' },
+        captureReadiness: { state: 'NOT_VERIFIED', reasonCode: 'CURRENT_CAPTURE_UNPROVEN' }
+      },
+      boundary: { stage: 'HOST_EXECUTION', boundary: 'HOST_EXECUTION', reasonCode: 'WAITING_FOR_REAL_CLIENT_EVENT', ownership: 'EXTERNAL_CLIENT', recommendedAction: 'CLIENT_REVIEW_REQUIRED' }
+    }
+  })
+
+  // (b) After ingesting real v2 event, captureReadiness becomes OBSERVED and boundary moves to REGISTRY_INGESTION (13 gaps still unacknowledged)
+  const evV2 = stampNativeCapture(normalizeNativeHook({ conversationId: 'conv-v2', workspacePaths: [f.root], hookEventName: 'SessionStart' }, agBindingV2, new Date(), { helperDigest: dV2 }), agBindingV2)
+  spoolNativeHook(evV2, agBindingV2.spool)
+  await ingestNativeHooks(f.store().registry, agBindingV2, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+
+  const observedBody = JSON.parse(((await callHealth()).content[0] as { text: string }).text)
+  expect(observedBody).toMatchObject({
+    nativeCapture: {
+      pendingSpoolCount: 0,
+      readiness: {
+        helperVersion: { state: 'CURRENT' },
+        captureReadiness: { state: 'OBSERVED', reasonCode: 'CURRENT_WINDOW_INGESTED' }
+      },
+      boundary: { stage: 'REGISTRY_INGESTION', boundary: 'REGISTRY_INGESTION', reasonCode: 'CAPTURE_PARTIAL', ownership: 'CODE_AWARENESS' }
+    }
+  })
+  expect(Buffer.byteLength(JSON.stringify(observedBody))).toBeLessThan(8192)
 }, 20000)

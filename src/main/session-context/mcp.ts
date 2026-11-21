@@ -17,6 +17,7 @@ import { captureHealthQuery, inspectCaptureHealth, inspectNativeCaptureHealth, n
 import { inspectExecutionOriginAlignment } from './execution-origin'
 import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { nativeHookReadiness } from './native-hook-readiness'
+import type { CapturedRuntimeHelperState } from './native-hook-profile'
 import { inspectNativeTrust, unknownNativeTrust, type NativeHookClient, type NativeTrustSnapshot } from './native-hook-preflight'
 import { reconcileRegistry, registrySelector } from './registry-reconciliation'
 import type { RegistryReader, RegistrySessionRecord, SessionWitness, WorktreeRef } from './checkpoint-registry'
@@ -900,7 +901,8 @@ export async function executeSessionTool(
   allowArtifactMetadata = false,
   onDiscovery?: (report: { provider: 'codex' | 'antigravity'; truncated: boolean; coverageReason?: string; bytesRead: number; filesOpened: number; usedIndex: boolean }) => void,
   nativeCatchUp?: NativeCatchUpStatus,
-  nativeStepBudget?: NativeStepBudget
+  nativeStepBudget?: NativeStepBudget,
+  runtimeHelper?: CapturedRuntimeHelperState
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -941,20 +943,25 @@ export async function executeSessionTool(
         const agent = nativeCaptureAgent(request)
         const trust = agent === 'codex' ? await codexTrust() :
           { ...unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), state: 'UNSUPPORTED' as const }
-        data = { ...inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust, nativeProfile), executionPreflight }
+        data = { ...inspectNativeCaptureHealth(sessionStore, root, selectedTarget, agent, trust, nativeProfile, runtimeHelper), executionPreflight }
       } else {
         if (!provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
         data = await inspectCaptureHealth(sessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, request, assertActive)
         const observation = data as CaptureHealthObservation
         await reconcileRegistry(sessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
         if (!request.source) {
-          const agReadiness = nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity', nativeProfile ? { profile: nativeProfile } : undefined)
+          const readinessOptions = {
+            ...(nativeProfile ? { profile: nativeProfile } : {}),
+            ...(runtimeHelper ? { runtimeHelper } : {})
+          }
+          const resolvedReadinessOptions = Object.keys(readinessOptions).length ? readinessOptions : undefined
+          const agReadiness = nativeHookReadiness(sessionStore.registry, root, selectedTarget, unknownNativeTrust('CLIENT_TRUST_UNSUPPORTED'), 'antigravity', resolvedReadinessOptions)
           const antigravityPresent = existsSync(join(root, '.code-awareness/native-hooks/antigravity/binding.json')) ||
             existsSync(join(root, '.agents/hooks.json')) ||
             agReadiness.bootstrap?.state === 'AVAILABLE' ||
             agReadiness.installation.state !== 'MISSING'
           data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: sessionStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true,
-            ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex', nativeProfile ? { profile: nativeProfile } : undefined),
+            ...nativeCaptureDiagnostics(sessionStore.registry, root, 'codex'), readiness: nativeHookReadiness(sessionStore.registry, root, selectedTarget, await codexTrust(), 'codex', resolvedReadinessOptions),
             executionPreflight,
             ...(antigravityPresent ? { providers: { antigravity: { source: 'ANTIGRAVITY_NATIVE_HOOK', ...nativeCaptureDiagnostics(sessionStore.registry, root, 'antigravity'), readiness: agReadiness } } } : {}) } }
         }

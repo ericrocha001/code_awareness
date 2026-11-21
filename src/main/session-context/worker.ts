@@ -15,8 +15,9 @@ import { nativeInvocationWindow } from './native-capture-window'
 import { correlateNativeArtifact } from './native-artifact-correlation'
 import type { PublicationProvenancePort, PublicationReceipt, PublicationAssociationResult } from '../../shared/types/publication-provenance-types'
 import { GitService } from '../core/git-service'
+import type { CapturedRuntimeHelperState } from './native-hook-profile'
 
-const { storageBase, repositoryId, root, cancellation, readOnlyStore } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer; readOnlyStore?: boolean }
+const { storageBase, repositoryId, root, cancellation, readOnlyStore, runtimeHelper } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer; readOnlyStore?: boolean; runtimeHelper?: CapturedRuntimeHelperState }
 const cancelled = new Int32Array(cancellation)
 const abort = new AbortController()
 const assertActive = () => { if (Atomics.load(cancelled, 0)) throw new Error('PROJECT_CONTEXT_CHANGED') }
@@ -333,7 +334,9 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
           message.nativeTrust,
           message.allowArtifactMetadata,
           undefined,
-          nativeCatchUp
+          nativeCatchUp,
+          undefined,
+          runtimeHelper
         )
     if (message.name === 'reconcile_checkpoint_registry' && !result.isError && result.content[0]?.type === 'text' && remainingNativeBacklog) {
       const payload = JSON.parse(result.content[0].text)

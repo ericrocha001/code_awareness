@@ -24,6 +24,10 @@ export interface NativeInstallationInspection {
   repairability?: 'REPAIRABLE' | 'CONFLICT' | 'UNSAFE'
   expected: 7 | 6
   handlers: { key: string; event: NativeHookEvent; sourcePath: string }[]
+  scope?: 'USER' | 'CHECKOUT'
+  helperKind?: 'PORTABLE' | 'CHECKOUT'
+  helperPath?: string
+  helperDigest?: string
 }
 
 export interface ParsedAntigravityUserCommand {
@@ -87,10 +91,18 @@ function referencesBindingPath(command: string, bindingPath: string): boolean {
   return command.endsWith(' "' + bindingPath + '"') || command.includes('set CA_BINDING=' + bindingPath + '&&')
 }
 
+type ValidatedHelperMap = Map<string, { digest: string; kind: 'PORTABLE' | 'CHECKOUT' }>
+
+function singleHelperInfo(validated: ValidatedHelperMap): { helperPath: string; helperDigest: string; helperKind: 'PORTABLE' | 'CHECKOUT' } | undefined {
+  if (validated.size !== 1) return undefined
+  const [[helperPath, info]] = [...validated.entries()]
+  return { helperPath, helperDigest: info.digest, helperKind: info.kind }
+}
+
 function validateHandlerCommand(
   command: string,
   bindingPath: string,
-  validatedCommands: Set<string>
+  validatedCommands: ValidatedHelperMap
 ): string[] | 'NOT_OWNED' | 'HOOK_PATH_UNAVAILABLE' | 'HOOK_COMMAND_DIGEST_MISMATCH' {
   const paths = parseHandlerCommand(command)
   if (!paths || paths[3] !== bindingPath) return 'NOT_OWNED'
@@ -98,11 +110,12 @@ function validateHandlerCommand(
     return 'HOOK_PATH_UNAVAILABLE'
   }
   if (!validatedCommands.has(paths[2])) {
+    const digest = nativeDigest(boundedFile(paths[2], MAX_INSTALLATION_BYTES))
     const digestPath = /^native-hook-([a-f0-9]{64})\.cjs$/.exec(paths[2].split(/[\\/]/).at(-1)!)
-    if (digestPath && nativeDigest(boundedFile(paths[2], MAX_INSTALLATION_BYTES)) !== digestPath[1]) {
+    if (digestPath && digest !== digestPath[1]) {
       return 'HOOK_COMMAND_DIGEST_MISMATCH'
     }
-    validatedCommands.add(paths[2])
+    validatedCommands.set(paths[2], { digest, kind: digestPath ? 'PORTABLE' : 'CHECKOUT' })
   }
   return paths
 }
@@ -117,7 +130,7 @@ function validateLegacyPaths(paths: string[]): string[] | 'HOOK_PATH_UNAVAILABLE
 function inspectHandlerList(
   list: Record<string, unknown>[],
   bindingPath: string,
-  validatedCommands: Set<string>,
+  validatedCommands: ValidatedHelperMap,
   onOwned: (paths: string[], hook: Record<string, unknown>, handlerIndex: number, legacy: boolean) => string | undefined,
   legacyRoot?: string
 ): string | undefined {
@@ -127,6 +140,9 @@ function inspectHandlerList(
     const validated = legacy?.legacy ? validateLegacyPaths(legacy.paths) : validateHandlerCommand(hook.command, bindingPath, validatedCommands)
     if (validated === 'NOT_OWNED') continue
     if (typeof validated === 'string') return validated
+    if (legacy?.legacy && !validatedCommands.has(validated[2])) {
+      validatedCommands.set(validated[2], { digest: nativeDigest(boundedFile(validated[2], MAX_INSTALLATION_BYTES)), kind: 'CHECKOUT' })
+    }
     const failure = onOwned(validated, hook, handlerIndex, !!legacy?.legacy)
     if (failure) return failure
   }
@@ -160,7 +176,7 @@ export function inspectNativeInstallation(
         if (!existsSync(userBinding.configPath)) return result('MISSING', 'NATIVE_CONFIG_MISSING')
         const userText = boundedFile(userBinding.configPath, MAX_HOOK_CONFIG_BYTES)
         const userHandlers: NativeInstallationInspection['handlers'] = []
-        const seenHelpers = new Set<string>()
+        const seenHelpers: ValidatedHelperMap = new Map()
         if (provider === 'antigravity') {
           const agConfig = parseAntigravityConfig(userText)
           const rawGroup = agConfig[ANTIGRAVITY_HOOK_NAME]
@@ -183,7 +199,7 @@ export function inspectNativeInstallation(
               if (!seenHelpers.has(parsedCmd.helperPath)) {
                 const d = /native-hook-([a-f0-9]{64})\.cjs$/.exec(parsedCmd.helperPath)![1]
                 if (nativeDigest(boundedFile(parsedCmd.helperPath, MAX_INSTALLATION_BYTES)) !== d) return 'HOOK_COMMAND_DIGEST_MISMATCH'
-                seenHelpers.add(parsedCmd.helperPath)
+                seenHelpers.set(parsedCmd.helperPath, { digest: d, kind: 'PORTABLE' })
               }
               if (hook.async === true || hook.timeout !== 3) return 'NATIVE_HANDLER_INCOMPATIBLE'
               matches.push({ key, event, sourcePath: userBinding.configPath! })
@@ -210,7 +226,8 @@ export function inspectNativeInstallation(
             userHandlers.push(...matches)
           }
           if (userHandlers.length !== 6) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLERS_MISSING', userHandlers.length), repairability: 'REPAIRABLE' }
-          return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 6, expected: 6, handlers: userHandlers }
+          if (seenHelpers.size !== 1) return { ...result('INCOMPATIBLE', 'HOOK_CONFIG_DRIFT', userHandlers.length), repairability: 'REPAIRABLE' }
+          return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 6, expected: 6, handlers: userHandlers, scope: 'USER', ...singleHelperInfo(seenHelpers) }
         }
         const userConfig = parseCodexConfig(userText)
         for (const event of codexHookEvents) {
@@ -225,7 +242,7 @@ export function inspectNativeInstallation(
               if (!seenHelpers.has(cmdMatch[3])) {
                 const d = /native-hook-([a-f0-9]{64})\.cjs$/.exec(cmdMatch[3])![1]
                 if (nativeDigest(boundedFile(cmdMatch[3], MAX_INSTALLATION_BYTES)) !== d) return result('INCOMPATIBLE', 'HOOK_COMMAND_DIGEST_MISMATCH', userHandlers.length)
-                seenHelpers.add(cmdMatch[3])
+                seenHelpers.set(cmdMatch[3], { digest: d, kind: 'PORTABLE' })
               }
               if (group.matcher !== undefined || hook.async === true || hook.timeout !== 3) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', userHandlers.length)
               const ps = `& '${cmdMatch[2].replaceAll("'", "''")}' '${cmdMatch[3].replaceAll("'", "''")}'`
@@ -238,7 +255,8 @@ export function inspectNativeInstallation(
           userHandlers.push(...matches)
         }
         if (userHandlers.length !== 7) return { ...result('INCOMPATIBLE', 'NATIVE_HANDLERS_MISSING', userHandlers.length), repairability: 'REPAIRABLE' }
-        return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 7, expected: 7, handlers: userHandlers }
+        if (seenHelpers.size !== 1) return { ...result('INCOMPATIBLE', 'HOOK_CONFIG_DRIFT', userHandlers.length), repairability: 'REPAIRABLE' }
+        return { state: 'CONFIGURED', reasonCode: 'USER_INSTALLATION_VERIFIED', digest: nativeDigest(userText), installed: 7, expected: 7, handlers: userHandlers, scope: 'USER', ...singleHelperInfo(seenHelpers) }
       }
     }
     if (!existsSync(bindingPath) || !existsSync(configPath)) {
@@ -258,7 +276,7 @@ export function inspectNativeInstallation(
       return { ...result('INCOMPATIBLE', 'INSTALLATION_SNAPSHOT_INVALID'), repairability: 'CONFLICT' }
     }
     const config = JSON.parse(text), handlers: NativeInstallationInspection['handlers'] = []
-    const validatedCommands = new Set<string>()
+    const validatedCommands: ValidatedHelperMap = new Map()
     if (provider === 'antigravity') {
       const group = config && typeof config === 'object' && !Array.isArray(config) ? (config as Record<string, unknown>)[ANTIGRAVITY_HOOK_NAME] : undefined
       if (group && typeof group === 'object' && !Array.isArray(group)) {
@@ -315,11 +333,11 @@ export function inspectNativeInstallation(
     }
     const state = readInstallation(root, target, undefined, provider)
     const bindingDrift = snapshot.schema === 2 && !same(snapshot.binding, binding)
-    if (handlers.length !== expected || state?.removed !== expected || snapshot.installedDigest !== nativeDigest(text) || bindingDrift) {
+    if (handlers.length !== expected || state?.removed !== expected || snapshot.installedDigest !== nativeDigest(text) || bindingDrift || validatedCommands.size !== 1) {
       const reason = handlers.length !== expected || state?.removed !== expected ? 'NATIVE_HANDLERS_MISSING' : bindingDrift ? 'HOOK_BINDING_DRIFT' : 'HOOK_CONFIG_DRIFT'
       return { ...result('INCOMPATIBLE', reason, handlers.length), repairability: state ? 'REPAIRABLE' : 'CONFLICT' }
     }
-    return { state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED', digest: snapshot.installedDigest, installed: expected, expected, handlers }
+    return { state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED', digest: snapshot.installedDigest, installed: expected, expected, handlers, scope: 'CHECKOUT', ...singleHelperInfo(validatedCommands) }
   } catch (error) {
     const code = error instanceof Error ? error.message : ''
     if (code === 'WORKTREE_STALE') return result('INCOMPATIBLE', code)

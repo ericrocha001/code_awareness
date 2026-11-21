@@ -162,6 +162,7 @@ export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: st
         resolution: history.resolution, recoveredEvents: history.recoveredEvents, ...(history.gapCounts ? { gapCounts: history.gapCounts } : {}), diagnostics, omittedDiagnostics: history.count - diagnostics.length
       } }
     }
+    if (summaryTarget) return pendingSpoolCount > 0 ? { pendingSpoolCount } : {}
     return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, pendingSpoolCount, historicalCoverage: value.historicalCoverage,
       pipeline: { ...value.pipeline, expected: null, coverage: 'COVERAGE_UNKNOWN', scope: 'INGEST_ATTEMPTS', countCoverage: 'COMPLETED_ROUNDS', lostBeforeIngest: 'UNKNOWN' },
       windows: registry.nativeCaptureWindows(binding.worktreeId, binding.generation).map(window => ({ ...window,

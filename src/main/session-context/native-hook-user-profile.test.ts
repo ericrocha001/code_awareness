@@ -29,7 +29,8 @@ import {
   qualifyCodexBinary,
   resolveCodexHome,
   resolveDistributableNodeRuntime,
-  resolvePortableHelperContent
+  resolvePortableHelperContent,
+  captureRuntimeHelperSource
 } from './native-hook-profile'
 import {
   hookPaths,
@@ -793,3 +794,89 @@ test('U2: cold-path SessionStart bootstrap without PS1/binding on external & det
     }
   }))
 }, 60_000)
+
+test('Codex user-profile detects helper staleness before binding, preserves checkout fallback, and updates cleanly on reinstall', async () => {
+  const base = tempBase('ca-codex-ver-')
+  const noHooks = join(base, 'no-hooks')
+  mkdirSync(noHooks, { recursive: true })
+  const repo = join(base, 'repo')
+  initRepo(repo, noHooks)
+
+  const { profile, store: catalogStore } = makeProfile(base)
+  const codexHome = join(base, 'codex-home')
+  mkdirSync(codexHome, { recursive: true })
+  const rec = catalogStore.upsertLocalCheckout({ path: repo, normalizedPath: repo.toLowerCase(), name: 'repo', status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' }).record
+  const resolver = sessionTargetResolver(new GitWorktreeRegistry(repo, new GitService(), { repositoryId: rec.id, isActive: () => true }), () => {})
+  const target = (await resolver.current!()).selection
+
+  const appDir = join(base, 'runtime-app')
+  mkdirSync(join(appDir, 'out', 'session-context'), { recursive: true })
+  const realPortable = resolvePortableHelperContent({ packaged: false, appPath: process.cwd() })
+  const v1Content = realPortable + '\n/* codex-v1 */\n'
+  const v2Content = realPortable + '\n/* codex-v2 */\n'
+  const portablePath = join(appDir, 'out', 'session-context', 'native-hook-portable.cjs')
+  writeFileSync(portablePath, v1Content)
+  const rtV1 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+
+  const { nodePath, runAsNode } = portableRuntime()
+  const store = new SessionStore(sessionStorePath(join(profile, 'continuum'), rec.id), rec.id)
+  cleanupClosers.push(() => store.close())
+
+  // 1. User-profile installed at v1, enrolled repo, NO binding yet (USER_PROFILE_READY_BINDING_PENDING)
+  enrollUserProfileCodex({
+    profile,
+    codexHome,
+    helperContent: v1Content,
+    nodePath,
+    runAsNode,
+    repositoryIds: [rec.id],
+    authorized: true,
+    allowWorktreeRuntime: true
+  })
+
+  // Boot runtime v2 -> even before binding.json exists, USER_PROFILE_READY_BINDING_PENDING surfaces STALE
+  writeFileSync(portablePath, v2Content)
+  const rtV2 = captureRuntimeHelperSource({ packaged: false, appPath: appDir })
+  const pendingStale = inspectNativeCaptureHealth(store, repo, target, 'codex', undefined, profile, rtV2)
+  expect(pendingStale).toMatchObject({
+    state: 'UNAVAILABLE',
+    reason: 'HOOK_HELPER_STALE',
+    nativeCapture: {
+      readiness: {
+        installation: { state: 'CONFIGURED', reasonCode: 'USER_PROFILE_READY_BINDING_PENDING' },
+        helperVersion: { state: 'STALE', reasonCode: 'HOOK_HELPER_STALE', installedDigest: rtV1.portable.digest, expectedDigest: rtV2.portable.digest, sourceScope: 'USER' }
+      },
+      boundary: { stage: 'HOOK_INSTALLATION', reasonCode: 'HOOK_HELPER_STALE', ownership: 'CODE_AWARENESS', recommendedAction: 'REINSTALL_NATIVE_HOOKS' }
+    }
+  })
+
+  // 2. Reinstall user-profile to v2 -> CURRENT & WAITING_FOR_REAL_CLIENT_EVENT
+  enrollUserProfileCodex({ profile, codexHome, helperContent: v2Content, nodePath, runAsNode, repositoryIds: [rec.id], authorized: true, allowWorktreeRuntime: true })
+  const userCurrent = inspectNativeCaptureHealth(store, repo, target, 'codex', undefined, profile, rtV2)
+  expect(userCurrent).toMatchObject({
+    state: 'CONFIGURED',
+    nativeCapture: {
+      readiness: {
+        helperVersion: { state: 'CURRENT', installedDigest: rtV2.portable.digest, expectedDigest: rtV2.portable.digest, sourceScope: 'USER' }
+      },
+      boundary: { stage: 'HOST_EXECUTION', reasonCode: 'WAITING_FOR_REAL_CLIENT_EVENT', ownership: 'EXTERNAL_CLIENT', recommendedAction: 'CLIENT_REVIEW_REQUIRED' }
+    }
+  })
+
+  // 3. Checkout-local legacy override remains authoritative over user-profile fallback when installed in checkout
+  const checkoutHelper = join(repo, `native-hook-${rtV1.portable.digest}.cjs`)
+  writeFileSync(checkoutHelper, v1Content)
+  const record = await new GitWorktreeRegistry(repo, new GitService(), { repositoryId: rec.id, isActive: () => true }).resolveCheckout(repo)
+  installNativeHooks({ repositoryId: rec.id, record, commandPath: checkoutHelper, nodePath, provider: 'codex', authorized: true })
+  const checkoutOverride = inspectNativeCaptureHealth(store, repo, target, 'codex', undefined, profile, rtV2)
+  expect(checkoutOverride).toMatchObject({
+    state: 'UNAVAILABLE',
+    reason: 'HOOK_HELPER_STALE',
+    nativeCapture: {
+      readiness: {
+        installation: { state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED' },
+        helperVersion: { state: 'STALE', sourceScope: 'CHECKOUT', installedDigest: rtV1.portable.digest, expectedDigest: rtV2.portable.digest }
+      }
+    }
+  })
+}, 45_000)
