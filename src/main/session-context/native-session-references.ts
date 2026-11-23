@@ -56,6 +56,13 @@ export interface NativeSourceRecordSummary {
   indexedBytes: number
   eventCount: number
   omittedRecords: number
+  recordsTotal: number
+  recordsAddressable: number
+  typedRecords: number
+  opaqueRecords: number
+  unavailableRecords: number
+  sourceVariant?: string
+  coexistingVariants?: string[]
   sourceCoverage: string
   attemptCoverage: string
   timeCoverage: NativeTimeCoverage
@@ -87,11 +94,13 @@ export interface NativeIndexingCheckpoint {
   updatedAt: string
 }
 
+export type NativeIndexedRowType = NativeSourceEventType | 'OPAQUE' | 'UNAVAILABLE'
+
 export interface NativeIndexedEventRow {
   seq: number
   ordinal: number
   eventId: string
-  type: NativeSourceEventType
+  type: NativeIndexedRowType
   timestamp?: string
   timestampMs?: number
   tool?: string
@@ -185,12 +194,18 @@ export function toNativeEventMeta(row: NativeIndexedEventRow) {
     eventId: row.eventId,
     ordinal: row.ordinal,
     type: row.type,
+    ...(row.type === 'OPAQUE' || row.type === 'UNAVAILABLE'
+      ? {
+          recordKind: row.type,
+          limitation: row.errorKind ?? 'UNRECOGNIZED_FORMAT'
+        }
+      : {}),
     ...(row.timestamp ? { timestamp: row.timestamp } : {}),
     ...(row.tool ? { tool: row.tool } : {}),
     ...(row.turnId ? { turnId: row.turnId } : {}),
     ...(row.status ? { status: row.status } : {}),
     ...(row.pairing ? { pairing: row.pairing } : {}),
-    ...(row.errorKind ? { errorKind: row.errorKind } : {}),
+    ...(row.errorKind && row.type !== 'OPAQUE' && row.type !== 'UNAVAILABLE' ? { errorKind: row.errorKind } : {}),
     bytes: row.bytes,
     payloadDigest: row.payloadDigest,
     sanitized: row.sanitized
@@ -251,6 +266,13 @@ export class NativeSessionReferences {
         lastOrdinal INTEGER NOT NULL DEFAULT 0,
         currentTurnId TEXT,
         openCallsJson TEXT NOT NULL DEFAULT '{}',
+        recordsTotal INTEGER NOT NULL DEFAULT 0,
+        recordsAddressable INTEGER NOT NULL DEFAULT 0,
+        typedRecords INTEGER NOT NULL DEFAULT 0,
+        opaqueRecords INTEGER NOT NULL DEFAULT 0,
+        unavailableRecords INTEGER NOT NULL DEFAULT 0,
+        sourceVariant TEXT,
+        coexistingVariants TEXT,
         updatedAt TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS native_reference_checkpoints (
@@ -327,6 +349,17 @@ export class NativeSessionReferences {
       );
     `)
     try { db.prepare("INSERT INTO native_reference_fts(native_reference_fts, rank) VALUES ('secure-delete', 1)").run() } catch {}
+    for (const ddl of [
+      'ALTER TABLE native_reference_sources ADD COLUMN recordsTotal INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN recordsAddressable INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN typedRecords INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN opaqueRecords INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN unavailableRecords INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN sourceVariant TEXT',
+      'ALTER TABLE native_reference_sources ADD COLUMN coexistingVariants TEXT'
+    ]) {
+      try { db.exec(ddl) } catch {}
+    }
     this.available = true
     this.ftsAvailable = true
   }
@@ -358,6 +391,13 @@ export class NativeSessionReferences {
       indexedBytes: Number(row.indexedBytes),
       eventCount: Number(row.eventCount),
       omittedRecords: Number(row.omittedRecords),
+      recordsTotal: Number(row.recordsTotal ?? row.lastOrdinal ?? 0),
+      recordsAddressable: Number(row.recordsAddressable ?? row.lastOrdinal ?? 0),
+      typedRecords: Number(row.typedRecords ?? row.lastOrdinal ?? 0),
+      opaqueRecords: Number(row.opaqueRecords ?? 0),
+      unavailableRecords: Number(row.unavailableRecords ?? 0),
+      ...(row.sourceVariant ? { sourceVariant: String(row.sourceVariant) } : {}),
+      ...(row.coexistingVariants ? { coexistingVariants: JSON.parse(String(row.coexistingVariants)) as string[] } : {}),
       sourceCoverage: String(row.sourceCoverage),
       attemptCoverage: String(row.attemptCoverage),
       timeCoverage: JSON.parse(String(row.timeCoverage)) as NativeTimeCoverage,
@@ -513,7 +553,7 @@ export class NativeSessionReferences {
         const insertMap = this.db.prepare('INSERT OR IGNORE INTO native_reference_fts_map (nativeKey, revision, eventId) VALUES (?,?,?)')
         const insertFts = this.db.prepare('INSERT INTO native_reference_fts (rowid, body) VALUES (?,?)')
         for (const ev of input.events) {
-          if (ev.text) {
+          if (ev.text && ev.type !== 'OPAQUE' && ev.type !== 'UNAVAILABLE') {
             const res = insertMap.run(input.nativeKey, input.revision, ev.eventId)
             if (res.changes > 0) {
               insertFts.run(res.lastInsertRowid, ev.text)
@@ -566,13 +606,16 @@ export class NativeSessionReferences {
         INSERT OR REPLACE INTO native_reference_sources (
           nativeKey, provider, repositoryId, worktreeId, generation, sourceSessionId, locatorHash, normalizer, revision,
           fileIdentity, prefixDigest, tailOffset, tailDigest, sourceBytes, indexedBytes, eventCount, omittedRecords,
+          recordsTotal, recordsAddressable, typedRecords, opaqueRecords, unavailableRecords, sourceVariant, coexistingVariants,
           sourceCoverage, attemptCoverage, timeCoverage, sourceTools, sourceTypeCounts, attemptSummary,
           errors, omittedErrors, danglingCalls, omittedDanglingCalls, turnCount, lastOrdinal, currentTurnId, openCallsJson, updatedAt
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         persisted.nativeKey, persisted.provider, persisted.repositoryId, persisted.worktreeId, persisted.generation, persisted.sourceSessionId,
         persisted.locatorHash, persisted.normalizer, persisted.revision, persisted.fileIdentity, persisted.prefixDigest,
         persisted.tailOffset, persisted.tailDigest, persisted.sourceBytes, persisted.indexedBytes, persisted.eventCount, persisted.omittedRecords,
+        persisted.recordsTotal, persisted.recordsAddressable, persisted.typedRecords, persisted.opaqueRecords, persisted.unavailableRecords,
+        persisted.sourceVariant ?? null, persisted.coexistingVariants ? JSON.stringify(persisted.coexistingVariants) : null,
         persisted.sourceCoverage, persisted.attemptCoverage, JSON.stringify(persisted.timeCoverage),
         JSON.stringify(persisted.sourceTools), JSON.stringify(persisted.sourceTypeCounts), JSON.stringify(persisted.attemptSummary),
         JSON.stringify(persisted.errors), persisted.omittedErrors, JSON.stringify(persisted.danglingCalls), persisted.omittedDanglingCalls,
@@ -742,6 +785,8 @@ export class NativeSessionReferences {
     if (filters.types?.length) {
       clauses.push(`type IN (${filters.types.map(() => '?').join(',')})`)
       params.push(...filters.types)
+    } else {
+      clauses.push("(type NOT IN ('OPAQUE', 'UNAVAILABLE') OR errorKind IS NULL OR errorKind <> 'PROTOCOL_METADATA')")
     }
     if (filters.tool) {
       clauses.push('tool=?')

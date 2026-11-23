@@ -8,6 +8,8 @@ import { classifyStructuredOutput, extractTextValue, validTimestamp } from './na
 import {
   applyAttemptOutcome,
   emitIndexedEvent,
+  emitOpaqueRecord,
+  emitUnavailableRecord,
   fileIdentityOf,
   NATIVE_LINE_MAX_BYTES,
   openNoFollowReadOnly,
@@ -63,8 +65,8 @@ function stripVerbatimPrefix(path: string): string {
 }
 
 export function readCodexGrantStatus(storePath: string, repositoryId: string):
-  | { configured: false }
-  | { configured: true; ok: false }
+  | { configured: false; reason: 'GRANT_MISSING' }
+  | { configured: true; ok: false; reason: 'GRANT_INVALID_OR_REVOKED' }
   | { configured: true; ok: true; configPath: string; configText: string; profile: string; creatorAccountHash: string; allowLexicalIndex: boolean } {
   const configDirectory = dirname(storePath), configPath = join(configDirectory, 'session-context.provider.json')
   let configText: string
@@ -72,13 +74,13 @@ export function readCodexGrantStatus(storePath: string, repositoryId: string):
     assertProfilePath(configPath, configDirectory)
     configText = boundedFile(configPath, 65536)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { configured: false }
-    return { configured: true, ok: false }
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { configured: false, reason: 'GRANT_MISSING' }
+    return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' }
   }
   let config: Record<string, unknown>
-  try { config = JSON.parse(configText) as Record<string, unknown> } catch { return { configured: true, ok: false } }
+  try { config = JSON.parse(configText) as Record<string, unknown> } catch { return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' } }
   const nativeSources = config?.nativeSources as Record<string, unknown> | undefined
-  if (!nativeSources || nativeSources.codex === undefined) return { configured: false }
+  if (!nativeSources || nativeSources.codex === undefined) return { configured: false, reason: 'GRANT_MISSING' }
   try {
     assertUserOwned(configPath)
     const auth = grant.safeParse(nativeSources.codex)
@@ -89,7 +91,7 @@ export function readCodexGrantStatus(storePath: string, repositoryId: string):
     assertUserOwned(profile)
     return { configured: true, ok: true, configPath, configText, profile, creatorAccountHash, allowLexicalIndex: auth.data.allowLexicalIndex === true }
   } catch {
-    return { configured: true, ok: false }
+    return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' }
   }
 }
 
@@ -144,7 +146,7 @@ function exactRollout(profile: string, id: string) {
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
-  if (files.length !== 1) throw new Error(files.length ? 'SOURCE_IDENTITY_CONFLICT' : 'SOURCE_UNAVAILABLE')
+  if (files.length !== 1) throw new Error(files.length ? 'SOURCE_IDENTITY_CONFLICT' : 'SOURCE_NOT_FOUND')
   return files[0]
 }
 
@@ -469,6 +471,11 @@ export function stepCodexSourceIndex(options: {
     },
     makeEventId: (ordinal, part, payloadDigest, snapshotIdentity) =>
       digest(JSON.stringify([NATIVE_CODEX_NORMALIZER, sourceSessionId, snapshotIdentity, ordinal, part, payloadDigest])),
+    onUnavailableRecord: (lineStart, lineEnd, limitation, acc: StepAccumulator) => {
+      if (acc.state.ordinal === 0) throw new Error('SOURCE_FORMAT_UNSUPPORTED')
+      acc.state.ordinal++
+      emitUnavailableRecord(acc, { ordinal: acc.state.ordinal, limitation, lineStart, lineEnd })
+    },
     processRecord: (rawRecord, lineStart, lineEnd, acc: StepAccumulator) => {
       const record = rawRecord as { type?: unknown; timestamp?: unknown; payload?: Record<string, unknown> } | null
       acc.state.ordinal++
@@ -490,40 +497,57 @@ export function stepCodexSourceIndex(options: {
         ) throw new Error('SOURCE_IDENTITY_CONFLICT')
         if (item.cli_version !== '0.169.0-alpha.11.1') throw new Error('SOURCE_FORMAT_UNSUPPORTED')
         if (!checkCodexWorktreeRoots(item, root, profile)) throw new Error('ORIGIN_UNVERIFIED')
+        emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         return
       }
       if (record?.type === 'turn_context') {
         if (!checkRoot(item?.cwd)) throw new Error('ORIGIN_UNVERIFIED')
         if (typeof item?.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) acc.state.currentTurnId = item.turn_id
+        emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         return
       }
       if (record?.type === 'event_msg' && item && typeof item === 'object') {
         if (item.type === 'task_started' && typeof item.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) {
           acc.state.currentTurnId = item.turn_id
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         } else if (item.type === 'turn_aborted' || item.type === 'error') {
           const turnId = typeof item.turn_id === 'string' && item.turn_id.length <= 128 ? item.turn_id : acc.state.currentTurnId
           const reason = typeof item.reason === 'string' ? item.reason : typeof item.message === 'string' ? item.message : String(item.type)
           const refusal = item.type === 'turn_aborted' || /(?:DENIED|REJECTED|REFUSED|ABORTED|INTERRUPTED)/i.test(reason)
+          acc.state.typedRecords++
           emitIndexedEvent(acc, {
             ordinal, part: 0, type: 'ERROR', rawText: reason, timestamp, turnId,
             status: refusal ? 'REFUSAL' : 'FAILURE',
             errorKind: item.type === 'turn_aborted' ? 'TURN_ABORTED' : 'PROVIDER_ERROR',
             lineStart, lineEnd
           })
+        } else {
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
         }
         return
       }
-      if (record?.type !== 'response_item' || !item || typeof item !== 'object') return
+      if (record?.type !== 'response_item' || !item || typeof item !== 'object') {
+        emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
+        return
+      }
       if (item.type === 'message' && (item.role === 'assistant' || item.role === 'user') && Array.isArray(item.content)) {
         const expectedPartType = item.role === 'user' ? 'input_text' : 'output_text'
         const mappedType = item.role === 'user' ? 'INPUT' : 'AGENT_UPDATE'
+        let emitted = 0
         for (const [part, entry] of (item.content as Array<{ type?: unknown; text?: unknown }>).entries()) {
           if (entry?.type !== expectedPartType || typeof entry.text !== 'string') continue
+          emitted++
           emitIndexedEvent(acc, {
             ordinal, part, type: mappedType, rawText: entry.text, timestamp, turnId: acc.state.currentTurnId,
             lineStart, lineEnd
           })
         }
+        if (emitted > 0) acc.state.typedRecords++
+        else emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
+        return
+      }
+      if (item.type === 'message' && item.role === 'developer') {
+        emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         return
       }
       if (item.type === 'function_call' || item.type === 'custom_tool_call' || item.type === 'local_shell_call') {
@@ -534,6 +558,7 @@ export function stepCodexSourceIndex(options: {
           : typeof item.input === 'string'
             ? item.input
             : item.action !== undefined ? JSON.stringify(item.action) : '{}'
+        acc.state.typedRecords++
         const event = emitIndexedEvent(acc, {
           ordinal, part: 0, type: 'TOOL_CALL', rawText: rawInput, timestamp, tool, turnId: acc.state.currentTurnId,
           status: 'DANGLING', pairing: 'DANGLING', lineStart, lineEnd
@@ -560,6 +585,7 @@ export function stepCodexSourceIndex(options: {
         const classified = classifyStructuredOutput(rawOutput)
         const match = callId ? acc.state.openCalls[callId] : undefined
         const pairing = match ? 'PAIRED' : 'UNPAIRED'
+        acc.state.typedRecords++
         emitIndexedEvent(acc, {
           ordinal, part: 0, type: classified.isError ? 'ERROR' : 'TOOL_RESULT', rawText: rawOutput,
           timestamp, tool: match?.tool, turnId: acc.state.currentTurnId,
@@ -580,7 +606,9 @@ export function stepCodexSourceIndex(options: {
           acc.state.attemptCounts.total++
           applyAttemptOutcome(acc.state.attemptCounts, classified.status)
         }
+        return
       }
+      emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
     }
   })
 }

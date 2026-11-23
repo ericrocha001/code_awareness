@@ -31,6 +31,10 @@ export interface NativeStepBudget {
 export interface NativeIndexerState {
   ordinal: number
   seq: number
+  typedEvents: number
+  typedRecords: number
+  opaqueRecords: number
+  unavailableRecords: number
   omittedRecords: number
   currentTurnId?: string
   typeCounts: Record<string, number>
@@ -51,6 +55,10 @@ export function createInitialIndexerState(attemptCoverage: string): NativeIndexe
   return {
     ordinal: 0,
     seq: 0,
+    typedEvents: 0,
+    typedRecords: 0,
+    opaqueRecords: 0,
+    unavailableRecords: 0,
     omittedRecords: 0,
     typeCounts: {},
     toolStats: {},
@@ -138,6 +146,7 @@ export function emitIndexedEvent(
     text: content
   }
   acc.events.push(row)
+  acc.state.typedEvents++
   acc.state.typeCounts[row.type] = (acc.state.typeCounts[row.type] ?? 0) + 1
   if (row.tool) acc.state.toolStats[row.tool] = (acc.state.toolStats[row.tool] ?? 0) + 1
   if (ts) {
@@ -194,6 +203,83 @@ export function emitIndexedEvent(
   return row
 }
 
+export function extractOpaqueSafeMetadata(rawRecord: unknown): Record<string, string | number> {
+  const rec = rawRecord as Record<string, unknown> | null
+  if (!rec || typeof rec !== 'object') return {}
+  const out: Record<string, string | number> = {}
+  if (typeof rec.type === 'string') out.type = sanitize(rec.type).slice(0, 80)
+  if (typeof rec.source === 'string') out.source = sanitize(rec.source).slice(0, 80)
+  if (Number.isSafeInteger(rec.step_index)) out.step_index = rec.step_index as number
+  const ts = typeof rec.created_at === 'string' ? rec.created_at : typeof rec.timestamp === 'string' ? rec.timestamp : undefined
+  if (ts && Number.isFinite(Date.parse(ts))) out.timestamp = ts
+  return out
+}
+
+export function emitOpaqueRecord(
+  acc: StepAccumulator,
+  input: {
+    ordinal: number
+    rawRecord: unknown
+    timestamp?: string
+    limitation: string
+    lineStart: number
+    lineEnd: number
+  }
+): NativeIndexedEventRow {
+  const safeMeta = extractOpaqueSafeMetadata(input.rawRecord)
+  const payloadDigest = digest(JSON.stringify(safeMeta))
+  const eventId = acc.makeEventId(input.ordinal, 0, payloadDigest)
+  const ts = input.timestamp
+  const tsMs = ts ? Date.parse(ts) : NaN
+  const row: NativeIndexedEventRow = {
+    seq: acc.state.seq++,
+    ordinal: input.ordinal,
+    eventId,
+    type: 'OPAQUE',
+    ...(ts ? { timestamp: ts, ...(Number.isFinite(tsMs) ? { timestampMs: tsMs } : {}) } : {}),
+    errorKind: input.limitation,
+    bytes: 0,
+    payloadDigest,
+    sanitized: true,
+    lineStart: input.lineStart,
+    lineEnd: input.lineEnd,
+    partIndex: 0
+  }
+  acc.events.push(row)
+  acc.state.opaqueRecords++
+  return row
+}
+
+export function emitUnavailableRecord(
+  acc: StepAccumulator,
+  input: {
+    ordinal: number
+    limitation: string
+    lineStart: number
+    lineEnd: number
+  }
+): NativeIndexedEventRow {
+  const payloadDigest = digest(JSON.stringify(['UNAVAILABLE', input.limitation, input.lineStart, input.lineEnd]))
+  const eventId = acc.makeEventId(input.ordinal, 0, payloadDigest)
+  const row: NativeIndexedEventRow = {
+    seq: acc.state.seq++,
+    ordinal: input.ordinal,
+    eventId,
+    type: 'UNAVAILABLE',
+    errorKind: input.limitation,
+    bytes: 0,
+    payloadDigest,
+    sanitized: false,
+    lineStart: input.lineStart,
+    lineEnd: input.lineEnd,
+    partIndex: 0
+  }
+  acc.events.push(row)
+  acc.state.unavailableRecords++
+  acc.state.omittedRecords++
+  return row
+}
+
 export function applyAttemptOutcome(counts: NativeIndexerState['attemptCounts'], status: string): void {
   if (status === 'SUCCESS') counts.success++
   else if (status === 'FAILURE') counts.failure++
@@ -218,7 +304,14 @@ export function buildSummaryFromState(meta: {
   tailDigest: string
   sourceBytes: number
   sourceCoverage: string
+  sourceVariant?: string
+  coexistingVariants?: string[]
 }, state: NativeIndexerState): NativeSourceRecordSummary {
+  const typedRecords = state.typedRecords ?? 0
+  const opaqueRecords = state.opaqueRecords ?? 0
+  const unavailableRecords = state.unavailableRecords ?? 0
+  const recordsTotal = typedRecords + opaqueRecords + unavailableRecords
+  const recordsAddressable = typedRecords + opaqueRecords + unavailableRecords
   const sourceTypeCounts = (Object.entries(state.typeCounts) as Array<[NativeSourceEventType, number]>)
     .filter(([, count]) => count > 0)
     .map(([type, count]) => ({ type, count }))
@@ -250,8 +343,15 @@ export function buildSummaryFromState(meta: {
     tailDigest: meta.tailDigest,
     sourceBytes: meta.sourceBytes,
     indexedBytes: meta.tailOffset,
-    eventCount: state.seq,
+    eventCount: state.typedEvents,
     omittedRecords: state.omittedRecords,
+    recordsTotal,
+    recordsAddressable,
+    typedRecords,
+    opaqueRecords,
+    unavailableRecords,
+    ...(meta.sourceVariant ? { sourceVariant: meta.sourceVariant } : {}),
+    ...(meta.coexistingVariants?.length ? { coexistingVariants: meta.coexistingVariants } : {}),
     sourceCoverage: meta.sourceCoverage,
     attemptCoverage: state.attemptCoverage,
     timeCoverage: { timestampedEvents: state.timestampedEvents, missingTimestamps: state.missingTimestamps },
@@ -282,6 +382,8 @@ export interface NativeIndexedSourceHandle {
   assertPath: () => void
   verifyAfterClose?: () => void
   allowLexicalIndex?: boolean
+  sourceVariant?: string
+  coexistingVariants?: string[]
 }
 
 export type NativeReferenceStepResult =
@@ -319,13 +421,14 @@ export function runNativeReferenceStep(options: {
   assertCurrent: () => void
   openHandle: () => NativeIndexedSourceHandle
   processRecord: (record: unknown, lineStart: number, lineEnd: number, acc: StepAccumulator) => void
+  onUnavailableRecord?: (lineStart: number, lineEnd: number, limitation: 'RECORD_TOO_LARGE' | 'INVALID_RECORD_FORMAT', acc: StepAccumulator) => void
   makeEventId: (ordinal: number, part: number, payloadDigest: string, snapshotIdentity: string) => string
   onReady?: (ready: { summary: NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
 }): NativeReferenceStepResult {
   const {
     refs, nativeKey, provider, repositoryId, worktreeId, generation, sourceSessionId,
     normalizer, sourceCoverage, attemptCoverage, formatError, staleError,
-    mode, stepBudget, assertCurrent, openHandle, processRecord, makeEventId, onReady
+    mode, stepBudget, assertCurrent, openHandle, processRecord, onUnavailableRecord, makeEventId, onReady
   } = options
   let handle: NativeIndexedSourceHandle
   try {
@@ -376,7 +479,7 @@ export function runNativeReferenceStep(options: {
         nativeKey,
         indexedBytes: checkpointExact ? cp!.nextOffset : 0,
         totalBytes: handle.sizeBytes,
-        indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).seq : 0,
+        indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'READ_ONLY_STORE'
       }
@@ -408,7 +511,7 @@ export function runNativeReferenceStep(options: {
         nativeKey,
         indexedBytes: checkpoint ? checkpoint.nextOffset : 0,
         totalBytes: handle.sizeBytes,
-        indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).seq : 0,
+        indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'SOURCE_REQUIRES_INDEXING'
       }
@@ -454,7 +557,13 @@ export function runNativeReferenceStep(options: {
         formatError,
         stepBudget: effectiveStepBudget,
         assertCurrent,
-        onRecord: (record, lineStart, lineEnd) => processRecord(record, lineStart, lineEnd, acc)
+        onRecord: (record, lineStart, lineEnd) => processRecord(record, lineStart, lineEnd, acc),
+        ...(onUnavailableRecord
+          ? {
+              onUnavailableRecord: (lineStart, lineEnd, limitation) =>
+                onUnavailableRecord(lineStart, lineEnd, limitation, acc)
+            }
+          : {})
       })
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       handle.verifyAfterClose?.()
@@ -463,7 +572,7 @@ export function runNativeReferenceStep(options: {
       throw error
     }
 
-    if (stepOut.done && (!state.ordinal || !state.seq)) {
+    if (stepOut.done && (!state.ordinal || (state.typedRecords === 0 && state.opaqueRecords === 0))) {
       closeOnce()
       handle.verifyAfterClose?.()
       refs.invalidate(nativeKey)
@@ -507,7 +616,7 @@ export function runNativeReferenceStep(options: {
           nativeKey,
           indexedBytes: stepOut.nextOffset,
           totalBytes: handle.sizeBytes,
-          indexedEvents: state.seq,
+          indexedEvents: state.typedEvents,
           liveFingerprint: handle.liveFingerprint,
           reason: 'STEP_BUDGET_REACHED'
         }
@@ -531,7 +640,9 @@ export function runNativeReferenceStep(options: {
         tailOffset: stepOut.nextOffset,
         tailDigest: '',
         sourceBytes: handle.sizeBytes,
-        sourceCoverage
+        sourceCoverage,
+        ...(handle.sourceVariant ? { sourceVariant: handle.sourceVariant } : {}),
+        ...(handle.coexistingVariants?.length ? { coexistingVariants: handle.coexistingVariants } : {})
       }, state))
       onReady?.({ summary, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
@@ -555,8 +666,9 @@ export function streamNativeJsonlChunk(options: {
   stepBudget?: NativeStepBudget
   assertCurrent: () => void
   onRecord: (record: unknown, lineStart: number, lineEnd: number) => void
+  onUnavailableRecord?: (lineStart: number, lineEnd: number, limitation: 'RECORD_TOO_LARGE' | 'INVALID_RECORD_FORMAT') => void
 }): { done: boolean; nextOffset: number; processedBytes: number; processedLines: number } {
-  const { fd, startOffset, fileSize, formatError, stepBudget, assertCurrent, onRecord } = options
+  const { fd, startOffset, fileSize, formatError, stepBudget, assertCurrent, onRecord, onUnavailableRecord } = options
   const maxStepBytes = stepBudget?.maxBytes ?? Number.POSITIVE_INFINITY
   const maxStepLines = stepBudget?.maxLines ?? Number.POSITIVE_INFINITY
   const deadlineMs = stepBudget?.deadlineMs
@@ -564,6 +676,7 @@ export function streamNativeJsonlChunk(options: {
   let readPos = startOffset
   let lineStart = startOffset
   let pending = Buffer.alloc(0)
+  let skippingOversized = false
   let processedBytes = 0
   let processedLines = 0
   let paused = false
@@ -573,23 +686,45 @@ export function streamNativeJsonlChunk(options: {
     const toRead = Math.min(chunkBuf.length, fileSize - readPos)
     const size = readSync(fd, chunkBuf, 0, toRead, readPos)
     if (size <= 0) break
+    const chunkBaseOffset = readPos
     readPos += size
-    let data = pending.length ? Buffer.concat([pending, chunkBuf.subarray(0, size)]) : chunkBuf.subarray(0, size)
+    let data = skippingOversized
+      ? chunkBuf.subarray(0, size)
+      : (pending.length ? Buffer.concat([pending, chunkBuf.subarray(0, size)]) : chunkBuf.subarray(0, size))
+    let dataOffset = skippingOversized ? chunkBaseOffset : lineStart
     let newline: number
     while ((newline = data.indexOf(10)) !== -1) {
-      if (newline > NATIVE_LINE_MAX_BYTES) throw new Error('SOURCE_LIMIT_REACHED')
-      const lineEnd = lineStart + newline
-      let parsed: unknown
-      try {
-        parsed = JSON.parse(utf8Decoder.decode(data.subarray(0, newline)))
-      } catch {
-        throw new Error(formatError)
+      const lineEnd = dataOffset + newline
+      if (skippingOversized || lineEnd - lineStart > NATIVE_LINE_MAX_BYTES) {
+        if (!onUnavailableRecord) throw new Error('SOURCE_LIMIT_REACHED')
+        onUnavailableRecord(lineStart, lineEnd, 'RECORD_TOO_LARGE')
+        skippingOversized = false
+        data = data.subarray(newline + 1)
+        dataOffset = lineEnd + 1
+        const consumed = (lineEnd + 1) - lineStart
+        lineStart = lineEnd + 1
+        processedBytes += consumed
+        processedLines++
+      } else {
+        let parsed: unknown
+        let parseOk = true
+        try {
+          parsed = JSON.parse(utf8Decoder.decode(data.subarray(0, newline)))
+        } catch {
+          parseOk = false
+        }
+        data = data.subarray(newline + 1)
+        dataOffset = lineEnd + 1
+        if (parseOk) {
+          onRecord(parsed, lineStart, lineEnd)
+        } else {
+          if (!onUnavailableRecord) throw new Error(formatError)
+          onUnavailableRecord(lineStart, lineEnd, 'INVALID_RECORD_FORMAT')
+        }
+        lineStart = lineEnd + 1
+        processedBytes += newline + 1
+        processedLines++
       }
-      data = data.subarray(newline + 1)
-      onRecord(parsed, lineStart, lineEnd)
-      lineStart = lineEnd + 1
-      processedBytes += newline + 1
-      processedLines++
       if (lineStart < fileSize && (
         processedBytes >= maxStepBytes ||
         processedLines >= maxStepLines ||
@@ -600,14 +735,22 @@ export function streamNativeJsonlChunk(options: {
       }
     }
     if (!paused) {
-      if (data.length > NATIVE_LINE_MAX_BYTES) throw new Error('SOURCE_LIMIT_REACHED')
-      pending = data.length ? Buffer.from(data) : Buffer.alloc(0)
+      if (skippingOversized) {
+        pending = Buffer.alloc(0)
+      } else if (data.length > NATIVE_LINE_MAX_BYTES) {
+        if (!onUnavailableRecord) throw new Error('SOURCE_LIMIT_REACHED')
+        skippingOversized = true
+        pending = Buffer.alloc(0)
+      } else {
+        pending = data.length ? Buffer.from(data) : Buffer.alloc(0)
+      }
     } else {
       pending = Buffer.alloc(0)
+      skippingOversized = false
     }
   }
 
-  if (!paused && pending.length > 0) throw new Error(formatError)
+  if (!paused && (pending.length > 0 || skippingOversized)) throw new Error(formatError)
   return {
     done: !paused && lineStart >= fileSize,
     nextOffset: lineStart,
@@ -622,8 +765,21 @@ export function extractAndVerifyEventLiteral(options: {
   formatError: string
   staleError: string
   extractPart: (record: unknown, partIndex: number) => string | undefined
-}): { content: string; sanitized: boolean } {
+}): {
+  content: string
+  sanitized: boolean
+  opaque?: boolean
+  unavailable?: boolean
+  limitation?: string
+  safeFields?: Record<string, string | number>
+} {
   const { fd, row, formatError, staleError, extractPart } = options
+  if (row.type === 'UNAVAILABLE') {
+    const limitation = row.errorKind ?? 'RECORD_TOO_LARGE'
+    const expectedDigest = digest(JSON.stringify(['UNAVAILABLE', limitation, row.lineStart, row.lineEnd]))
+    if (expectedDigest !== row.payloadDigest) throw new Error(staleError)
+    return { content: '', sanitized: false, unavailable: true, limitation }
+  }
   const lineLen = row.lineEnd - row.lineStart
   if (lineLen < 0 || lineLen > NATIVE_LINE_MAX_BYTES) throw new Error('SOURCE_LIMIT_REACHED')
   const lineBuf = readFdExactRange(fd, row.lineStart, lineLen, staleError)
@@ -632,6 +788,17 @@ export function extractAndVerifyEventLiteral(options: {
     record = JSON.parse(utf8Decoder.decode(lineBuf))
   } catch {
     throw new Error(formatError)
+  }
+  if (row.type === 'OPAQUE') {
+    const safeFields = extractOpaqueSafeMetadata(record)
+    if (digest(JSON.stringify(safeFields)) !== row.payloadDigest) throw new Error(staleError)
+    return {
+      content: '',
+      sanitized: true,
+      opaque: true,
+      limitation: row.errorKind ?? 'UNRECOGNIZED_FORMAT',
+      safeFields
+    }
   }
   const rawText = extractPart(record, row.partIndex)
   if (rawText === undefined) throw new Error(staleError)
@@ -765,6 +932,7 @@ export function searchIndexedNativeEvents(options: {
     for (const row of batch) {
       assertCurrent()
       scanned++
+      if (row.type === 'OPAQUE' || row.type === 'UNAVAILABLE') continue
       const { content } = extractAndVerifyEventLiteral({ fd, row, formatError, staleError, extractPart })
       const pos = content.indexOf(query)
       if (pos >= 0) {

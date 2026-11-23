@@ -4,12 +4,19 @@ import { closeSync, fstatSync, lstatSync, realpathSync, type BigIntStats } from 
 import { dirname, isAbsolute, join, normalize } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertProfilePath, assertUserOwned } from '../local-mcp-clients/safe-config-file'
-import { antigravityAppLocatorDigest, antigravityAppSessionId, antigravityAppTranscriptPath } from './antigravity-app-locator'
+import {
+  antigravityAppLocatorDigest,
+  antigravityAppSessionId,
+  antigravityAppTranscriptCandidates,
+  type AntigravityTranscriptVariant
+} from './antigravity-app-locator'
 import { boundedFile, nativeDigest, sameNativePath } from './native-hooks'
 import type { NativeSourceEventType } from './native-source-events'
 import {
   applyAttemptOutcome,
   emitIndexedEvent,
+  emitOpaqueRecord,
+  emitUnavailableRecord,
   openNoFollowReadOnly,
   runNativeReferenceStep,
   type NativeIndexedSourceHandle,
@@ -61,9 +68,19 @@ function stripVerbatimPrefix(path: string): string {
   return process.platform === 'win32' && path.startsWith('\\\\?\\') ? path.slice(4) : path
 }
 
+export type SourceReadinessReason =
+  | 'GRANT_MISSING'
+  | 'GRANT_INVALID_OR_REVOKED'
+  | 'SOURCE_NOT_FOUND'
+  | 'IDENTITY_MISMATCH'
+  | 'SOURCE_FORMAT_UNSUPPORTED'
+  | 'SOURCE_STALE'
+  | 'INDEXING_PENDING'
+  | 'READY'
+
 export function readAntigravityAppGrantStatus(storePath: string, repositoryId: string, nativeHash?: string):
-  | { configured: false }
-  | { configured: true; ok: false }
+  | { configured: false; reason: 'GRANT_MISSING' }
+  | { configured: true; ok: false; reason: 'GRANT_INVALID_OR_REVOKED' }
   | { configured: true; ok: true; grant: AntigravityAppGrant } {
   const directory = dirname(storePath), configPath = join(directory, 'session-context.provider.json')
   let configText: string
@@ -72,17 +89,17 @@ export function readAntigravityAppGrantStatus(storePath: string, repositoryId: s
     assertUserOwned(configPath)
     configText = boundedFile(configPath, 65536)
   } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { configured: false }
-    return { configured: true, ok: false }
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') return { configured: false, reason: 'GRANT_MISSING' }
+    return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' }
   }
   let config: Record<string, unknown>
   try {
     config = JSON.parse(configText) as Record<string, unknown>
   } catch {
-    return { configured: true, ok: false }
+    return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' }
   }
   const nativeSources = config?.nativeSources as Record<string, unknown> | undefined
-  if (!nativeSources || nativeSources.antigravityApp === undefined) return { configured: false }
+  if (!nativeSources || nativeSources.antigravityApp === undefined) return { configured: false, reason: 'GRANT_MISSING' }
   try {
     const grant = nativeSources.antigravityApp as Record<string, unknown> | null
     if (!grant || typeof grant !== 'object' || Array.isArray(grant)) throw new Error()
@@ -111,7 +128,59 @@ export function readAntigravityAppGrantStatus(storePath: string, repositoryId: s
     if (!lstatSync(profile).isDirectory() || !sameNativePath(realpathSync.native(profile), profile)) throw new Error()
     return { configured: true, ok: true, grant: { configPath, configText, profile, sessionHash, sessionHashes, allowLexicalIndex } }
   } catch {
-    return { configured: true, ok: false }
+    return { configured: true, ok: false, reason: 'GRANT_INVALID_OR_REVOKED' }
+  }
+}
+
+export function resolveAntigravityTranscriptCandidate(
+  profile: string,
+  sourceSessionId: string,
+  locatorDigest?: string
+): {
+  path: string
+  variant: AntigravityTranscriptVariant
+  coexistingVariants: AntigravityTranscriptVariant[]
+  stat: BigIntStats
+} {
+  const candidates = antigravityAppTranscriptCandidates(profile, sourceSessionId)
+  if (locatorDigest !== undefined) {
+    const matched = candidates.find(c => antigravityAppLocatorDigest(sourceSessionId, c.path) === locatorDigest)
+    if (!matched) throw new Error('IDENTITY_MISMATCH')
+    let stat: BigIntStats
+    try {
+      assertProfilePath(matched.path, profile)
+      stat = lstatSync(matched.path, { bigint: true })
+      if (!stat.isFile() || stat.nlink !== 1n || !sameNativePath(realpathSync.native(matched.path), matched.path)) {
+        throw new Error('IDENTITY_MISMATCH')
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('SOURCE_NOT_FOUND')
+      throw error
+    }
+    return { path: matched.path, variant: matched.variant, coexistingVariants: [matched.variant], stat }
+  }
+
+  const available: Array<{ path: string; variant: AntigravityTranscriptVariant; stat: BigIntStats }> = []
+  for (const candidate of candidates) {
+    try {
+      assertProfilePath(candidate.path, profile)
+      const stat = lstatSync(candidate.path, { bigint: true })
+      if (!stat.isFile() || stat.nlink !== 1n || !sameNativePath(realpathSync.native(candidate.path), candidate.path)) {
+        throw new Error('IDENTITY_MISMATCH')
+      }
+      available.push({ path: candidate.path, variant: candidate.variant, stat })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw error
+    }
+  }
+  if (!available.length) throw new Error('SOURCE_NOT_FOUND')
+  const selected = available[0]
+  return {
+    path: selected.path,
+    variant: selected.variant,
+    coexistingVariants: available.map(a => a.variant),
+    stat: selected.stat
   }
 }
 
@@ -291,8 +360,6 @@ export function openAntigravitySourceHandle(options: {
   const { configPath, configText, profile, allowLexicalIndex } = readAntigravityAppGrant(storePath, repositoryId, nativeHash)
   const directory = dirname(storePath)
 
-  const path = antigravityAppTranscriptPath(profile, sourceSessionId)
-  if (locatorDigest !== undefined && antigravityAppLocatorDigest(sourceSessionId, path) !== locatorDigest) throw new Error('IDENTITY_MISMATCH')
   const verifyWorktreeOrigin = () => {
     if (locatorDigest === undefined) {
       if (!worktreeRoot) throw new Error('ORIGIN_UNVERIFIED')
@@ -304,17 +371,10 @@ export function openAntigravitySourceHandle(options: {
   }
   verifyWorktreeOrigin()
 
-  const effectiveLocator = locatorDigest ?? canonicalLocatorHash(path)
   assertCurrent()
-  let stat: BigIntStats
-  try {
-    assertProfilePath(path, profile)
-    stat = lstatSync(path, { bigint: true })
-    if (!stat.isFile() || stat.nlink !== 1n || !sameNativePath(realpathSync.native(path), path)) throw new Error('IDENTITY_MISMATCH')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('SOURCE_NOT_FOUND')
-    throw error
-  }
+  const resolvedCandidate = resolveAntigravityTranscriptCandidate(profile, sourceSessionId, locatorDigest)
+  const { path, stat } = resolvedCandidate
+  const effectiveLocator = locatorDigest ?? canonicalLocatorHash(path)
   if (stat.size === 0n) throw new Error('FORMAT_UNSUPPORTED')
   const identity = fingerprint(stat)
   const fd = openNoFollowReadOnly(path)
@@ -330,6 +390,8 @@ export function openAntigravitySourceHandle(options: {
       locatorHash: digest(JSON.stringify([path, effectiveLocator, resolvedRoot, configText])),
       liveFingerprint: nativeDigest(JSON.stringify([effectiveLocator, identity])),
       allowLexicalIndex,
+      sourceVariant: resolvedCandidate.variant,
+      coexistingVariants: resolvedCandidate.coexistingVariants,
       assertPath: () => {
         assertProfilePath(path, profile)
         assertProfilePath(configPath, directory)
@@ -521,14 +583,39 @@ export function stepAntigravityAppSourceIndex(options: {
     }),
     makeEventId: (ordinal, part, payloadDigest, snapshotIdentity) =>
       nativeDigest(JSON.stringify([NATIVE_ANTIGRAVITY_NORMALIZER, sourceSessionId, snapshotIdentity, ordinal, part, payloadDigest])),
+    onUnavailableRecord: (lineStart, lineEnd, limitation, acc: StepAccumulator) => {
+      acc.state.ordinal++
+      emitUnavailableRecord(acc, { ordinal: acc.state.ordinal, limitation, lineStart, lineEnd })
+    },
     processRecord: (rawRecord, lineStart, lineEnd, acc: StepAccumulator) => {
       acc.state.ordinal++
       const ordinal = acc.state.ordinal
-      const decoded = decodeAntigravityRecordParts(rawRecord)
-      if (decoded.omitted) {
-        acc.state.omittedRecords++
+      let decoded: { timestamp?: string; parts: DecodedAntigravityPart[]; omitted: boolean }
+      try {
+        decoded = decodeAntigravityRecordParts(rawRecord)
+      } catch (error) {
+        if (ordinal === 1 || !rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) throw error
+        emitOpaqueRecord(acc, {
+          ordinal,
+          rawRecord,
+          limitation: 'UNRECOGNIZED_FORMAT',
+          lineStart,
+          lineEnd
+        })
         return
       }
+      if (decoded.omitted || decoded.parts.length === 0) {
+        emitOpaqueRecord(acc, {
+          ordinal,
+          rawRecord,
+          timestamp: decoded.timestamp,
+          limitation: decoded.omitted ? 'UNRECOGNIZED_FORMAT' : 'EMPTY_RECORD',
+          lineStart,
+          lineEnd
+        })
+        return
+      }
+      acc.state.typedRecords++
       for (const p of decoded.parts) {
         emitIndexedEvent(acc, {
           ordinal,

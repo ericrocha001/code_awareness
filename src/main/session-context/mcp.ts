@@ -25,9 +25,9 @@ import { provenanceClass } from './provenance-evidence'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { literalSnapshotRevision, nativeSessionProjection, nativeSessionSelector, verifyNativeLiteralContext } from './native-session-query'
 import { nativeBindingPath, nativeHookEvents, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
-import { discoverCodexSources, extractCodexRecordPart, stepCodexSourceIndex } from './native-codex-source'
-import { antigravitySourceDiagnostic } from './antigravity-source-diagnostics'
-import { discoverAntigravityAppSources, extractAntigravityRecordPart, stepAntigravityAppSourceIndex } from './native-antigravity-app-source'
+import { discoverCodexSources, extractCodexRecordPart, readCodexGrantStatus, stepCodexSourceIndex } from './native-codex-source'
+import { diagnoseAntigravitySource } from './antigravity-source-diagnostics'
+import { discoverAntigravityAppSources, extractAntigravityRecordPart, stepAntigravityAppSourceIndex, type SourceReadinessReason } from './native-antigravity-app-source'
 import { NATIVE_ANTIGRAVITY_NORMALIZER, NATIVE_CODEX_NORMALIZER, toNativeEventMeta, type NativeEventFilter } from './native-session-references'
 import {
   DEFAULT_NATIVE_STEP_BYTES,
@@ -479,18 +479,47 @@ function runNativeSessionIndexStep(
           }
         }
       }
-      if (['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED',
+      if (['PROFILE_UNAVAILABLE', 'SOURCE_NOT_AUTHORIZED', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED',
         'SOURCE_CONTENT_UNAVAILABLE', 'SOURCE_FORMAT_UNSUPPORTED', 'SOURCE_IDENTITY_CONFLICT',
         'SOURCE_PATH_ESCAPE', 'SOURCE_LIMIT_REACHED', 'STORE_READ_ONLY'].includes(code)) {
-        const resolvedReason = app && !locators.length && code === 'PROFILE_UNAVAILABLE'
-          ? antigravitySourceDiagnostic(store.path, store.repositoryId, request.nativeSession.id, request.sourceSessionId, assertCurrent)
-          : code
+        if (app && code === 'PROFILE_UNAVAILABLE') {
+          const diag = diagnoseAntigravitySource(store.path, store.repositoryId, request.nativeSession.id, request.sourceSessionId, assertCurrent, locators[0])
+          return {
+            state: 'UNAVAILABLE' as const,
+            repositoryId: store.repositoryId,
+            nativeSession: request.nativeSession,
+            sourceSessionId: request.sourceSessionId,
+            reason: diag.sourceDiagnostic,
+            readinessReason: diag.readinessReason,
+            ...(diag.next ? { next: diag.next } : {}),
+            transcriptImported: false
+          }
+        }
+        const codexStatus = code === 'SOURCE_NOT_AUTHORIZED' ? readCodexGrantStatus(store.path, store.repositoryId) : undefined
+        const readinessReason: SourceReadinessReason =
+          code === 'SOURCE_NOT_AUTHORIZED'
+            ? (codexStatus && 'reason' in codexStatus ? codexStatus.reason : 'GRANT_INVALID_OR_REVOKED')
+            : code === 'SOURCE_NOT_FOUND' ? 'SOURCE_NOT_FOUND'
+              : (code === 'IDENTITY_MISMATCH' || code === 'SOURCE_IDENTITY_CONFLICT') ? 'IDENTITY_MISMATCH'
+                : (code === 'FORMAT_UNSUPPORTED' || code === 'SOURCE_FORMAT_UNSUPPORTED' || code === 'SOURCE_CONTENT_UNAVAILABLE') ? 'SOURCE_FORMAT_UNSUPPORTED'
+                  : 'GRANT_INVALID_OR_REVOKED'
+        const nextGrant = (readinessReason === 'GRANT_MISSING' || readinessReason === 'GRANT_INVALID_OR_REVOKED')
+          ? {
+              next: {
+                action: 'AUTHORIZE_LOCAL_SOURCE_GRANT',
+                provider: app ? 'antigravityApp' : 'codex',
+                requires: app ? ['repositoryId', 'profile', 'sessionHashes'] : ['repositoryId', 'profile', 'creatorAccountHash']
+              }
+            }
+          : {}
         return {
           state: 'UNAVAILABLE' as const,
           repositoryId: store.repositoryId,
           nativeSession: request.nativeSession,
           sourceSessionId: request.sourceSessionId,
-          reason: resolvedReason,
+          reason: code,
+          readinessReason,
+          ...nextGrant,
           transcriptImported: false
         }
       }
@@ -620,16 +649,53 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     if (!('eventId' in query) || !query.eventId) throw new Error('INVALID_ARGUMENT')
     const row = store.references.native.getEventById(ready.nativeKey, ready.summary.revision, query.eventId)
     if (!row) throw new Error('SOURCE_EVENT_UNAVAILABLE')
-    const { content, sanitized } = extractAndVerifyEventLiteral({
+    const extracted = extractAndVerifyEventLiteral({
       fd: ready.fd,
       row,
       formatError,
       staleError,
       extractPart
     })
+    if (extracted.unavailable) {
+      readyResponse = {
+        ...base,
+        eventId: row.eventId,
+        ordinal: row.ordinal,
+        recordKind: 'UNAVAILABLE',
+        limitation: extracted.limitation,
+        content: '',
+        range: { startByte: 0, endByte: 0 },
+        payloadDigest: row.payloadDigest,
+        provenance: 'OBSERVED_FROM_PROVIDER',
+        omission: extracted.limitation ?? 'RECORD_TOO_LARGE',
+        sanitized: false,
+        complete: false,
+        partial: false
+      }
+      return
+    }
+    if (extracted.opaque) {
+      readyResponse = {
+        ...base,
+        eventId: row.eventId,
+        ordinal: row.ordinal,
+        recordKind: 'OPAQUE',
+        limitation: extracted.limitation,
+        ...(extracted.safeFields ? { safeFields: extracted.safeFields } : {}),
+        content: '',
+        range: { startByte: 0, endByte: 0 },
+        payloadDigest: row.payloadDigest,
+        provenance: 'OBSERVED_FROM_PROVIDER',
+        omission: extracted.limitation ?? 'UNRECOGNIZED_FORMAT',
+        sanitized: true,
+        complete: true,
+        partial: false
+      }
+      return
+    }
     readyResponse = readEventLiteralSlice({
-      content,
-      sanitized,
+      content: extracted.content,
+      sanitized: extracted.sanitized,
       eventId: row.eventId,
       payloadDigest: row.payloadDigest,
       offset,
@@ -642,7 +708,12 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     })
   }
 
-  const indexOutcome: NativeReferenceStepResult | { sourceDiagnostic: string; stale?: boolean } = (() => {
+  const indexOutcome: NativeReferenceStepResult | {
+    sourceDiagnostic: string
+    readinessReason?: SourceReadinessReason
+    next?: { action: string; provider: 'antigravityApp' | 'codex'; requires: string[] }
+    stale?: boolean
+  } = (() => {
     const mode = store.references.native.isReadOnly ? 'READ_ONLY' : 'ON_DEMAND'
     if (!app) {
       try {
@@ -660,7 +731,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       } catch (error) {
         if (error instanceof Error && (error.message === 'SOURCE_REVISION_CHANGED' || error.message === 'SOURCE_STALE')) {
           if (expectedRevision !== undefined) throw new Error('REVISION_CONFLICT')
-          return { sourceDiagnostic: 'SOURCE_STALE', stale: true }
+          return { sourceDiagnostic: 'SOURCE_STALE', readinessReason: 'SOURCE_STALE', stale: true }
         }
         throw error
       }
@@ -683,11 +754,16 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     } catch (error) {
       if (error instanceof Error && ['PROFILE_UNAVAILABLE', 'SOURCE_NOT_FOUND', 'IDENTITY_MISMATCH', 'FORMAT_UNSUPPORTED', 'SOURCE_STALE', 'SOURCE_CONTENT_UNAVAILABLE'].includes(error.message)) {
         if (expectedRevision !== undefined && error.message === 'SOURCE_STALE') throw new Error('REVISION_CONFLICT')
-        if (!locators.length && error.message === 'PROFILE_UNAVAILABLE') {
-          const ideDiag = antigravitySourceDiagnostic(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent)
-          return { sourceDiagnostic: ideDiag === 'PROFILE_UNAVAILABLE' ? 'PROFILE_UNAVAILABLE' : ideDiag }
+        if (error.message === 'PROFILE_UNAVAILABLE') {
+          const diag = diagnoseAntigravitySource(store.path, store.repositoryId, nativeSession.id, sourceSessionId!, assertCurrent, locators[0])
+          return { sourceDiagnostic: diag.sourceDiagnostic, readinessReason: diag.readinessReason, ...(diag.next ? { next: diag.next } : {}) }
         }
-        return { sourceDiagnostic: error.message, ...(error.message === 'SOURCE_STALE' ? { stale: true } : {}) }
+        const readinessReason: SourceReadinessReason =
+          error.message === 'SOURCE_NOT_FOUND' ? 'SOURCE_NOT_FOUND'
+            : error.message === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH'
+              : error.message === 'SOURCE_STALE' ? 'SOURCE_STALE'
+                : 'SOURCE_FORMAT_UNSUPPORTED'
+        return { sourceDiagnostic: error.message, readinessReason, ...(error.message === 'SOURCE_STALE' ? { stale: true } : {}) }
       }
       throw error
     }
@@ -695,12 +771,26 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   if ('sourceDiagnostic' in indexOutcome) {
     const diagCoverage = hookObserved ? 'HOOK_OBSERVED_SOURCE_UNAVAILABLE' : 'NO_HOOK_AND_SOURCE_UNAVAILABLE'
     const diagIdentity = indexOutcome.sourceDiagnostic === 'IDENTITY_MISMATCH' ? 'IDENTITY_MISMATCH' : hooklessBase.identityEvidence
-    const nextAction = indexOutcome.stale ? { next: { tool: 'refresh_agent_sessions', arguments: { nativeSession, sourceSessionId } } } : {}
+    const nextAction = indexOutcome.stale
+      ? { next: { tool: 'refresh_agent_sessions', arguments: { nativeSession, sourceSessionId } } }
+      : indexOutcome.next ? { next: indexOutcome.next } : {}
     if (name === 'inspect_agent_session') {
       if (expectedRevision !== undefined && observation && expectedRevision !== observation.revision) throw new Error('REVISION_CONFLICT')
-      return { ...hooklessBase, contentAvailability: 'SOURCE_UNAVAILABLE', captureCoverage: diagCoverage, identityEvidence: diagIdentity, sourceDiagnostic: indexOutcome.sourceDiagnostic, ...nextAction }
+      return {
+        ...hooklessBase,
+        contentAvailability: 'SOURCE_UNAVAILABLE',
+        captureCoverage: diagCoverage,
+        identityEvidence: diagIdentity,
+        sourceDiagnostic: indexOutcome.sourceDiagnostic,
+        ...(indexOutcome.readinessReason ? { readinessReason: indexOutcome.readinessReason } : {}),
+        ...nextAction
+      }
     }
-    throw Object.assign(new Error(indexOutcome.stale ? 'SOURCE_STALE' : 'SOURCE_UNAVAILABLE'), { sourceDiagnostic: indexOutcome.sourceDiagnostic, ...nextAction })
+    throw Object.assign(new Error(indexOutcome.stale ? 'SOURCE_STALE' : 'SOURCE_UNAVAILABLE'), {
+      sourceDiagnostic: indexOutcome.sourceDiagnostic,
+      ...(indexOutcome.readinessReason ? { readinessReason: indexOutcome.readinessReason } : {}),
+      ...nextAction
+    })
   }
   if (indexOutcome.status === 'INDEXING_PENDING') {
     if (expectedRevision !== undefined) throw new Error('REVISION_CONFLICT')
@@ -712,6 +802,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       return {
         ...hooklessBase,
         indexingState: 'INDEXING_PENDING',
+        readinessReason: 'INDEXING_PENDING' as SourceReadinessReason,
         contentAvailability: 'INDEXING_PENDING',
         indexedBytes: indexOutcome.indexedBytes,
         totalBytes: indexOutcome.totalBytes,
@@ -723,6 +814,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     throw Object.assign(new Error('INDEXING_PENDING'), {
       indexingState: 'INDEXING_PENDING',
       sourceDiagnostic: indexOutcome.reason,
+      readinessReason: 'INDEXING_PENDING' as SourceReadinessReason,
       indexedBytes: indexOutcome.indexedBytes,
       totalBytes: indexOutcome.totalBytes,
       next: pendingNext
@@ -789,9 +881,20 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     ))
     return {
       ...cleanMap,
+      readinessReason: 'READY' as SourceReadinessReason,
       ...((!Array.isArray(observedEvents) || observedEvents.length || hookObserved) ? { observedEvents } : {}),
       sourceEventCount: summary.eventCount,
       omittedSourceEvents: summary.omittedRecords,
+      recordCoverage: {
+        recordsTotal: summary.recordsTotal,
+        recordsAddressable: summary.recordsAddressable,
+        typed: summary.typedRecords,
+        opaque: summary.opaqueRecords,
+        unavailable: summary.unavailableRecords,
+        coverage: summary.recordsAddressable === summary.recordsTotal && summary.unavailableRecords === 0 ? 'COMPLETE' : 'PARTIAL'
+      },
+      ...(summary.sourceVariant ? { sourceVariant: summary.sourceVariant } : {}),
+      ...(summary.coexistingVariants?.length ? { coexistingVariants: summary.coexistingVariants } : {}),
       sourceTypeCounts: summary.sourceTypeCounts,
       ...(summary.sourceTools.length ? { sourceTools: summary.sourceTools } : {}),
       attemptSummary: summary.attemptSummary,
@@ -810,7 +913,7 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   }
   if (name === 'list_agent_session_events' && 'limit' in query) {
     const options = query as z.infer<typeof nativeSessionEvents>
-    const unsupportedTypes = options.types?.some(t => !['INPUT', 'AGENT_UPDATE', 'TOOL_CALL', 'TOOL_RESULT', 'ERROR'].includes(t))
+    const unsupportedTypes = options.types?.some(t => !['INPUT', 'AGENT_UPDATE', 'TOOL_CALL', 'TOOL_RESULT', 'ERROR', 'OPAQUE', 'UNAVAILABLE'].includes(t))
     const commonMeta = {
       ...base,
       omittedSourceEvents: summary.omittedRecords,
@@ -1447,6 +1550,7 @@ export async function executeSessionTool(
     const payload: Record<string, unknown> = { code }
     if (error && typeof error === 'object') {
       if ('sourceDiagnostic' in error) payload.sourceDiagnostic = error.sourceDiagnostic
+      if ('readinessReason' in error) payload.readinessReason = (error as any).readinessReason
       if ('indexingState' in error) payload.indexingState = (error as any).indexingState
       if ('indexedBytes' in error) payload.indexedBytes = (error as any).indexedBytes
       if ('totalBytes' in error) payload.totalBytes = (error as any).totalBytes
