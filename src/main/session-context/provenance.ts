@@ -296,6 +296,7 @@ export async function inspectCodeProvenance(
       file,
       range: { startLine, endLine },
       linkStrength: 'UNKNOWN',
+      gitStatus: 'UNAVAILABLE',
       commit: null,
       checkpointId: null,
       candidates: [],
@@ -314,6 +315,14 @@ export async function inspectCodeProvenance(
     throw new AmbiguousProvenanceSelectionError(file, { startLine, endLine }, relevantSegments)
   }
 
+  const commitNextStep = (sha: string | null) =>
+    sha && /^[a-f0-9]{40}$/.test(sha)
+      ? {
+          tool: 'discover_execution_context',
+          arguments: { selector: { type: 'COMMIT' as const, id: sha } }
+        }
+      : undefined
+
   const checkpointSegment = relevantSegments.find(s => s.status === 'checkpoint' && s.checkpointId)
   if (checkpointSegment && checkpointSegment.checkpointId) {
     const disambiguate = await readCheckpointDisambiguate(
@@ -322,13 +331,16 @@ export async function inspectCodeProvenance(
       { checkpointId: checkpointSegment.checkpointId, commit: checkpointSegment.commit ?? undefined, file },
       assertActive
     )
+    const nextStep = commitNextStep(checkpointSegment.commit ?? null)
     return {
       source: 'GIT_BLAME_PROVENANCE',
       file,
       range: { startLine, endLine },
       linkStrength: 'TRAILER_VERIFIED',
+      gitStatus: nextStep ? 'COMMIT_OBSERVED' : 'UNAVAILABLE',
       commit: checkpointSegment.commit ?? null,
       checkpointId: checkpointSegment.checkpointId,
+      ...(nextStep ? { nextStep } : {}),
       candidates: disambiguate.sessions.map(s => ({
         sessionIndex: s.sessionIndex,
         providerSessionId: s.providerSessionId,
@@ -349,14 +361,19 @@ export async function inspectCodeProvenance(
     }
   }
 
-  const singleCommit = relevantSegments[0]?.commit ?? null
+  const singleSegment = relevantSegments[0]
+  const singleCommit = singleSegment?.commit ?? null
+  const isUncommitted = singleSegment?.status === 'uncommitted'
+  const nextStep = isUncommitted ? undefined : commitNextStep(singleCommit)
   return {
     source: 'GIT_BLAME_PROVENANCE',
     file,
     range: { startLine, endLine },
     linkStrength: 'UNKNOWN',
+    gitStatus: isUncommitted ? 'UNCOMMITTED' : nextStep ? 'COMMIT_OBSERVED' : 'UNAVAILABLE',
     commit: singleCommit,
     checkpointId: null,
+    ...(nextStep ? { nextStep } : {}),
     candidates: [],
     coverage
   }

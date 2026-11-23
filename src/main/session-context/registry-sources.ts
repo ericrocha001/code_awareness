@@ -1,4 +1,4 @@
-import { deliveryAnchor, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
+import { deliveryAnchor, type DeliveryProjectionFilter, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
 import { randomUUID } from 'node:crypto'
 import { discoverGitHubPage } from './github-discovery'
 import type { ContinuumService } from '../continuum/continuum-service'
@@ -36,7 +36,7 @@ function classifySourceError(error: unknown, stage: string): { status: string; r
 export function registrySources(options: {
   repositoryId: string; root: string; continuum: () => ContinuumService | null; ledger: ValidationLedger
   github: Pick<GitHubIntegrationService, 'commitPullRequests' | 'getPullRequest' | 'pullRequestCommits'> & Partial<Pick<GitHubIntegrationService, 'pullRequestCatalogPage' | 'deliveryRepository' | 'deliveryProjectionPage'>>
-  gitDeliveries?: (cursor?: string) => Promise<DeliveryProjectionPage>
+  gitDeliveries?: (cursor?: string, filter?: DeliveryProjectionFilter) => Promise<DeliveryProjectionPage>
   networkAllowed: () => boolean; assertCurrent: () => void
 }): RegistryReader {
   const { repositoryId, assertCurrent } = options
@@ -130,22 +130,49 @@ export function registrySources(options: {
       kind: 'EXECUTION',
       id: 'delivery:' + digest(JSON.stringify([anchor.executionId, anchor.planArtifactId, anchor.planRevision, anchor.bindingArtifactId]))
     })
+    const deliveryFilter: DeliveryProjectionFilter | undefined = selector
+      ? selector.kind === 'COMMIT'
+        ? { commitSha: selector.id }
+        : selector.kind === 'PR'
+          ? { pullRequest: Number(selector.id) }
+          : selector.kind === 'EXECUTION'
+            ? { executionId: selector.id }
+            : selector.kind === 'ARTIFACT'
+              ? (() => {
+                  const match = /^(artifact-[a-f0-9-]{36})(?::([1-9][0-9]*))?$/.exec(selector.id)
+                  return match ? { artifactId: match[1], ...(match[2] ? { artifactRevision: Number(match[2]) } : {}) } : undefined
+                })()
+              : undefined
+      : undefined
+    const discoveredExecutionIds = new Set<string>()
     for (const [source, read] of [
       ['DELIVERY_GIT', options.gitDeliveries],
-      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string) => options.github.deliveryProjectionPage!(repositoryId, cursor) : undefined],
-      ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string) => service.publicationDeliveryPage!(cursor) : undefined]
+      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string, filter?: DeliveryProjectionFilter) => options.github.deliveryProjectionPage!(repositoryId, cursor, filter) : undefined],
+      ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string, filter?: DeliveryProjectionFilter) => service.publicationDeliveryPage!(cursor, undefined, filter) : undefined]
     ] as const) if (read) {
       let deliveryStage = 'DELIVERY_CURSOR'
       try {
         const savedCursor = cursors[source]
-        if (savedCursor !== undefined && typeof savedCursor !== 'string') throw new Error('CURSOR_STALE')
+        if (!deliveryFilter && savedCursor !== undefined && typeof savedCursor !== 'string') throw new Error('CURSOR_STALE')
         deliveryStage = 'DELIVERY_PAGE'
-        const page = await read(savedCursor); assertCurrent()
+        let page: DeliveryProjectionPage
+        if (source === 'DELIVERY_CONTINUUM' && deliveryFilter && !deliveryFilter.artifactId && !deliveryFilter.executionId && discoveredExecutionIds.size > 0) {
+          const merged: DeliveryProjectionPage['observations'] = []
+          for (const execId of [...discoveredExecutionIds].slice(0, 5)) {
+            const sub = await read(undefined, { executionId: execId })
+            if (sub?.observations) merged.push(...sub.observations)
+          }
+          page = { observations: merged }
+        } else {
+          page = deliveryFilter ? await read(undefined, deliveryFilter) : await read(savedCursor)
+        }
+        assertCurrent()
         if (!page || !Array.isArray(page.observations)) throw new Error('CONTRACT_STALE')
         deliveryStage = 'DELIVERY_PROJECT'
         for (const observation of page.observations) {
           const anchor = validDeliveryAnchor(observation.anchor)
           if (!anchor) continue
+          discoveredExecutionIds.add(anchor.executionId)
           if (observation.operation === 'CREATE_PULL_REQUEST' && (!canonicalRepository || observation.repository?.toLowerCase() !== canonicalRepository.toLowerCase())) continue
           const from = deliveryExecutionEntity(anchor)
           const target: RegistryEntity | undefined = observation.commitSha && /^[a-f0-9]{40}$/.test(observation.commitSha)

@@ -26,6 +26,30 @@ export const authenticatedSessionWitness = z.object({
 export type AuthenticatedSessionWitness = z.infer<typeof authenticatedSessionWitness>
 export interface DeliveryObservation { receiptId: string; operationId: string; operation: 'commit_git_changes' | 'mutate_worktree' | 'merge_git_branch' | 'revert_git_commit' | 'CREATE_PULL_REQUEST' | 'PUBLISH_ARTIFACT' | 'UPDATE_ARTIFACT' | 'VALIDATION_PROOF'; argumentFingerprint: string; anchor: DeliveryAnchor;
   commitSha?: string; pullRequest?: number; headSha?: string; repository?: string; artifactId?: string; artifactRevision?: number; proofId?: string }
+export interface DeliveryProjectionFilter {
+  commitSha?: string
+  pullRequest?: number
+  artifactId?: string
+  artifactRevision?: number
+  executionId?: string
+}
+export function matchesDeliveryObservation(observation: DeliveryObservation, filter: DeliveryProjectionFilter): boolean {
+  if (filter.commitSha && observation.commitSha !== filter.commitSha && observation.headSha !== filter.commitSha) return false
+  if (filter.pullRequest !== undefined && observation.pullRequest !== filter.pullRequest) return false
+  if (filter.executionId && observation.anchor.executionId !== filter.executionId) return false
+  if (filter.artifactId) {
+    const matchesArtifact = observation.artifactId === filter.artifactId ||
+      observation.anchor.planArtifactId === filter.artifactId ||
+      observation.anchor.bindingArtifactId === filter.artifactId
+    if (!matchesArtifact) return false
+  }
+  if (filter.artifactRevision !== undefined) {
+    const matchesRev = observation.artifactRevision === filter.artifactRevision ||
+      observation.anchor.planRevision === filter.artifactRevision
+    if (!matchesRev) return false
+  }
+  return true
+}
 export interface DeliveryProjectionPage { observations: DeliveryObservation[]; nextCursor?: string }
 export type PrepareDelivery = (request: DeliveryContextRequest) => Promise<DeliveryAnchor>
 export type ObserveDelivery = () => Promise<ExecutionBranchSnapshot>

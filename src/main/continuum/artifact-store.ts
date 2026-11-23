@@ -67,7 +67,7 @@ export class ArtifactStore {
       contentHash: row.content_hash }
   }
   readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
-  publicationDeliveryPage(after?: string, limit?: number) { return this.publicationReceipts.deliveryPage(after, limit) }
+  publicationDeliveryPage(after?: string, limit?: number, filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter) { return this.publicationReceipts.deliveryPage(after, limit, filter) }
   createPublished(input: CreateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext) {
     return this.db.transaction(() => {
       const artifact = this.createInsideTransaction(input)
