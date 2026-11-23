@@ -169,18 +169,20 @@ export class GitOperationsService {
     after?: string,
     filter?: DeliveryProjectionFilter
   ): Promise<DeliveryProjectionPage> {
-    if (filter && (filter.commitSha || filter.executionId || filter.artifactId)) {
+    if (filter && (filter.commitSha || filter.executionId || filter.artifactId || filter.pullRequest !== undefined || filter.artifactRevision !== undefined)) {
       const matched: DeliveryProjectionPage['observations'] = []
-      let cursor: string | undefined
+      let cursor = after
+      let nextCursor: string | undefined
       for (let round = 0; round < 20; round++) {
         const page = await this.deliveryProjectionPage(cursor)
         for (const obs of page.observations) {
           if (matchesDeliveryObservation(obs, filter)) matched.push(obs)
         }
-        if (!page.nextCursor || matched.length >= 50) break
-        cursor = page.nextCursor
+        nextCursor = page.nextCursor
+        if (!nextCursor || matched.length >= 50) break
+        cursor = nextCursor
       }
-      return { observations: matched }
+      return { observations: matched, ...(nextCursor ? { nextCursor } : {}) }
     }
     const page = await this.git.operationReceiptPage(this.repoRoot, after)
     const candidates: Array<{ observation: DeliveryProjectionPage['observations'][number]; allowMergeParents: boolean }> = []

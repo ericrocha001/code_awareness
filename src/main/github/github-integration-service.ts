@@ -209,19 +209,21 @@ export class GitHubIntegrationService {
     filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter
   ) {
     if (!this.pullRequestDependencies) return { observations: [] }
-    if (filter && (filter.pullRequest !== undefined || filter.commitSha || filter.executionId || filter.artifactId)) {
+    if (filter && (filter.pullRequest !== undefined || filter.commitSha || filter.executionId || filter.artifactId || filter.artifactRevision !== undefined)) {
       const { matchesDeliveryObservation } = require('../../shared/types/delivery-context-types') as typeof import('../../shared/types/delivery-context-types')
       const matched: import('../../shared/types/delivery-context-types').DeliveryObservation[] = []
-      let pageCursor = ''
+      let pageCursor = cursor ?? ''
+      let nextCursor: string | undefined
       for (let round = 0; round < 20; round++) {
         const page = pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, pageCursor)
         for (const obs of page.observations) {
           if (matchesDeliveryObservation(obs, filter)) matched.push(obs)
         }
-        if (!page.nextCursor || matched.length >= 50) break
-        pageCursor = page.nextCursor
+        nextCursor = page.nextCursor
+        if (!nextCursor || matched.length >= 50) break
+        pageCursor = nextCursor
       }
-      return { observations: matched }
+      return { observations: matched, ...(nextCursor ? { nextCursor } : {}) }
     }
     return pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, cursor)
   }

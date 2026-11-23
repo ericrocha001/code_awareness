@@ -697,3 +697,141 @@ it('U1: recovers EXECUTION -> COMMIT by both EXECUTION and COMMIT selectors, ver
   expect(commitWork.workLink).toMatchObject({ state: 'FOUND', weakestLink: 'OBSERVED' })
   expect(commitWork.work).toEqual(expect.arrayContaining([expect.objectContaining({ artifactId: f.plan.artifactId, role: 'PLAN' })]))
 }, 120000)
+
+it('U1/U2 (artifact-9d7ea305): propagates filters with honest focal pagination and resolves PR -> Commits -> Receipts -> Execution -> Plan bidirectionally', async () => {
+  const f = await fixture()
+  const operations = new GitOperationsService(f.root, f.git, { fetch: async () => {}, push: async () => {} } as any, { repositoryId: 'fixture', isActive: () => true })
+
+  // Create >20 receipts so the target governed commit sits beyond the first page (20 per page).
+  for (let i = 0; i < 21; i++) {
+    const opId = `00-pad-${String(i).padStart(2, '0')}`
+    await f.git.prepareOperationReceipt(f.root, {
+      operationId: `${opId}-stage`,
+      operation: 'stage_git_changes',
+      argumentFingerprint: String(i).padStart(64, '0'),
+      status: 'COMPLETED',
+      createdAt: '2026-11-23T14:00:00Z',
+      completedAt: '2026-11-23T14:00:01Z',
+      deliveryStatus: 'UNBOUND',
+      result: { content: [{ type: 'text', text: '{}' }] }
+    })
+  }
+
+  const commitWithContext = async (opId: string, file: string) => {
+    writeFileSync(join(f.root, file), opId)
+    const st0 = await operations.getState()
+    await executeGitOperationsTool(operations, 'stage_git_changes', {
+      operationId: `${opId}-stage`, mode: 'STAGE', paths: [file], expectedIndexRevision: st0.indexRevision, expectedWorktreeRevision: st0.worktreeRevision
+    })
+    const st1 = await operations.getState()
+    const res = await executeGitOperationsTool(operations, 'commit_git_changes', {
+      operationId: opId, message: opId, expectedHead: st1.head, expectedIndexRevision: st1.indexRevision, deliveryContext: f.request
+    }, (req, worktreeId) => f.service.prepareDeliveryContext(f.authority, req, f.observe, { worktreeId }), f.authority)
+    expect(res.isError, res.content[0].text).toBeUndefined()
+    return JSON.parse(res.content[0].text).sha as string
+  }
+
+  const sha1 = await commitWithContext('zz-u2-commit-1', 'u2-a.txt')
+  const sha2 = await commitWithContext('zz-u2-commit-2', 'u2-b.txt')
+
+  // External shell commit (no receipt) for standalone PR #201.
+  writeFileSync(join(f.root, 'ext.txt'), 'ext')
+  await gitExec(f.root, ['add', 'ext.txt'])
+  await gitExec(f.root, ['commit', '-m', 'external shell commit'])
+  const externalSha = (await f.git.getCurrentCommitHash(f.root))!
+
+  // Handoff implementing the plan without prNumber or commitSha metadata.
+  const handoff = f.service.publish(`---\nname: U2 Handoff\ndescription: Handoff without PR metadata\nkind: IMPLEMENTATION_HANDOFF\nrelations:\n  - artifactId: ${f.plan.artifactId}\n    kind: implements\n---\nHandoff body`)
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u2.db')); cleanup.push(async () => ledger.close())
+
+  // Preserve global partial cursor to verify focal queries do not clobber it.
+  sessions.registry.apply({ repositoryId: 'fixture', source: 'DELIVERY_GIT', revision: 'global-r1', cursor: '00-pad-05-stage', status: 'PARTIAL', edges: [] }, undefined)
+
+  const pullRequestCommits = vi.fn(async (_root: string, prNumber: number) => ({
+    repositoryId: 'fixture',
+    repository: 'owner/repo',
+    headSha: prNumber === 200 ? sha2 : externalSha,
+    commits: prNumber === 200 ? [{ sha: sha1 }, { sha: sha2 }] : [{ sha: externalSha }],
+    nextPage: null
+  }))
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: (cursor, filter) => operations.deliveryProjectionPage(cursor, filter),
+    github: {
+      deliveryRepository: async () => 'owner/repo',
+      commitPullRequests: async (_root: string, sha: string) => [sha1, sha2].includes(sha) ? [200] : sha === externalSha ? [201] : [],
+      getPullRequest: async (_root: string, prNumber: number) => ({
+        repositoryId: 'fixture',
+        repository: 'owner/repo',
+        pullRequest: {
+          number: prNumber, url: `https://github.com/owner/repo/pull/${prNumber}`, title: `PR #${prNumber}`, state: 'open', draft: false,
+          head: { ref: 'feat', repository: 'owner/repo', sha: prNumber === 200 ? sha2 : externalSha },
+          base: { ref: 'main', repository: 'owner/repo', sha: 'e'.repeat(40) },
+          mergeability: 'UNKNOWN', mergedAt: null, observedAt: '2026-11-23T15:00:00Z'
+        }
+      }),
+      pullRequestCommits
+    } as any,
+    networkAllowed: () => true,
+    assertCurrent: () => {}
+  })
+
+  // 1) Focal PR #200 query resolves PR -> Commits -> Receipts -> Execution -> Plan + Handoff.
+  const pr200Selector = { kind: 'PR' as const, id: '200' }
+  const neighbors200 = sessions.registry.contextGraph(pr200Selector, undefined, 2).nodes
+    .filter(n => n.type === 'ARTIFACT' || n.type === 'COMMIT')
+    .map(n => ({ kind: n.type as 'ARTIFACT' | 'COMMIT', id: n.id }))
+  sessions.registry.applyAll(await read({ selector: pr200Selector, neighbors: neighbors200, cursors: sessions.registry.cursors() }), () => {})
+  expect(pullRequestCommits).toHaveBeenCalledTimes(1)
+  expect(sessions.registry.source('DELIVERY_GIT')?.cursor).toBe('00-pad-05-stage')
+
+  const prWork = JSON.parse((await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'PR', id: '200' }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)).content[0].text)
+  expect(prWork.workLink.state).toBe('FOUND')
+  expect(['OBSERVED', 'DECLARED']).toContain(prWork.workLink.weakestLink)
+  expect(prWork.executionCommit).toMatchObject({ state: 'FOUND' })
+  expect(prWork.deliveryLink).toMatchObject({ state: 'VERIFIED' })
+  expect(prWork.work).toEqual(expect.arrayContaining([
+    expect.objectContaining({ artifactId: f.plan.artifactId, role: 'PLAN' }),
+    expect.objectContaining({ artifactId: handoff.artifactId, role: 'HANDOFF' })
+  ]))
+  expect(prWork.related.COMMIT).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: sha1 }),
+    expect.objectContaining({ id: sha2 })
+  ]))
+
+  // 2) Second PR #200 query reuses cached GITHUB:PR:200 without re-fetching pullRequestCommits.
+  const neighbors200Cached = sessions.registry.contextGraph(pr200Selector, undefined, 2).nodes
+    .filter(n => n.type === 'ARTIFACT' || n.type === 'COMMIT')
+    .map(n => ({ kind: n.type as 'ARTIFACT' | 'COMMIT', id: n.id }))
+  sessions.registry.applyAll(await read({ selector: pr200Selector, neighbors: neighbors200Cached, cursors: sessions.registry.cursors() }), () => {})
+  expect(pullRequestCommits).toHaveBeenCalledTimes(1)
+
+  // 3) Reverse selectors COMMIT and EXECUTION resolve the same chain.
+  const commitWork = JSON.parse((await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'COMMIT', id: sha1 }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)).content[0].text)
+  expect(commitWork.workLink).toMatchObject({ state: 'FOUND' })
+  expect(commitWork.related.PR).toEqual(expect.arrayContaining([expect.objectContaining({ id: '200' })]))
+
+  const execWork = JSON.parse((await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'EXECUTION', id: 'execution-A' }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)).content[0].text)
+  expect(execWork.workLink).toMatchObject({ state: 'FOUND' })
+  expect(execWork.related.COMMIT).toEqual(expect.arrayContaining([expect.objectContaining({ id: sha1 }), expect.objectContaining({ id: sha2 })]))
+
+  // 4) External PR #201 (shell commit without receipt) keeps COMMIT->PR verified but EXECUTION->COMMIT unresolved.
+  sessions.registry.applyAll(await read({ selector: { kind: 'PR', id: '201' }, neighbors: [], cursors: sessions.registry.cursors() }), () => {})
+  const extWork = JSON.parse((await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'PR', id: '201' }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)).content[0].text)
+  expect(extWork.deliveryLink).toMatchObject({ state: 'VERIFIED' })
+  expect(extWork.executionCommit.state).not.toBe('FOUND')
+  expect(extWork.workLink.state).not.toBe('FOUND')
+}, 120000)
