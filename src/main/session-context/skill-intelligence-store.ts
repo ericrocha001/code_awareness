@@ -12,7 +12,7 @@ export type SkillObservationClass =
 export type SkillScope = 'GLOBAL' | 'PROJECT' | 'UNKNOWN'
 export type SkillVersionStatus = 'EXACT' | 'VERSION_UNKNOWN'
 export type SkillSourceSurface = 'academy_mcp_skills' | 'academy_mcp_tool' | 'native_source_event'
-export type SkillOperationStatus = 'SUCCESS' | 'FAILURE' | 'REFUSAL'
+export type SkillOperationStatus = 'SUCCESS' | 'FAILURE' | 'REFUSAL' | 'UNKNOWN'
 export type SkillBindingState = 'BOUND_BY_WITNESS' | 'UNBOUND'
 export type SkillTimestampKind = 'SOURCE_TIMESTAMP' | 'CAPTURE_TIME' | 'INFERRED'
 export type SkillCoverageState = 'SUPPORTED' | 'PARTIAL' | 'UNAVAILABLE'
@@ -313,10 +313,10 @@ export class SkillIntelligenceStore {
 
   extractFromNativeEvents(
     sessionId: string,
-    events: Array<EventInput & { callId?: string; content?: unknown; eventId?: string; ordinal?: number }>,
+    events: Array<Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number }>,
     context?: { executionId?: string; nativeSessionId?: string; provider?: string; worktreeId?: string; generation?: string }
   ): number {
-    const callsById = new Map<string, EventInput & { callId?: string; content?: unknown; eventId?: string; ordinal?: number }>()
+    const callsById = new Map<string, Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number }>()
     for (const ev of events) {
       if (ev.type === 'TOOL_CALL' && ev.callId) {
         callsById.set(ev.callId, ev)
@@ -355,10 +355,11 @@ export class SkillIntelligenceStore {
         continue
       }
 
-      const rawOutput = ev.type === 'TOOL_RESULT' ? extractTextValue(ev.content) : ''
-      const statusInfo = ev.type === 'TOOL_RESULT'
+      const hasResult = ev.type === 'TOOL_RESULT'
+      const rawOutput = hasResult ? extractTextValue(ev.content) : ''
+      const statusInfo = hasResult
         ? classifyStructuredOutput(rawOutput)
-        : { isError: false, status: 'SUCCESS' as const }
+        : { isError: false, status: 'UNKNOWN' as const, errorKind: 'UNPAIRED_TOOL_CALL' }
 
       const skillId =
         typeof callArgs?.skillId === 'string' ? callArgs.skillId :
@@ -383,17 +384,42 @@ export class SkillIntelligenceStore {
             ? 'PROJECT'
             : 'UNKNOWN'
 
+      const isHistoryMetadataOnly =
+        toolName === 'get_academy_skill_history' &&
+        (callArgs?.metadataOnly === true || !(resultObj?.package && typeof resultObj.package === 'object'))
+
       let observationClass: SkillObservationClass
-      if (statusInfo.isError) {
+      const gaps: string[] = []
+      if (!hasResult) {
         observationClass = 'ATTEMPT_FAILED_OR_REFUSED'
-      } else if (toolName === 'list_academy_skills' || toolName === 'skills/list' || toolName === 'skills/get') {
+        gaps.push('TOOL_RESULT_MISSING')
+      } else if (statusInfo.isError) {
+        observationClass = 'ATTEMPT_FAILED_OR_REFUSED'
+      } else if (
+        toolName === 'list_academy_skills' ||
+        toolName === 'skills/list' ||
+        toolName === 'skills/get' ||
+        isHistoryMetadataOnly
+      ) {
         observationClass = 'DISCOVERED_MANIFEST_FETCHED'
-      } else {
+      } else if (
+        (toolName === 'resources/read' && rawOutput.length > 0) ||
+        (toolName === 'get_academy_skill' && (Boolean(resultObj?.current) || Boolean(resultObj?.package))) ||
+        (toolName === 'get_academy_skill_history' && Boolean(resultObj?.package && typeof resultObj.package === 'object'))
+      ) {
         observationClass = 'CONTENT_DELIVERED'
+      } else {
+        observationClass = 'DISCOVERED_MANIFEST_FETCHED'
+        gaps.push('CONTENT_PAYLOAD_NOT_CONFIRMED')
       }
 
-      const operationStatus: SkillOperationStatus =
-        statusInfo.status === 'REFUSAL' ? 'REFUSAL' : statusInfo.isError ? 'FAILURE' : 'SUCCESS'
+      const operationStatus: SkillOperationStatus = !hasResult
+        ? 'UNKNOWN'
+        : statusInfo.status === 'REFUSAL'
+          ? 'REFUSAL'
+          : statusInfo.isError
+            ? 'FAILURE'
+            : 'SUCCESS'
 
       this.recordSkillEvent({
         sessionId,
@@ -419,7 +445,8 @@ export class SkillIntelligenceStore {
         bindingAuthority: 'native_session_ingest',
         captureOrder: ev.ordinal ?? i + 1,
         sourceTimestamp: ev.timestamp ?? null,
-        timestampKind: ev.timestamp ? 'SOURCE_TIMESTAMP' : 'CAPTURE_TIME'
+        timestampKind: ev.timestamp ? 'SOURCE_TIMESTAMP' : 'CAPTURE_TIME',
+        gaps
       })
       recorded++
     }
