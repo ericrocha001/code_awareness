@@ -88,6 +88,10 @@ export const INSPECT_INTELLIGENCE_EVIDENCE_TOOL: McpToolDefinition = {
         default: false,
         description: 'Opt-in for Q26 only to read ENTIRE_REPORTED aggregate session usage.'
       },
+      skillId: {
+        ...shortId,
+        description: 'Optional canonical skillId filter for Q20/Q21 without scanning the catalog.'
+      },
       limit: {
         type: 'integer',
         minimum: 1,

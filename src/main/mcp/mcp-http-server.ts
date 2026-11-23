@@ -198,25 +198,29 @@ export function createMcpHttpServer(
           if (cursor !== undefined && typeof cursor !== 'string') {
             throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
           }
-          rpcResult = adapter.listSkills(cursor !== undefined ? { cursor } : undefined)
+          const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+          rpcResult = adapter.listSkills(cursor !== undefined ? { cursor } : undefined, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
         } else if (method === 'skills/get' && !modern) {
           const uri = params?.uri
           if (typeof uri !== 'string' || !uri) {
             throw new McpProtocolError(-32602, 'Invalid params: uri is required')
           }
-          rpcResult = adapter.getSkill({ uri })
+          const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+          rpcResult = adapter.getSkill({ uri }, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
         } else if (method === 'resources/read' && !modern) {
           const uri = params?.uri
           if (typeof uri !== 'string' || !uri) {
             throw new McpProtocolError(-32602, 'Invalid params: uri is required')
           }
-          rpcResult = adapter.readResource({ uri })
+          const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+          rpcResult = adapter.readResource({ uri }, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
         } else if (method === 'resources/list' && !modern) {
           const cursor = params?.cursor
           if (cursor !== undefined && typeof cursor !== 'string') {
             throw new McpProtocolError(-32602, 'Invalid params: cursor must be a string')
           }
-          rpcResult = adapter.listResources(cursor !== undefined ? { cursor } : undefined)
+          const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+          rpcResult = adapter.listResources(cursor !== undefined ? { cursor } : undefined, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
         } else if (method === 'tools/list') {
           const tools = adapter.listTools()
           rpcResult = modern ? complete({ tools, ...privateCache }) : { tools }

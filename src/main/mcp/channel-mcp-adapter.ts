@@ -59,6 +59,7 @@ import type { DevUpdateService } from '../dev-update/dev-update-service'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
 import {
   AcademyMcpSkillsProvider,
+  type AcademySkillMcpObservation,
   McpProtocolError,
   type McpResourceReadResult,
   type McpResourcesListResult,
@@ -137,6 +138,8 @@ export class ChannelMcpAdapter {
   private readonly repositoryFileEditing?: RepositoryFileEditing
   private readonly runtimePreview?: McpProjectContext['runtimePreview']
   private readonly sessionContext?: McpProjectContext['sessionContext']
+  private readonly skillObserver?: McpProjectContext['skillObserver']
+  private readonly skillIntelligence?: McpProjectContext['skillIntelligence']
   private readonly readSessionRepository?: McpProjectContext['readSessionRepository']
   private readonly cliExecution?: CliExecutionService
   private readonly sessionMemoryCentral?: SessionMemoryCentralService
@@ -201,6 +204,8 @@ export class ChannelMcpAdapter {
       this.repositoryFileEditing = context.repositoryFileEditing
       this.runtimePreview = context.runtimePreview
       this.sessionContext = context.sessionContext
+      this.skillObserver = context.skillObserver
+      this.skillIntelligence = context.skillIntelligence
       this.readSessionRepository = context.readSessionRepository
       this.cliExecution = context.cliExecution
       this.sessionMemoryCentral = context.sessionMemoryCentral
@@ -279,26 +284,165 @@ export class ChannelMcpAdapter {
     return Boolean(this.academySkills)
   }
 
-  listSkills(params?: { cursor?: string }): McpSkillsListResult {
-    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
-    return this.academySkills.listSkills(params)
+  private resolveSkillBinding(authority?: AgentAuthority) {
+    if (!authority) {
+      return { sessionBindingState: 'UNBOUND' as const, bindingAuthority: null, sessionId: null, executionId: null, worktreeId: null }
+    }
+    try {
+      assertArtifactAgent(authority, this.repositoryId ?? '')
+    } catch {
+      return { sessionBindingState: 'UNBOUND' as const, bindingAuthority: null, sessionId: null, executionId: null, worktreeId: null }
+    }
+    const executionId = authority.deliveryContext?.executionId ?? null
+    const sessionId = authority.sessionWitness?.sessionId ?? null
+    if (!executionId && !sessionId) {
+      return { sessionBindingState: 'UNBOUND' as const, bindingAuthority: null, sessionId: null, executionId: null, worktreeId: null }
+    }
+    return {
+      sessionBindingState: 'BOUND_BY_WITNESS' as const,
+      bindingAuthority: authority.sessionWitness ? 'session_witness' : 'delivery_context',
+      sessionId,
+      executionId,
+      worktreeId: authority.worktreeId ?? null
+    }
   }
 
-  getSkill(params: { uri: string }): McpSkillGetResult {
-    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
-    return this.academySkills.getSkill(params)
+  private emitSkillMcpObservation(
+    obs: AcademySkillMcpObservation,
+    invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext,
+    authority?: AgentAuthority
+  ): void {
+    if (!this.skillObserver) return
+    const binding = this.resolveSkillBinding(authority)
+    const observationClass =
+      obs.status !== 'SUCCESS'
+        ? 'ATTEMPT_FAILED_OR_REFUSED'
+        : obs.operation === 'resources/read'
+          ? 'CONTENT_DELIVERED'
+          : 'DISCOVERED_MANIFEST_FETCHED'
+    try {
+      this.skillObserver({
+        sessionId: binding.sessionId,
+        executionId: binding.executionId,
+        worktreeId: binding.worktreeId,
+        observationClass,
+        skillId: obs.skillId ?? null,
+        skillName: obs.skillName ?? null,
+        skillScope: obs.scope ?? 'UNKNOWN',
+        destinationId: obs.destinationId ?? null,
+        version: obs.version ?? null,
+        versionStatus: typeof obs.version === 'number' ? 'EXACT' : 'VERSION_UNKNOWN',
+        packageHash: obs.packageHash ?? null,
+        resourceUri: obs.resourceUri ?? null,
+        resourcePath: obs.resourcePath ?? null,
+        resourceDigest: obs.resourceDigest ?? null,
+        sourceSurface: 'academy_mcp_skills',
+        sourceContract: 'io.modelcontextprotocol/skills@2026-07-28',
+        originalEventId: invocationContext?.requestId ?? null,
+        operation: obs.operation,
+        operationStatus: obs.status,
+        errorCode: obs.errorCode ?? null,
+        sessionBindingState: binding.sessionBindingState,
+        bindingAuthority: binding.bindingAuthority
+      })
+    } catch {}
   }
 
-  readResource(params: { uri: string }): McpResourceReadResult {
+  private observeAcademyToolResult(
+    name: string,
+    args: unknown,
+    toolResult: McpToolResult,
+    requestId?: string,
+    authority?: AgentAuthority
+  ): void {
+    if (!this.skillObserver) return
+    const binding = this.resolveSkillBinding(authority)
+    const argObj = args && typeof args === 'object' && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined
+    let parsed: Record<string, unknown> | undefined
+    const first = toolResult.content[0]
+    if (first?.type === 'text') {
+      try {
+        const raw = JSON.parse(first.text)
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) parsed = raw as Record<string, unknown>
+      } catch {}
+    }
+    const skillId =
+      typeof parsed?.id === 'string' ? parsed.id :
+      typeof argObj?.skillId === 'string' ? argObj.skillId :
+      null
+    const versionRaw = parsed?.currentVersion ?? parsed?.version ?? argObj?.version
+    const version = typeof versionRaw === 'number' && Number.isSafeInteger(versionRaw) && versionRaw >= 1 ? versionRaw : null
+    const currentObj = parsed?.current && typeof parsed.current === 'object' ? (parsed.current as Record<string, unknown>) : undefined
+    const packageHash =
+      typeof parsed?.packageHash === 'string' ? parsed.packageHash :
+      typeof currentObj?.packageHash === 'string' ? currentObj.packageHash :
+      null
+    const scope = parsed?.scope === 'GLOBAL' || parsed?.scope === 'PROJECT' ? parsed.scope : 'UNKNOWN'
+    const isErr = toolResult.isError === true
+    const observationClass = isErr
+      ? 'ATTEMPT_FAILED_OR_REFUSED'
+      : name === 'list_academy_skills'
+        ? 'DISCOVERED_MANIFEST_FETCHED'
+        : 'CONTENT_DELIVERED'
+    try {
+      this.skillObserver({
+        sessionId: binding.sessionId,
+        executionId: binding.executionId,
+        worktreeId: binding.worktreeId,
+        observationClass,
+        skillId,
+        skillScope: scope,
+        version,
+        versionStatus: version !== null ? 'EXACT' : 'VERSION_UNKNOWN',
+        packageHash,
+        sourceSurface: 'academy_mcp_tool',
+        sourceContract: 'academy-mcp/v1',
+        originalEventId: requestId ?? null,
+        operation: name,
+        operationStatus: isErr ? 'FAILURE' : 'SUCCESS',
+        errorCode: isErr && typeof parsed?.code === 'string' ? parsed.code : null,
+        sessionBindingState: binding.sessionBindingState,
+        bindingAuthority: binding.bindingAuthority
+      })
+    } catch {}
+  }
+
+  listSkills(
+    params?: { cursor?: string },
+    invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext,
+    authority?: AgentAuthority
+  ): McpSkillsListResult {
+    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
+    return this.academySkills.listSkills(params, undefined, obs => this.emitSkillMcpObservation(obs, invocationContext, authority))
+  }
+
+  getSkill(
+    params: { uri: string },
+    invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext,
+    authority?: AgentAuthority
+  ): McpSkillGetResult {
+    if (!this.academySkills) throw new McpProtocolError(-32601, 'Skills extension unavailable')
+    return this.academySkills.getSkill(params, undefined, obs => this.emitSkillMcpObservation(obs, invocationContext, authority))
+  }
+
+  readResource(
+    params: { uri: string },
+    invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext,
+    authority?: AgentAuthority
+  ): McpResourceReadResult {
     if (!this.academySkills) throw new McpProtocolError(-32601, 'Resources unavailable')
-    return this.academySkills.readSkillResource(params)
+    return this.academySkills.readSkillResource(params, undefined, obs => this.emitSkillMcpObservation(obs, invocationContext, authority))
   }
 
-  listResources(params?: { cursor?: string }): McpResourcesListResult {
+  listResources(
+    params?: { cursor?: string },
+    invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext,
+    authority?: AgentAuthority
+  ): McpResourcesListResult {
     if (!this.academySkills) {
       return { resultType: 'complete', resources: [], ttlMs: 30_000, cacheScope: 'private' }
     }
-    return this.academySkills.listSkillResources(params)
+    return this.academySkills.listSkillResources(params, undefined, obs => this.emitSkillMcpObservation(obs, invocationContext, authority))
   }
 
   listTools(): McpToolDefinition[] {
@@ -485,6 +629,7 @@ export class ChannelMcpAdapter {
         artifactReader: this.artifactReader,
         validationLedger: this.validationLedger,
         academy: this.academy,
+        skillIntelligence: this.skillIntelligence,
         allowArtifactMetadata,
         assertSourceAuthorized: (worktreeId?: string) => {
           try {
@@ -606,9 +751,12 @@ export class ChannelMcpAdapter {
       return executeInspectPullRequestMergeability(this.githubContext.githubIntegration, this.githubContext.repoRoot, args)
     }
     if (ACADEMY_MCP_TOOLS.some((tool) => tool.name === name)) {
-      return this.academy
-        ? executeAcademyTool(this.academy, name, args)
-        : { content: [{ type: 'text', text: 'ACADEMY_UNAVAILABLE' }], isError: true }
+      if (!this.academy) return { content: [{ type: 'text', text: 'ACADEMY_UNAVAILABLE' }], isError: true }
+      const toolResult = await executeAcademyTool(this.academy, name, args)
+      if (this.skillObserver && (name === 'list_academy_skills' || name === 'get_academy_skill' || name === 'get_academy_skill_history')) {
+        this.observeAcademyToolResult(name, args, toolResult, invocationContext?.requestId, authority)
+      }
+      return toolResult
     }
     if (VALIDATION_EXECUTION_TOOLS.some((tool) => tool.name === name)) {
       return this.validationExecution

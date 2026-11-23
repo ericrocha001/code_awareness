@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { AcademyService } from '../academy/academy-service'
+import type { SkillEventRecord, SkillIntelligenceStore } from '../session-context/skill-intelligence-store'
 import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 import type { McpToolResult } from '../mcp/mcp-types'
 import { assertValidSessionRepositoryId, type SessionContextPort, type SessionToolName } from '../session-context/mcp'
@@ -67,6 +68,7 @@ export const inspectIntelligenceEvidenceSchema = z.object({
   expectedCatalogVersion: z.number().int().min(1).optional(),
   expectedRevision: z.number().int().min(1).optional(),
   includeEntireUsage: z.boolean().default(false),
+  skillId: shortId.optional(),
   limit: z.number().int().min(1).max(15).default(10),
   cursor: z.string().max(512).optional()
 }).strict()
@@ -79,7 +81,8 @@ export interface EvidenceProjectionPorts {
   sessionContext: SessionContextPort
   artifactReader?: IArtifactReader
   validationLedger?: Pick<ValidationLedger, 'listProofs'>
-  academy?: Pick<AcademyService, 'history'>
+  academy?: Pick<AcademyService, 'history'> & Partial<Pick<AcademyService, 'getDeliveryStatus' | 'listChanges'>>
+  skillIntelligence?: Pick<SkillIntelligenceStore, 'querySkillEvents'>
   allowArtifactMetadata: boolean
   assertSourceAuthorized: (worktreeId?: string) => void
   assertCurrent: () => void
@@ -1028,11 +1031,120 @@ function buildContextProjection(window: LoadedSessionWindow) {
 async function buildAcademyProjection(
   ports: EvidenceProjectionPorts,
   input: InspectIntelligenceEvidenceInput,
-  graph?: GraphSummary
+  graph?: GraphSummary,
+  resolvedSession?: ResolvedSessionRef,
+  offset = 0,
+  relationStatus?: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED',
+  relationCandidates?: unknown[]
 ) {
   const declaredSkills: Array<Record<string, unknown>> = []
   const historicalVersions: Array<Record<string, unknown>> = []
-  const gaps = new Set<string>(['USE_NOT_OBSERVED', 'TYPED_SKILL_EVENTS_UNAVAILABLE', 'CONTEXT_DELIVERY_ENVELOPE_UNAVAILABLE'])
+  const distributedSkills: Array<Record<string, unknown>> = []
+  const gaps = new Set<string>(['CONTEXT_DELIVERY_ENVELOPE_UNAVAILABLE'])
+
+  const executionId = input.target.relation?.type === 'EXECUTION' ? input.target.relation.id : undefined
+  const nativeSessionId = resolvedSession?.nativeSession?.id
+  const sessionId = resolvedSession?.kind === 'IMPORTED' ? resolvedSession.sessionId : undefined
+
+  let skillEvents: SkillEventRecord[] = []
+  let totalSkillEvents = 0
+  let hasMoreSkillEvents = false
+  let unboundCount = 0
+  let skillCoverage: unknown[] = []
+  let skillStoreRevision = 1
+  const associatedFailures: Array<Record<string, unknown>> = []
+
+  // 1. Query session-bound skill intelligence via inspect_agent_session when a sessionId is resolved
+  if (sessionId) {
+    const inspected = await callSessionPort(ports, 'inspect_agent_session', {
+      sessionId,
+      view: 'FOCAL',
+      ...(input.skillId ? { skillId: input.skillId } : {}),
+      ...(offset > 0 ? { skillOffset: offset } : {}),
+      skillLimit: input.limit
+    })
+    if (inspected.ok) {
+      const si = inspected.data.skillIntelligence as
+        | { events?: SkillEventRecord[]; total?: number; hasMore?: boolean; unboundCount?: number; coverage?: unknown[]; revision?: number }
+        | undefined
+      if (si && Array.isArray(si.events)) {
+        skillEvents = si.events
+        totalSkillEvents = typeof si.total === 'number' ? si.total : si.events.length
+        hasMoreSkillEvents = si.hasMore === true
+        unboundCount = typeof si.unboundCount === 'number' ? si.unboundCount : 0
+        skillCoverage = Array.isArray(si.coverage) ? si.coverage : []
+        skillStoreRevision = typeof si.revision === 'number' ? si.revision : 1
+      }
+      if (Array.isArray(inspected.data.errors)) {
+        for (const err of inspected.data.errors) {
+          if (err && typeof err === 'object') {
+            associatedFailures.push({
+              source: 'SESSION_ERROR',
+              ...(err as Record<string, unknown>),
+              deepen: {
+                tool: 'read_agent_session_event',
+                arguments: { sessionId, eventId: (err as Record<string, unknown>).eventId }
+              }
+            })
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Direct SkillIntelligenceStore query for executionId / nativeSessionId or when session port had no skillIntelligence
+  if (ports.skillIntelligence && (executionId || nativeSessionId || (sessionId && skillEvents.length === 0))) {
+    const direct = ports.skillIntelligence.querySkillEvents({
+      ...(sessionId ? { sessionId } : {}),
+      ...(executionId ? { executionId } : {}),
+      ...(nativeSessionId ? { nativeSessionId } : {}),
+      ...(input.skillId ? { skillId: input.skillId } : {}),
+      offset,
+      limit: input.limit
+    })
+    if (direct.events.length > 0 || skillEvents.length === 0) {
+      skillEvents = direct.events
+      totalSkillEvents = direct.total
+      hasMoreSkillEvents = direct.hasMore
+      unboundCount = Math.max(unboundCount, direct.unboundCount)
+      skillCoverage = direct.coverage
+      skillStoreRevision = direct.revision
+    }
+  } else if (ports.skillIntelligence && !sessionId && !executionId && !nativeSessionId) {
+    const meta = ports.skillIntelligence.querySkillEvents({
+      ...(input.skillId ? { skillId: input.skillId } : {}),
+      offset: 0,
+      limit: 1
+    })
+    unboundCount = meta.unboundCount
+  }
+
+  // Enforce PROJECT scope isolation: never leak foreign destination skills
+  skillEvents = skillEvents.filter(ev => {
+    if (ev.skillScope === 'PROJECT' && ev.destinationId && ports.repositoryId && ev.destinationId !== ports.repositoryId) {
+      gaps.add('CROSS_REPO_SKILL_EXCLUDED')
+      return false
+    }
+    return true
+  })
+
+  for (const ev of skillEvents) {
+    if (ev.observationClass === 'ATTEMPT_FAILED_OR_REFUSED') {
+      associatedFailures.push({
+        source: 'SKILL_ATTEMPT_FAILURE',
+        eventId: ev.eventId,
+        originalEventId: ev.originalEventId,
+        skillId: ev.skillId,
+        version: ev.version,
+        operation: ev.operation,
+        operationStatus: ev.operationStatus,
+        errorCode: ev.errorCode
+      })
+    }
+    if (ev.versionStatus === 'VERSION_UNKNOWN') {
+      gaps.add('VERSION_UNKNOWN')
+    }
+  }
 
   const candidateArtifactIds = new Set<string>()
   if (input.target.relation?.type === 'ARTIFACT') candidateArtifactIds.add(input.target.relation.id)
@@ -1055,6 +1167,7 @@ async function buildAcademyProjection(
           if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
           const obj = entry as Record<string, unknown>
           if (typeof obj.skillId !== 'string' || !obj.skillId) continue
+          if (input.skillId && obj.skillId !== input.skillId) continue
           const version = typeof obj.version === 'number' && Number.isSafeInteger(obj.version) && obj.version >= 1 ? obj.version : undefined
           declaredSkills.push({
             class: 'DECLARADO',
@@ -1064,24 +1177,6 @@ async function buildAcademyProjection(
             ...(version !== undefined ? { version } : {}),
             ...(typeof obj.nature === 'string' ? { nature: obj.nature } : {})
           })
-          if (version !== undefined && ports.academy) {
-            try {
-              const hist = ports.academy.history(obj.skillId, { version })
-              if (!Array.isArray(hist)) {
-                historicalVersions.push({
-                  class: 'OBSERVADO',
-                  authority: 'ACADEMY_HISTORY',
-                  skillId: obj.skillId,
-                  version,
-                  ...(typeof hist.packageHash === 'string' ? { packageHash: hist.packageHash } : {}),
-                  ...(typeof hist.origin === 'string' ? { origin: hist.origin } : {}),
-                  ...(typeof hist.createdAt === 'string' ? { createdAt: hist.createdAt } : {})
-                })
-              }
-            } catch {
-              gaps.add(`ACADEMY_VERSION_UNAVAILABLE:${obj.skillId}@${version}`)
-            }
-          }
         }
       }
     }
@@ -1089,14 +1184,185 @@ async function buildAcademyProjection(
     gaps.add('ARTIFACT_METADATA_NOT_AUTHORIZED')
   }
 
+  // Selective historical version verification via Academy.history (never academy.list, never fallback to current)
+  const historyTargets = new Map<string, { skillId: string; version: number }>()
+  for (const ev of skillEvents) {
+    if (ev.skillId && typeof ev.version === 'number') {
+      historyTargets.set(`${ev.skillId}@${ev.version}`, { skillId: ev.skillId, version: ev.version })
+    }
+  }
+  for (const decl of declaredSkills) {
+    if (typeof decl.skillId === 'string' && typeof decl.version === 'number') {
+      historyTargets.set(`${decl.skillId}@${decl.version}`, { skillId: decl.skillId, version: decl.version })
+    }
+  }
+
+  if (ports.academy) {
+    for (const { skillId, version } of [...historyTargets.values()].slice(0, 8)) {
+      try {
+        const hist = ports.academy.history(skillId, { version })
+        if (!Array.isArray(hist)) {
+          historicalVersions.push({
+            class: 'OBSERVADO',
+            authority: 'ACADEMY_HISTORY',
+            skillId,
+            version,
+            ...(typeof hist.packageHash === 'string' ? { packageHash: hist.packageHash } : {}),
+            ...(typeof hist.origin === 'string' ? { origin: hist.origin } : {}),
+            ...(typeof hist.createdAt === 'string' ? { createdAt: hist.createdAt } : {})
+          })
+        }
+      } catch {
+        gaps.add(`ACADEMY_VERSION_UNAVAILABLE:${skillId}@${version}`)
+      }
+    }
+
+    // Selective delivery status lookup when skillId is known
+    const deliveryTargets = new Set<string>()
+    if (input.skillId) deliveryTargets.add(input.skillId)
+    for (const ev of skillEvents) {
+      if (ev.skillId) deliveryTargets.add(ev.skillId)
+    }
+    if (typeof ports.academy.getDeliveryStatus === 'function') {
+      for (const skillId of [...deliveryTargets].slice(0, 4)) {
+        const matchedEvent = skillEvents.find(e => e.skillId === skillId && typeof e.version === 'number')
+        try {
+          const ds = ports.academy.getDeliveryStatus(skillId, matchedEvent?.version ?? undefined)
+          const visibleDestinations = (ds.destinations ?? []).filter(d =>
+            !ports.repositoryId || !matchedEvent?.destinationId || d.destinationId === ports.repositoryId
+          )
+          distributedSkills.push({
+            class: 'AVAILABLE_DISTRIBUTED',
+            authority: 'ACADEMY_DELIVERY_STATUS',
+            skillId: ds.skillId,
+            version: ds.version,
+            packageHash: ds.packageHash,
+            status: ds.status,
+            convergedCount: visibleDestinations.filter(d => d.status === 'CURRENT').length,
+            destinationCount: visibleDestinations.length
+          })
+        } catch {}
+      }
+    }
+  }
+
+  const deliveredEvents = skillEvents.filter(e => e.observationClass === 'CONTENT_DELIVERED')
+  const discoveredEvents = skillEvents.filter(e => e.observationClass === 'DISCOVERED_MANIFEST_FETCHED')
+  const attemptedEvents = skillEvents.filter(e => e.observationClass === 'ATTEMPT_FAILED_OR_REFUSED')
+
+  if (deliveredEvents.length === 0) {
+    gaps.add('USE_NOT_OBSERVED')
+    if (skillEvents.length === 0) {
+      gaps.add('TYPED_SKILL_EVENTS_UNAVAILABLE')
+    } else {
+      gaps.add('NOT_OBSERVED_IN_COVERED_SOURCES')
+    }
+  }
+  if (unboundCount > 0) {
+    gaps.add('UNBOUND_SKILL_DELIVERIES_NOT_ATTRIBUTED')
+  }
+  gaps.add('OMISSION_INDETERMINATE_WITHOUT_CLOSED_WORLD')
+
+  const attributedToSession = Boolean(sessionId || nativeSessionId || executionId)
+  const supportState = skillEvents.length > 0 ? 'PARTIAL_OBSERVED' : 'PARTIAL_PENDING_METADATA'
+
+  const decisionSignal = {
+    attributedToSession,
+    ...(relationStatus && relationStatus !== 'RESOLVED' ? { relationResolution: relationStatus, candidates: relationCandidates ?? [] } : {}),
+    distributed: distributedSkills,
+    discovered: discoveredEvents.map(e => ({
+      eventId: e.eventId,
+      skillId: e.skillId,
+      version: e.version,
+      versionStatus: e.versionStatus,
+      operation: e.operation,
+      sourceSurface: e.sourceSurface,
+      originalEventId: e.originalEventId
+    })),
+    delivered: deliveredEvents.map(e => ({
+      eventId: e.eventId,
+      skillId: e.skillId,
+      version: e.version,
+      versionStatus: e.versionStatus,
+      packageHash: e.packageHash,
+      resourceUri: e.resourceUri,
+      operation: e.operation,
+      sourceSurface: e.sourceSurface,
+      originalEventId: e.originalEventId
+    })),
+    declared: declaredSkills,
+    attempted: attemptedEvents.map(e => ({
+      eventId: e.eventId,
+      skillId: e.skillId,
+      operation: e.operation,
+      operationStatus: e.operationStatus,
+      errorCode: e.errorCode
+    })),
+    unboundDeliveriesCount: unboundCount,
+    unknowns: [
+      'CONTEXT_WINDOW_ASSEMBLY_NOT_OBSERVED',
+      'OMISSION_INDETERMINATE_WITHOUT_CLOSED_WORLD',
+      ...(unboundCount > 0 ? ['SESSION_BINDING_UNAVAILABLE'] : []),
+      ...(gaps.has('VERSION_UNKNOWN') ? ['VERSION_UNKNOWN'] : [])
+    ]
+  }
+
+  let q21Diagnosis: Record<string, unknown> | undefined
+  if (input.questionId === 'Q21') {
+    const candidateDeltas: Array<Record<string, unknown>> = []
+    if (ports.academy?.listChanges) {
+      for (const { skillId, version } of [...historyTargets.values()].slice(0, 4)) {
+        try {
+          const changes = ports.academy.listChanges({ skillId, limit: 5 })
+          for (const ch of changes.changes) {
+            if (ch.version > version) {
+              candidateDeltas.push({
+                skillId,
+                baseVersion: version,
+                targetVersion: ch.version,
+                createdAt: ch.createdAt,
+                origin: ch.origin,
+                deepen: {
+                  tool: 'get_academy_change_diff',
+                  arguments: { skillId, baseVersion: version, targetVersion: ch.version }
+                }
+              })
+            }
+          }
+        } catch {}
+      }
+    }
+    const hasLinkedFailureAndSkill = associatedFailures.length > 0 && (historyTargets.size > 0 || skillEvents.length > 0 || Boolean(input.skillId))
+    const discriminativeGap = hasLinkedFailureAndSkill
+      ? 'PREVENTION_NOT_PROVEN_WITHOUT_COUNTERFACTUAL_EVAL'
+      : 'MISSING_LINKED_FAILURE_OR_SKILL'
+    gaps.add(discriminativeGap)
+    q21Diagnosis = {
+      associatedFailures,
+      historicalSkillVersions: historicalVersions,
+      candidateDeltas,
+      discriminativeGap,
+      canonicalMutationApplied: false,
+      note: hasLinkedFailureAndSkill
+        ? 'Candidate deltas are investigative references only; prevention is not proven without counterfactual agent evaluation.'
+        : 'Cannot propose a grounded Skill edit without both an observed failure and an identified Skill in scope.'
+    }
+  }
+
   return {
-    supportState: 'PARTIAL_PENDING_METADATA',
+    supportState,
     dependencyRef: 'artifact-fafc5616-794d-4e71-9c9f-238e4750f00d',
-    skillEvents: [],
+    skillEvents,
+    totalSkillEvents,
+    hasMoreSkillEvents,
+    skillCoverage,
+    skillStoreRevision,
     declaredSkills,
     historicalVersions,
+    decisionSignal,
+    ...(q21Diagnosis ? { q21Diagnosis } : {}),
     gaps: [...gaps],
-    note: 'Current Academy catalog is never treated as proof of past availability or usage; declarations are labeled DECLARADO and require typed SkillEvents to establish OBSERVADO usage.'
+    note: 'Current Academy catalog is never treated as proof of past availability or usage; declarations are labeled DECLARADO and require bound typed SkillEvents to establish delivered/discovered usage.'
   }
 }
 
@@ -1445,10 +1711,14 @@ export async function inspectIntelligenceEvidence(
   // Resolve relation if relation target was provided
   let graphSummary: GraphSummary | undefined
   let resolvedSession: ResolvedSessionRef | undefined
+  let relationStatus: 'RESOLVED' | 'AMBIGUOUS' | 'UNRESOLVED' | undefined
+  let relationCandidates: unknown[] | undefined
 
   if (mode === 'RELATION') {
     const resolved = await resolveRelationTarget(ports, input.target.relation!)
     graphSummary = resolved.graph
+    relationStatus = resolved.status
+    relationCandidates = resolved.candidates
 
     // Academy Q20/Q21 or Model Q26 on a relation can still report relation-level findings even when session resolution is unresolved/ambiguous,
     // except if relation resolution is ambiguous we must surface candidates without picking one.
@@ -1611,24 +1881,75 @@ export async function inspectIntelligenceEvidence(
 
   // Q20 / Q21 (Academy Intelligence)
   if (input.questionId === 'Q20' || input.questionId === 'Q21') {
-    const academyProjection = await buildAcademyProjection(ports, input, graphSummary)
-    const stateRevision = parseInt(digestHex([graphSummary?.revision ?? null, academyProjection.declaredSkills]).slice(0, 12), 16) || 1
+    const cursorInfo = input.cursor ? parseCursorBase(input.cursor, scopeDigest) : undefined
+    const offset = cursorInfo?.offset ?? 0
+    const academyProjection = await buildAcademyProjection(
+      ports,
+      input,
+      graphSummary,
+      resolvedSession,
+      offset,
+      relationStatus,
+      relationCandidates
+    )
+    const stateRevision = parseInt(
+      digestHex([
+        graphSummary?.revision ?? null,
+        resolvedSession?.sessionId ?? null,
+        academyProjection.skillStoreRevision,
+        academyProjection.declaredSkills
+      ]).slice(0, 12),
+      16
+    ) || 1
     if (input.expectedRevision !== undefined && input.expectedRevision !== stateRevision) {
       throw new ProjectionError('REVISION_CONFLICT', { expectedRevision: input.expectedRevision, currentRevision: stateRevision })
     }
-    if (input.cursor) decodeCursor(input.cursor, scopeDigest, stateRevision)
+    if (cursorInfo && cursorInfo.revision !== stateRevision) {
+      throw new ProjectionError('REVISION_CONFLICT', { cursorRevision: cursorInfo.revision, currentRevision: stateRevision })
+    }
+    const nextCursor = academyProjection.hasMoreSkillEvents
+      ? encodeCursor({
+          v: 1,
+          scopeDigest,
+          revision: stateRevision,
+          offset: offset + academyProjection.skillEvents.length
+        })
+      : undefined
     return {
       catalogVersion: EVIDENCE_EVALUATION_CATALOG_VERSION,
       questionId: input.questionId,
       specialization: 'ACADEMY',
       revision: stateRevision,
-      scope: { repositoryId: ports.repositoryId, target: input.target },
+      scope: { repositoryId: ports.repositoryId, target: input.target, ...(input.skillId ? { skillId: input.skillId } : {}) },
+      ...(relationStatus && relationStatus !== 'RESOLVED' ? { resolution: relationStatus, candidates: relationCandidates } : {}),
       coverage: {
         academy: academyProjection.supportState,
-        skillEvents: 'UNAVAILABLE',
+        skillEvents: academyProjection.skillEvents.length > 0 ? (academyProjection.hasMoreSkillEvents ? 'PARTIAL' : 'SUPPORTED') : 'UNAVAILABLE',
         ...(graphSummary ? { graph: graphSummary.coverage } : {})
       },
       evidence: academyProjection,
+      pagination: {
+        returned: academyProjection.skillEvents.length,
+        total: academyProjection.totalSkillEvents,
+        offset,
+        hasMore: academyProjection.hasMoreSkillEvents,
+        ...(nextCursor ? { nextCursor } : {})
+      },
+      ...(nextCursor
+        ? {
+            deepen: {
+              tool: 'inspect_intelligence_evidence',
+              arguments: {
+                ...(ports.repositoryId ? { repositoryId: ports.repositoryId } : {}),
+                questionId: input.questionId,
+                target: input.target,
+                ...(input.skillId ? { skillId: input.skillId } : {}),
+                limit: input.limit,
+                cursor: nextCursor
+              }
+            }
+          }
+        : {}),
       gaps: academyProjection.gaps
     }
   }

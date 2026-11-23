@@ -73,6 +73,21 @@ export interface AcademySkillSessionContext {
   repoRoot?: string | null
 }
 
+export interface AcademySkillMcpObservation {
+  operation: 'skills/list' | 'skills/get' | 'resources/read' | 'resources/list'
+  status: 'SUCCESS' | 'FAILURE' | 'REFUSAL'
+  errorCode?: string
+  skillId?: string
+  skillName?: string
+  scope?: 'GLOBAL' | 'PROJECT'
+  destinationId?: string | null
+  version?: number
+  packageHash?: string
+  resourceUri?: string
+  resourcePath?: string
+  resourceDigest?: string
+}
+
 type ResolvedDestination =
   | { kind: 'GLOBAL_ONLY' }
   | { kind: 'NO_DESTINATION' }
@@ -347,11 +362,16 @@ export class AcademyMcpSkillsProvider {
     }
   }
 
-  listSkills(params?: { cursor?: string }, context: AcademySkillSessionContext = this.defaultContext): McpSkillsListResult {
+  listSkills(
+    params?: { cursor?: string },
+    context: AcademySkillSessionContext = this.defaultContext,
+    onObserve?: (obs: AcademySkillMcpObservation) => void
+  ): McpSkillsListResult {
     const offset = decodeCursor(params?.cursor)
     const { entries, catalogRevision } = this.collectEligibleEntries(context)
     const slice = entries.slice(offset, offset + this.pageSize)
     const nextOffset = offset + this.pageSize
+    onObserve?.({ operation: 'skills/list', status: 'SUCCESS' })
     return {
       resultType: 'complete',
       skills: slice,
@@ -362,51 +382,124 @@ export class AcademyMcpSkillsProvider {
     }
   }
 
-  getSkill(params: { uri: string }, context: AcademySkillSessionContext = this.defaultContext): McpSkillGetResult {
-    const { parsed, entry } = this.resolveEligibleDetailByUri(params.uri, context)
-    if (parsed.relativePath !== 'SKILL.md') {
-      throw new McpProtocolError(-32602, 'Invalid params: skills/get URI must address SKILL.md')
-    }
-    const { catalogRevision } = this.collectEligibleEntries(context)
-    return {
-      resultType: 'complete',
-      skill: entry,
-      catalogRevision,
-      ttlMs: DEFAULT_TTL_MS,
-      cacheScope: 'private'
+  getSkill(
+    params: { uri: string },
+    context: AcademySkillSessionContext = this.defaultContext,
+    onObserve?: (obs: AcademySkillMcpObservation) => void
+  ): McpSkillGetResult {
+    const parsedHint = parseSkillResourceUri(params.uri)
+    try {
+      const { parsed, detail, entry } = this.resolveEligibleDetailByUri(params.uri, context)
+      if (parsed.relativePath !== 'SKILL.md') {
+        throw new McpProtocolError(-32602, 'Invalid params: skills/get URI must address SKILL.md')
+      }
+      const { catalogRevision } = this.collectEligibleEntries(context)
+      const rootResource = entry.resources.find((item) => item.uri === params.uri)
+      onObserve?.({
+        operation: 'skills/get',
+        status: 'SUCCESS',
+        skillId: detail.id,
+        skillName: entry.frontmatter.name,
+        scope: detail.scope,
+        destinationId: parsed.destinationId,
+        version: detail.currentVersion,
+        packageHash: detail.current.packageHash,
+        resourceUri: params.uri,
+        resourcePath: parsed.relativePath,
+        resourceDigest: rootResource?.digest
+      })
+      return {
+        resultType: 'complete',
+        skill: entry,
+        catalogRevision,
+        ttlMs: DEFAULT_TTL_MS,
+        cacheScope: 'private'
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      onObserve?.({
+        operation: 'skills/get',
+        status: /unauthorized|mismatch/i.test(msg) ? 'REFUSAL' : 'FAILURE',
+        errorCode: 'MCP_PROTOCOL_ERROR',
+        skillId: parsedHint?.skillId,
+        skillName: parsedHint?.skillName,
+        scope: parsedHint?.scope,
+        destinationId: parsedHint?.destinationId ?? null,
+        resourceUri: params.uri,
+        resourcePath: parsedHint?.relativePath
+      })
+      throw error
     }
   }
 
-  readSkillResource(params: { uri: string }, context: AcademySkillSessionContext = this.defaultContext): McpResourceReadResult {
-    const { parsed, detail, entry } = this.resolveEligibleDetailByUri(params.uri, context)
-    const resource = entry.resources.find((item) => item.uri === params.uri)
-    if (!resource) {
-      throw new McpProtocolError(-32602, 'Invalid params: resource URI not listed in skill manifest')
-    }
-    const text = parsed.relativePath === 'SKILL.md'
-      ? detail.current.package.skillMd
-      : detail.current.package.artifacts[parsed.relativePath]
-    if (typeof text !== 'string') {
-      throw new McpProtocolError(-32602, 'Invalid params: resource content unavailable')
-    }
-    if (Buffer.byteLength(text, 'utf8') !== resource.size) {
-      throw new McpProtocolError(-32602, 'Invalid params: resource byte length mismatch')
-    }
-    return {
-      resultType: 'complete',
-      contents: [
-        {
-          uri: params.uri,
-          mimeType: mimeTypeForPath(parsed.relativePath),
-          text
-        }
-      ],
-      ttlMs: DEFAULT_TTL_MS,
-      cacheScope: 'private'
+  readSkillResource(
+    params: { uri: string },
+    context: AcademySkillSessionContext = this.defaultContext,
+    onObserve?: (obs: AcademySkillMcpObservation) => void
+  ): McpResourceReadResult {
+    const parsedHint = parseSkillResourceUri(params.uri)
+    try {
+      const { parsed, detail, entry } = this.resolveEligibleDetailByUri(params.uri, context)
+      const resource = entry.resources.find((item) => item.uri === params.uri)
+      if (!resource) {
+        throw new McpProtocolError(-32602, 'Invalid params: resource URI not listed in skill manifest')
+      }
+      const text = parsed.relativePath === 'SKILL.md'
+        ? detail.current.package.skillMd
+        : detail.current.package.artifacts[parsed.relativePath]
+      if (typeof text !== 'string') {
+        throw new McpProtocolError(-32602, 'Invalid params: resource content unavailable')
+      }
+      if (Buffer.byteLength(text, 'utf8') !== resource.size) {
+        throw new McpProtocolError(-32602, 'Invalid params: resource byte length mismatch')
+      }
+      onObserve?.({
+        operation: 'resources/read',
+        status: 'SUCCESS',
+        skillId: detail.id,
+        skillName: entry.frontmatter.name,
+        scope: detail.scope,
+        destinationId: parsed.destinationId,
+        version: detail.currentVersion,
+        packageHash: detail.current.packageHash,
+        resourceUri: params.uri,
+        resourcePath: parsed.relativePath,
+        resourceDigest: resource.digest
+      })
+      return {
+        resultType: 'complete',
+        contents: [
+          {
+            uri: params.uri,
+            mimeType: mimeTypeForPath(parsed.relativePath),
+            text
+          }
+        ],
+        ttlMs: DEFAULT_TTL_MS,
+        cacheScope: 'private'
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      onObserve?.({
+        operation: 'resources/read',
+        status: /unauthorized|mismatch/i.test(msg) ? 'REFUSAL' : 'FAILURE',
+        errorCode: 'MCP_PROTOCOL_ERROR',
+        skillId: parsedHint?.skillId,
+        skillName: parsedHint?.skillName,
+        scope: parsedHint?.scope,
+        destinationId: parsedHint?.destinationId ?? null,
+        resourceUri: params.uri,
+        resourcePath: parsedHint?.relativePath
+      })
+      throw error
     }
   }
 
-  listSkillResources(params?: { cursor?: string }, context: AcademySkillSessionContext = this.defaultContext): McpResourcesListResult {
+  listSkillResources(
+    params?: { cursor?: string },
+    context: AcademySkillSessionContext = this.defaultContext,
+    onObserve?: (obs: AcademySkillMcpObservation) => void
+  ): McpResourcesListResult {
     const offset = decodeCursor(params?.cursor)
     const resolved = this.resolveDestination(context)
     const activeDestId = resolved.kind === 'DESTINATION' ? resolved.destination.id : null
@@ -434,6 +527,7 @@ export class AcademyMcpSkillsProvider {
     allResources.sort((a, b) => a.uri.localeCompare(b.uri))
     const slice = allResources.slice(offset, offset + this.pageSize)
     const nextOffset = offset + this.pageSize
+    onObserve?.({ operation: 'resources/list', status: 'SUCCESS' })
     return {
       resultType: 'complete',
       resources: slice,
