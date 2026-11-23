@@ -54,7 +54,7 @@ const fileQuery = z.string().min(1).max(240).transform((value, ctx) => {
 const textQuery = z.string().min(1).max(256).refine(value => Buffer.byteLength(value) <= 256 && !value.includes('\0')).optional()
 const sessionFacets = z.enum(['SEGMENTS', 'TURNS', 'ORIGINS', 'INVOCATIONS', 'ERRORS', 'TOOLS', 'FILES', 'TIMELINE'])
 const facetName = z.enum(['TURNS', 'INVOCATIONS', 'ERRORS', 'TOOLS', 'FILES', 'TIMELINE'])
-const legacySessionDetail = z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: sessionFacets.optional(), facet: facetName.optional(), view: z.enum(['FOCAL', 'LEGACY']).optional(), modelFactOffset: z.number().int().min(0).optional() }).strict()
+const legacySessionDetail = z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor, mapView: sessionFacets.optional(), facet: facetName.optional(), view: z.enum(['FOCAL', 'LEGACY']).optional(), modelFactOffset: z.number().int().min(0).optional(), skillOffset: z.number().int().min(0).optional(), skillLimit: z.number().int().min(1).max(50).optional(), skillId: z.string().min(1).max(200).optional() }).strict()
 const legacySessionEvents = z.object({ sessionId: id, expectedRevision: revision.optional(), types: z.array(z.enum(EVENT_TYPES)).min(1).max(9).optional(),
   tool: z.string().min(1).max(80).optional(), status: z.enum(['SUCCESS', 'FAILURE', 'REFUSAL', 'DANGLING', 'UNKNOWN']).optional(), isError: z.boolean().optional(), errorKind: z.string().min(1).max(80).optional(), invocationId: z.string().min(1).max(128).optional(), operation: z.enum(['READ', 'WRITE', 'EXECUTE', 'CALL']).optional(), ordinalFrom: revision.optional(), ordinalTo: revision.optional(), after: date, before: date,
   file: fileQuery, query: textQuery, turnId: z.string().regex(/^T[1-9]\d{0,14}$/).optional(), segmentId: z.string().max(30).regex(/^S[1-9]\d*$/).optional(), limit: z.number().int().min(1).max(15).default(15), cursor }).strict()
@@ -1350,6 +1350,14 @@ export async function executeSessionTool(
           fullModelIntelligence.primaryUsage.scope !== 'unavailable' ||
           fullModelIntelligence.unavailableReasons.length > 0
         )
+        const fullSkillIntelligence = actualStore.skillIntelligence
+          ? actualStore.skillIntelligence.summarizeSession(row.id, { skillId: query.skillId, offset: query.skillOffset, limit: query.skillLimit ?? 15 })
+          : undefined
+        const hasSkillIntelligence = !!fullSkillIntelligence && (
+          fullSkillIntelligence.events.length > 0 ||
+          fullSkillIntelligence.unboundCount > 0 ||
+          fullSkillIntelligence.coverage.length > 0
+        )
         if (query.view === 'FOCAL') {
           const focalErrors = actualStore.events(row.id, { types: ['ERROR'] }, 0, 5).map(ev => ({
             eventId: ev.id, ordinal: ev.ordinal, ...(ev.timestamp ? { timestamp: ev.timestamp } : {}), ...(ev.tool ? { tool: ev.tool } : {})
@@ -1359,12 +1367,14 @@ export async function executeSessionTool(
             eventCount: row.eventCount, coverage: row.coverage, types: map.types, tools: map.tools.slice(0, 5),
             errors: focalErrors, turnView: { tool: 'inspect_agent_session', arguments: { sessionId: row.id, expectedRevision: row.revision, mapView: 'TURNS' } },
             ...(hasModelIntelligence ? { modelIntelligence: fullModelIntelligence } : {}),
+            ...(hasSkillIntelligence ? { skillIntelligence: fullSkillIntelligence } : {}),
             claimsVerified: false
           }, segment => segment, 'segments')
         } else {
           data = page(actualStore, scope, offset, map.segments, query.limit, budget, { ...associationMetadata(actualStore, row), types: map.types, tools: map.tools.slice(0, 5), files: map.files.slice(0, 5),
             turnView: { tool: 'inspect_agent_session', arguments: { sessionId: row.id, expectedRevision: row.revision, mapView: 'TURNS' } },
             ...(hasModelIntelligence ? { modelIntelligence: fullModelIntelligence } : {}),
+            ...(hasSkillIntelligence ? { skillIntelligence: fullSkillIntelligence } : {}),
             provenance: 'DERIVED_INDEX', claimsVerified: false, sourceObservation: actualStore.sourceObservation(row), diagnostics: actualStore.diagnostics() }, segment => segment, 'segments')
         }
       } else if (name === 'list_agent_session_events') {

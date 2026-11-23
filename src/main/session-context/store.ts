@@ -12,6 +12,7 @@ import { entireAgent } from './entire-schema'
 import { migrateSessionNamespace } from './session-namespace-migration'
 import { SessionReferences } from './session-references'
 import { MODEL_INTELLIGENCE_SCHEMA, ModelIntelligenceStore } from './model-intelligence-store'
+import { SKILL_INTELLIGENCE_SCHEMA, SkillIntelligenceStore } from './skill-intelligence-store'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -47,6 +48,7 @@ export class SessionStore {
   readonly registry: CheckpointRegistry
   readonly references: SessionReferences
   readonly modelIntelligence: ModelIntelligenceStore
+  readonly skillIntelligence: SkillIntelligenceStore
   private readonly db: Database.Database
   private readonly key: string
   constructor(readonly path: string, readonly repositoryId: string, readOnly = false) {
@@ -61,6 +63,7 @@ export class SessionStore {
         this.registry = new CheckpointRegistry(this.db, repositoryId)
         this.references = new SessionReferences(this.db, true)
         this.modelIntelligence = new ModelIntelligenceStore(this.db)
+        this.skillIntelligence = new SkillIntelligenceStore(this.db)
         return
       }
       if (process.platform !== 'win32') chmodSync(path, 0o600)
@@ -125,12 +128,14 @@ export class SessionStore {
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
         }
         this.db.exec(MODEL_INTELLIGENCE_SCHEMA)
+        this.db.exec(SKILL_INTELLIGENCE_SCHEMA)
         this.db.pragma('user_version = 9')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
       this.registry = new CheckpointRegistry(this.db, repositoryId)
       this.references = new SessionReferences(this.db)
       this.modelIntelligence = new ModelIntelligenceStore(this.db)
+      this.skillIntelligence = new SkillIntelligenceStore(this.db)
     } catch (error) { this.db.close(); throw error }
   }
   assertRepository(id: string): void { if (id !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH') }
@@ -240,6 +245,7 @@ export class SessionStore {
       const finalReasons = diagnosticsFor(id)
       const coverage = finalReasons === '{}' ? 'COMPLETE' : 'PARTIAL'
       this.db.prepare('UPDATE sessions SET eventCount=?, payloadBytes=?, coverage=?, coverageReasons=? WHERE id=?').run(totals.count, totals.bytes, coverage, finalReasons, id)
+      this.skillIntelligence.extractFromNativeEvents(id, events, { provider })
       this.registry.importedSession(provider, input.providerSessionId, id, input.agent === 'codex' ? undefined : input.agent)
       this.db.prepare('UPDATE identity SET revision = revision + 1').run()
       assertCurrent()
