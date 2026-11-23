@@ -699,3 +699,89 @@ it('C4 normalizes repositoryId safely on continuity read boundary for Codex and 
   expect(await direct('inspect_agent_session', codexSession.deepen.arguments)).toEqual({ isError: true, data: { code: 'SOURCE_NOT_AUTHORIZED' } })
   expect(f.getStore().count()).toBe(0)
 }, 30000)
+
+it('U2 qualifies Codex 0.171.0-alpha.13 and future structural equivalents while rejecting incompatible format, account mismatch, and root spoofing', async () => {
+  const f = setup()
+  const profile = join(f.dir, 'codex-profile')
+  const accHash = nativeDigest(JSON.stringify(['u-compat', 'a-compat']))
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash } }
+  }))
+
+  const s171 = '01a1f100-0000-7000-8000-000000000011'
+  const sFuture = '01a1f100-0000-7000-8000-000000000012'
+  const sBadFormat = '01a1f100-0000-7000-8000-000000000013'
+  const sSpoofedRoot = '01a1f100-0000-7000-8000-000000000014'
+  const sWrongAccount = '01a1f100-0000-7000-8000-000000000015'
+
+  const writeRollout = (id: string, metaPayload: Record<string, unknown>, text: string) => {
+    const day = new Date(Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+    const dir = join(profile, 'sessions', ...day)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `rollout-2026-11-23T10-00-00-${id}.jsonl`), [
+      JSON.stringify({ timestamp: '2026-11-23T10:00:00Z', type: 'session_meta', payload: metaPayload }),
+      JSON.stringify({ timestamp: '2026-11-23T10:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] } })
+    ].join('\n') + '\n')
+  }
+
+  writeRollout(s171, {
+    id: s171, session_id: s171, account_scoped: true, creator_user_id: 'u-compat', creator_account_id: 'a-compat',
+    cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13'
+  }, 'codex-171-literal')
+
+  writeRollout(sFuture, {
+    id: sFuture, session_id: sFuture, account_scoped: true, creator_user_id: 'u-compat', creator_account_id: 'a-compat',
+    cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.175.0-beta.1'
+  }, 'codex-future-literal')
+
+  writeRollout(sBadFormat, {
+    id: sBadFormat, session_id: sBadFormat, account_scoped: true, creator_user_id: 'u-compat', creator_account_id: 'a-compat',
+    cwd: f.root, runtime_workspace_roots: [f.root], cli_version: ''
+  }, 'should-not-read-bad-format')
+
+  const foreignRoot = join(f.dir, 'foreign-root')
+  mkdirSync(foreignRoot, { recursive: true })
+  writeRollout(sSpoofedRoot, {
+    id: sSpoofedRoot, session_id: sSpoofedRoot, account_scoped: true, creator_user_id: 'u-compat', creator_account_id: 'a-compat',
+    cwd: foreignRoot, runtime_workspace_roots: [foreignRoot], cli_version: '0.171.0-alpha.13'
+  }, 'should-not-read-spoofed')
+
+  writeRollout(sWrongAccount, {
+    id: sWrongAccount, session_id: sWrongAccount, account_scoped: true, creator_user_id: 'other-u', creator_account_id: 'other-a',
+    cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13'
+  }, 'should-not-read-wrong-account')
+
+  const listed = await f.call('list_agent_sessions', { ...f.target })
+  expect(listed.isError).toBe(false)
+  const discoveredIds = listed.data.sessions.map((s: any) => s.sourceSessionId)
+  expect(discoveredIds).toContain(s171)
+  expect(discoveredIds).toContain(sFuture)
+  expect(discoveredIds).not.toContain(sBadFormat)
+  expect(discoveredIds).not.toContain(sSpoofedRoot)
+  expect(discoveredIds).not.toContain(sWrongAccount)
+
+  for (const [id, expectedText] of [[s171, 'codex-171-literal'], [sFuture, 'codex-future-literal']] as const) {
+    const sess = listed.data.sessions.find((s: any) => s.sourceSessionId === id)
+    const insp = await f.call('inspect_agent_session', sess.deepen.arguments)
+    expect(insp.isError).toBe(false)
+    const evs = await f.call('list_agent_session_events', { ...sess.deepen.arguments, expectedRevision: insp.data.revision, limit: 5 })
+    const read = await f.call('read_agent_session_event', { ...sess.deepen.arguments, expectedRevision: insp.data.revision, eventId: evs.data.events[0].eventId })
+    expect(read.data.content).toBe(expectedText)
+  }
+
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: sBadFormat,
+    nativeSession: { provider: 'codex-native', id: nativeDigest(JSON.stringify(['repo-u3', 'codex', sBadFormat])), ...f.target }
+  })).toEqual({ isError: true, data: { code: 'SOURCE_FORMAT_UNSUPPORTED' } })
+
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: sSpoofedRoot,
+    nativeSession: { provider: 'codex-native', id: nativeDigest(JSON.stringify(['repo-u3', 'codex', sSpoofedRoot])), ...f.target }
+  })).toEqual({ isError: true, data: { code: 'ORIGIN_UNVERIFIED' } })
+
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: sWrongAccount,
+    nativeSession: { provider: 'codex-native', id: nativeDigest(JSON.stringify(['repo-u3', 'codex', sWrongAccount])), ...f.target }
+  })).toEqual({ isError: true, data: { code: 'SOURCE_IDENTITY_CONFLICT' } })
+}, 60_000)

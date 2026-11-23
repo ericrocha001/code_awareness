@@ -132,6 +132,45 @@ function checkCodexWorktreeRoots(item: Record<string, unknown>, root: string, pr
   return item.runtime_workspace_roots.slice(1).every(isVisualizationRoot)
 }
 
+const KNOWN_CODEX_CLI_VERSIONS = new Set(['0.169.0-alpha.11.1', '0.171.0-alpha.13'])
+
+function qualifyCodexSessionMeta(
+  record: unknown,
+  expectedSessionId: string,
+  creatorAccountHash: string,
+  root: string,
+  profile: string
+): { ok: true; meta: Record<string, unknown> } | { ok: false; error: 'SOURCE_IDENTITY_CONFLICT' | 'SOURCE_FORMAT_UNSUPPORTED' | 'ORIGIN_UNVERIFIED' } {
+  const rec = record as { type?: unknown; payload?: Record<string, unknown> } | null
+  const meta = rec?.payload
+  if (
+    rec?.type !== 'session_meta' ||
+    !meta ||
+    typeof meta !== 'object' ||
+    meta.id !== expectedSessionId ||
+    typeof meta.session_id !== 'string' ||
+    !uuid.test(meta.session_id) ||
+    meta.account_scoped !== true ||
+    typeof meta.creator_account_id !== 'string' ||
+    !meta.creator_account_id ||
+    typeof meta.creator_user_id !== 'string' ||
+    !meta.creator_user_id ||
+    digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash
+  ) {
+    return { ok: false, error: 'SOURCE_IDENTITY_CONFLICT' }
+  }
+  const cliVersion = meta.cli_version
+  const validVersion = typeof cliVersion === 'string' && (KNOWN_CODEX_CLI_VERSIONS.has(cliVersion) || (cliVersion.trim().length > 0 && cliVersion.length <= 64))
+  const validFormat = validVersion && typeof meta.cwd === 'string' && Array.isArray(meta.runtime_workspace_roots) && meta.runtime_workspace_roots.length > 0
+  if (!validFormat) {
+    return { ok: false, error: 'SOURCE_FORMAT_UNSUPPORTED' }
+  }
+  if (!checkCodexWorktreeRoots(meta, root, profile)) {
+    return { ok: false, error: 'ORIGIN_UNVERIFIED' }
+  }
+  return { ok: true, meta }
+}
+
 function exactRollout(profile: string, id: string) {
   const sessions = join(profile, 'sessions')
   const stamp = Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16)
@@ -325,11 +364,9 @@ export function discoverCodexSources(options: {
       headerBytesRead += bytesRead
       if (!line) continue
       const record = JSON.parse(line)
-      const meta = record?.payload
-      if (record?.type !== 'session_meta' || meta?.id !== item.sessionId || typeof meta.session_id !== 'string' || !uuid.test(meta.session_id) ||
-        meta.account_scoped !== true || typeof meta.creator_account_id !== 'string' || typeof meta.creator_user_id !== 'string' ||
-        digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash ||
-        meta.cli_version !== '0.169.0-alpha.11.1' || !checkCodexWorktreeRoots(meta, root, profile)) continue
+      const qualified = qualifyCodexSessionMeta(record, item.sessionId, creatorAccountHash, root, profile)
+      if (!qualified.ok) continue
+      const meta = qualified.meta
       const ts = typeof meta.timestamp === 'string' && Number.isFinite(Date.parse(meta.timestamp)) ? meta.timestamp : new Date(item.mtimeMs).toISOString()
       const tsMs = Date.parse(ts)
       if (afterMs !== undefined && tsMs < afterMs) continue
@@ -485,18 +522,8 @@ export function stepCodexSourceIndex(options: {
       const checkRoot = (value: unknown) => typeof value === 'string' && isAbsolute(value) && sameNativePath(realpathSync.native(value), root) && sameNativePath(resolve(value), root)
 
       if (ordinal === 1) {
-        if (
-          record?.type !== 'session_meta' ||
-          item?.id !== sourceSessionId ||
-          typeof item.session_id !== 'string' ||
-          !uuid.test(item.session_id) ||
-          item.account_scoped !== true ||
-          typeof item.creator_account_id !== 'string' ||
-          typeof item.creator_user_id !== 'string' ||
-          digest(JSON.stringify([item.creator_user_id, item.creator_account_id])) !== creatorAccountHash
-        ) throw new Error('SOURCE_IDENTITY_CONFLICT')
-        if (item.cli_version !== '0.169.0-alpha.11.1') throw new Error('SOURCE_FORMAT_UNSUPPORTED')
-        if (!checkCodexWorktreeRoots(item, root, profile)) throw new Error('ORIGIN_UNVERIFIED')
+        const qualified = qualifyCodexSessionMeta(rawRecord, sourceSessionId, creatorAccountHash, root, profile)
+        if (!qualified.ok) throw new Error(qualified.error)
         emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         return
       }
