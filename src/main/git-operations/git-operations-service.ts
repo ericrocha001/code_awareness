@@ -1,4 +1,4 @@
-import { deliveryAnchor, type DeliveryAnchor, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
+import { deliveryAnchor, matchesDeliveryObservation, type DeliveryAnchor, type DeliveryProjectionFilter, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
 import { readWorktreeProvenance } from './git-worktree-provenance'
 import { GitAtlasReader } from './git-atlas'
 import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
@@ -165,7 +165,23 @@ export class GitOperationsService {
     if (!this.worktrees || !this.coordinationIdentity) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
   }
-  async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
+  async deliveryProjectionPage(
+    after?: string,
+    filter?: DeliveryProjectionFilter
+  ): Promise<DeliveryProjectionPage> {
+    if (filter && (filter.commitSha || filter.executionId || filter.artifactId)) {
+      const matched: DeliveryProjectionPage['observations'] = []
+      let cursor: string | undefined
+      for (let round = 0; round < 20; round++) {
+        const page = await this.deliveryProjectionPage(cursor)
+        for (const obs of page.observations) {
+          if (matchesDeliveryObservation(obs, filter)) matched.push(obs)
+        }
+        if (!page.nextCursor || matched.length >= 50) break
+        cursor = page.nextCursor
+      }
+      return { observations: matched }
+    }
     const page = await this.git.operationReceiptPage(this.repoRoot, after)
     const candidates: Array<{ observation: DeliveryProjectionPage['observations'][number]; allowMergeParents: boolean }> = []
     for (const { receipt, sha } of page.receipts) {

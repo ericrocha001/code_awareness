@@ -25,6 +25,7 @@ const nativeTestFiles = Object.freeze([
     'src/main/session-context/development-provenance.test.ts',
   'src/main/validation-ledger/test-output-adapter.test.ts',
   'src/main/session-context/provenance.test.ts',
+  'src/main/session-context/code-provenance-intelligence.test.ts',
   'src/main/session-context/store.test.ts',
   'src/main/session-context/model-intelligence-store.test.ts',
   'src/main/session-context/model-intelligence-mcp.test.ts',

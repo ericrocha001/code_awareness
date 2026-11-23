@@ -1007,6 +1007,9 @@ export class CheckpointRegistry {
         Object.assign(node, sessionSelector(entity.id))
         node.payloadState = !row?.localSessionId ? 'NOT_IMPORTED' : this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(row.localSessionId) ? 'IMPORTED' : 'SESSION_EVICTED'
         if (row?.localSessionId) node.deepen = { tool: 'inspect_agent_session', arguments: { sessionId: row.localSessionId } }
+        else if (node.provider === 'codex-native' || node.provider === 'antigravity-native') {
+          node.deepen = { tool: 'inspect_agent_session', arguments: { repositoryId: this.repositoryId, nativeSession: { provider: node.provider, id: node.id } } }
+        }
       } else if (entity.kind === 'ARTIFACT') {
         const version = /^(artifact-[a-f0-9-]{36}):([1-9][0-9]*)$/.exec(entity.id)
         if (version) { node.id = version[1]; node.revision = Number(version[2]) }

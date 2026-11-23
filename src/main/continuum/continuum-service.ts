@@ -224,7 +224,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return { ...this.receipt(value.artifact), publicationReceipt: value.publicationReceipt, replayed: false }
   }
   readPublicationReceipt(receiptId: string): PublicationReceipt | null { this.assertActive(); return this.store.readPublicationReceipt(receiptId) }
-  publicationDeliveryPage(after?: string, limit?: number): DeliveryProjectionPage { this.assertActive(); return this.store.publicationDeliveryPage(after, limit) }
+  publicationDeliveryPage(after?: string, limit?: number, filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter): DeliveryProjectionPage { this.assertActive(); return this.store.publicationDeliveryPage(after, limit, filter) }
   associatePublication(value: PublicationAssociation) { this.assertActive(); return this.store.associatePublication(value) }
   invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.assertActive(); this.store.invalidatePublication(invocationId, state) }
   replayPublicationReceipt(receiptId: string): ArtifactReceipt {

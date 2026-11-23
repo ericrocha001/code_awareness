@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import { createHash, randomUUID } from 'node:crypto'
 import type { Artifact, PublicationReceipt } from './continuum-types'
 import { publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
-import { authenticatedSessionWitness, deliveryAnchor, type AuthenticatedSessionWitness, type DeliveryAnchor, type DeliveryObservation, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
+import { authenticatedSessionWitness, deliveryAnchor, type AuthenticatedSessionWitness, type DeliveryAnchor, type DeliveryObservation, type DeliveryProjectionFilter, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
 
 export interface PublicationReceiptContext {
   deliveryContext?: DeliveryAnchor
@@ -59,9 +59,44 @@ export class PublicationReceipts {
       return receipt
     } catch { throw new Error('PUBLICATION_RECEIPT_INTEGRITY') }
   }
-  deliveryPage(after?: string, limit = 100): DeliveryProjectionPage {
-    const afterRowid = after && /^\d+$/.test(after) ? Number(after) : 0
+  deliveryPage(after?: string, limit = 100, filter?: DeliveryProjectionFilter): DeliveryProjectionPage {
     const bounded = Math.max(1, Math.min(200, Math.floor(limit)))
+    const hasFilter = Boolean(filter && (filter.artifactId || filter.artifactRevision || filter.executionId))
+    if (hasFilter && filter) {
+      const where: string[] = []
+      const params: Array<string | number> = []
+      if (filter.artifactId) {
+        where.push("(artifact_id = ? OR json_extract(payload, '$.deliveryContext.planArtifactId') = ?)")
+        params.push(filter.artifactId, filter.artifactId)
+      }
+      if (filter.artifactRevision !== undefined) {
+        where.push("(revision = ? OR json_extract(payload, '$.deliveryContext.planRevision') = ?)")
+        params.push(filter.artifactRevision, filter.artifactRevision)
+      }
+      if (filter.executionId) {
+        where.push("json_extract(payload, '$.deliveryContext.executionId') = ?")
+        params.push(filter.executionId)
+      }
+      const rows = this.db.prepare(
+        `SELECT receipt_id FROM publication_receipts WHERE ${where.join(' AND ')} ORDER BY rowid ASC LIMIT ?`
+      ).all(...params, bounded) as Array<{ receipt_id: string }>
+      const observations: DeliveryObservation[] = []
+      for (const row of rows) {
+        const receipt = this.read(row.receipt_id)
+        if (!receipt?.deliveryContext || receipt.deliveryContext.repositoryId !== this.repositoryId) continue
+        observations.push({
+          receiptId: receipt.receiptId,
+          operationId: receipt.receiptId,
+          operation: receipt.action === 'PUBLISH' ? 'PUBLISH_ARTIFACT' : 'UPDATE_ARTIFACT',
+          argumentFingerprint: receipt.requestDigest,
+          anchor: receipt.deliveryContext,
+          artifactId: receipt.artifactId,
+          artifactRevision: receipt.revision
+        })
+      }
+      return { observations }
+    }
+    const afterRowid = after && /^\d+$/.test(after) ? Number(after) : 0
     const rows = this.db.prepare('SELECT rowid, receipt_id FROM publication_receipts WHERE rowid > ? ORDER BY rowid ASC LIMIT ?')
       .all(afterRowid, bounded) as Array<{ rowid: number; receipt_id: string }>
     const observations: DeliveryObservation[] = []

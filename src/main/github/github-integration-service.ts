@@ -203,8 +203,27 @@ export class GitHubIntegrationService {
     return { ...context, pullRequest: await this.api!.getPullRequest(context.repository, number) }
   }
 
-  deliveryProjectionPage(repositoryId: string, cursor?: string) {
-    return this.pullRequestDependencies ? pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, cursor) : { observations: [] }
+  deliveryProjectionPage(
+    repositoryId: string,
+    cursor?: string,
+    filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter
+  ) {
+    if (!this.pullRequestDependencies) return { observations: [] }
+    if (filter && (filter.pullRequest !== undefined || filter.commitSha || filter.executionId || filter.artifactId)) {
+      const { matchesDeliveryObservation } = require('../../shared/types/delivery-context-types') as typeof import('../../shared/types/delivery-context-types')
+      const matched: import('../../shared/types/delivery-context-types').DeliveryObservation[] = []
+      let pageCursor = ''
+      for (let round = 0; round < 20; round++) {
+        const page = pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, pageCursor)
+        for (const obs of page.observations) {
+          if (matchesDeliveryObservation(obs, filter)) matched.push(obs)
+        }
+        if (!page.nextCursor || matched.length >= 50) break
+        pageCursor = page.nextCursor
+      }
+      return { observations: matched }
+    }
+    return pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, cursor)
   }
   async createPullRequest(repoPath: string, input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
     this.requireConfigured()

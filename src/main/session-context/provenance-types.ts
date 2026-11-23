@@ -44,8 +44,13 @@ export interface InspectCodeProvenanceDetailResult {
   file: string
   range: { startLine: number; endLine: number }
   linkStrength: LinkStrength
+  gitStatus?: 'COMMIT_OBSERVED' | 'UNCOMMITTED' | 'UNAVAILABLE'
   commit?: string | null
   checkpointId?: string | null
+  nextStep?: {
+    tool: string
+    arguments: { selector: { type: 'COMMIT'; id: string } }
+  }
   candidates: CodeProvenanceCandidate[]
   coverage: 'COMPLETE' | 'PARTIAL'
   unavailableIndices?: number[]
