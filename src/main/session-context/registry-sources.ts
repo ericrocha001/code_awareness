@@ -144,87 +144,23 @@ export function registrySources(options: {
                 })()
               : undefined
       : undefined
-    const discoveredExecutionIds = new Set<string>()
-    for (const [source, read] of [
-      ['DELIVERY_GIT', options.gitDeliveries],
-      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string, filter?: DeliveryProjectionFilter) => options.github.deliveryProjectionPage!(repositoryId, cursor, filter) : undefined],
-      ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string, filter?: DeliveryProjectionFilter) => service.publicationDeliveryPage!(cursor, undefined, filter) : undefined]
-    ] as const) if (read) {
-      let deliveryStage = 'DELIVERY_CURSOR'
-      try {
-        const savedCursor = cursors[source]
-        if (!deliveryFilter && savedCursor !== undefined && typeof savedCursor !== 'string') throw new Error('CURSOR_STALE')
-        deliveryStage = 'DELIVERY_PAGE'
-        let page: DeliveryProjectionPage
-        if (source === 'DELIVERY_CONTINUUM' && deliveryFilter && !deliveryFilter.artifactId && !deliveryFilter.executionId && discoveredExecutionIds.size > 0) {
-          const merged: DeliveryProjectionPage['observations'] = []
-          for (const execId of [...discoveredExecutionIds].slice(0, 5)) {
-            const sub = await read(undefined, { executionId: execId })
-            if (sub?.observations) merged.push(...sub.observations)
-          }
-          page = { observations: merged }
-        } else {
-          page = deliveryFilter ? await read(undefined, deliveryFilter) : await read(savedCursor)
-        }
-        assertCurrent()
-        if (!page || !Array.isArray(page.observations)) throw new Error('CONTRACT_STALE')
-        deliveryStage = 'DELIVERY_PROJECT'
-        for (const observation of page.observations) {
-          const anchor = validDeliveryAnchor(observation.anchor)
-          if (!anchor) continue
-          discoveredExecutionIds.add(anchor.executionId)
-          if (observation.operation === 'CREATE_PULL_REQUEST' && (!canonicalRepository || observation.repository?.toLowerCase() !== canonicalRepository.toLowerCase())) continue
-          const from = deliveryExecutionEntity(anchor)
-          const target: RegistryEntity | undefined = observation.commitSha && /^[a-f0-9]{40}$/.test(observation.commitSha)
-            ? { kind: 'COMMIT', id: observation.commitSha }
-            : observation.pullRequest && Number.isSafeInteger(observation.pullRequest)
-              ? { kind: 'PR', id: String(observation.pullRequest) }
-              : observation.artifactId && observation.artifactRevision && service?.provenanceSnapshot(observation.artifactId, observation.artifactRevision)
-                ? { kind: 'ARTIFACT', id: observation.artifactId + ':' + observation.artifactRevision }
-                : undefined
-          if (!target) continue
-          const freshness = service?.get(anchor.planArtifactId)?.revision === anchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE'
-          const evidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: observation.receiptId, digest: digest(JSON.stringify(observation)), freshness }
-          const scopedExecution: RegistryEntity = { kind: 'EXECUTION', id: anchor.executionId }
-          const batch: Omit<RegistryBatch, 'repositoryId'> = { source: source + ':' + digest(observation.operationId), revision: digest(observation.receiptId + ':' + freshness), status: 'COMPLETE', entities: [from, scopedExecution, target], edges: [
-            { from: { kind: 'ARTIFACT', id: anchor.planArtifactId + ':' + anchor.planRevision }, relation: 'execution-context', to: from, ...evidence },
-            { from, relation: 'delivery-context', to: target, ...evidence },
-            { from: scopedExecution, relation: 'delivery-context', to: target, ...evidence }
-          ] }
-          if (target.kind === 'PR') prDeliveries.push({ batch, number: Number(target.id), head: observation.headSha })
-          else addBatch(batch)
-          addArtifact(anchor.planArtifactId + ':' + anchor.planRevision); addArtifact(anchor.bindingArtifactId + ':' + anchor.bindingRevision)
-          if (target.kind === 'ARTIFACT') addArtifact(target.id)
-          if (target.kind === 'PR') prs.add(Number(target.id))
-        }
-        if (selector) {
-          addBatch({ source, revision: digest(JSON.stringify([selector.kind, selector.id, page.observations.map(o => o.receiptId)])), cursor: savedCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
-        } else {
-          addBatch({ source, revision: digest(JSON.stringify(page.observations.map(o => o.receiptId))), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
-          diagnostic(source, page.nextCursor ? 'BACKLOG_PENDING' : 'SOURCE_READY', deliveryStage)
-        }
-      } catch (error) {
-        assertCurrent()
-        const classified = classifySourceError(error, deliveryStage)
-        if (classified.reasonCode === 'CURSOR_STALE') {
-          addBatch({ source, revision: digest('CURSOR_STALE:' + deliveryStage), cursor: '', status: 'PARTIAL', edges: [] })
-          diagnostic(source, 'CURSOR_STALE', deliveryStage)
-        } else {
-          unavailable(source, classified.status, classified.reasonCode, classified.stage)
-        }
-      }
-    }
-    if (selector?.kind === 'PR') prs.add(Number(selector.id))
-    for (const artifact of artifacts.values()) {
-      const nested = artifact.metadata.metadata
-      const metadata = nested && typeof nested === 'object' && !Array.isArray(nested) ? { ...nested, ...artifact.metadata } : artifact.metadata
-      if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF') for (const target of handoffTargets(metadata, canonicalRepository, repositoryId)) if (target.kind === 'PR') prs.add(Number(target.id))
-    }
-    if (prs.size && canonicalRepository) addBatch({ source: 'DELIVERY_PR_HINTS', revision: digest(JSON.stringify([...prs])), status: 'COMPLETE',
-      entities: [...prs].slice(0, 20).map(number => ({ kind: 'PR', id: String(number) })), edges: [] })
     const discoveredCommits = new Set<string>()
-    if (!options.networkAllowed()) unavailable('GITHUB', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_GATE')
-    else {
+    const prMemberCommits = new Set<string>(selector?.kind === 'PR' ? neighbors.filter(n => n.kind === 'COMMIT').map(n => n.id) : [])
+    let githubPrUnresolved = false
+    const resolveGitHub = async () => {
+      if (selector?.kind === 'PR') prs.add(Number(selector.id))
+      for (const artifact of artifacts.values()) {
+        const nested = artifact.metadata.metadata
+        const metadata = nested && typeof nested === 'object' && !Array.isArray(nested) ? { ...nested, ...artifact.metadata } : artifact.metadata
+        if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF') for (const target of handoffTargets(metadata, canonicalRepository, repositoryId)) if (target.kind === 'PR') prs.add(Number(target.id))
+      }
+      if (prs.size && canonicalRepository) addBatch({ source: 'DELIVERY_PR_HINTS', revision: digest(JSON.stringify([...prs])), status: 'COMPLETE',
+        entities: [...prs].slice(0, 20).map(number => ({ kind: 'PR', id: String(number) })), edges: [] })
+      if (!options.networkAllowed()) {
+        githubPrUnresolved = true
+        unavailable('GITHUB', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_NOT_AUTHORIZED', 'NETWORK_GATE')
+        return
+      }
       let githubStage = 'GITHUB_READ'
       try {
         const assertNetwork = () => { assertCurrent(); if (!options.networkAllowed()) throw new Error('NETWORK_NOT_AUTHORIZED') }
@@ -258,6 +194,7 @@ export function registrySources(options: {
           if (record && (record.head.repositoryId !== record.base.repositoryId || record.head.repository?.toLowerCase() !== record.base.repository.toLowerCase())) {
             currentPrHeads.set(number, null)
             verifiedPrs.set(number, 'CONFLICT')
+            githubPrUnresolved = true
             addBatch({ source: key, revision: record.head.sha, status: 'CONFLICT', cursor: JSON.stringify({ head: record.head.sha, nextPage: null, catalogRevision, reasonCode: 'SOURCE_IDENTITY_CONFLICT' }), edges: [] })
             continue
           }
@@ -270,6 +207,7 @@ export function registrySources(options: {
           }
           if (verifiedPrs.get(number) === 'CONFLICT') {
             currentPrHeads.set(number, null)
+            githubPrUnresolved = true
             addBatch({ source: key, revision: pr.head.sha, status: 'CONFLICT', cursor: JSON.stringify({ head: pr.head.sha, nextPage: null, catalogRevision, reasonCode: 'SOURCE_IDENTITY_CONFLICT' }), edges: [] })
             continue
           }
@@ -288,6 +226,7 @@ export function registrySources(options: {
           catch (error) {
             assertNetwork()
             if (error instanceof Error && error.message === 'PR_SOURCE_REPOSITORY_MISMATCH') {
+              githubPrUnresolved = true
               addBatch({ source: key, revision: pr.head.sha, status: 'CONFLICT', cursor: JSON.stringify({ head: pr.head.sha, nextPage: null, catalogRevision, reasonCode: 'SOURCE_IDENTITY_CONFLICT' }), edges: [] })
               continue
             }
@@ -295,7 +234,11 @@ export function registrySources(options: {
           }
           assertCurrent()
           if (page.repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
-          for (const commit of page.commits) discoveredCommits.add(commit.sha)
+          for (const commit of page.commits) {
+            discoveredCommits.add(commit.sha)
+            prMemberCommits.add(commit.sha)
+          }
+          if (page.nextPage) githubPrUnresolved = true
           addBatch({ source: key + ':' + pageNumber, revision: pr.head.sha, status: 'COMPLETE', entities: [{ kind: 'PR', id: String(number) }], edges: page.commits.map(commit => ({
             from: { kind: 'COMMIT', id: commit.sha }, relation: 'member-of', to: { kind: 'PR', id: String(number) }, evidenceKind: 'GITHUB_COMMIT_LIST', evidenceRef: `PR:${number}:${pr.head.sha}:${pageNumber}`, digest: digest(JSON.stringify(page.commits)), freshness: 'OBSERVED_SNAPSHOT' })) })
           addBatch({ source: key, revision: pr.head.sha, status: page.nextPage ? 'PARTIAL' : 'COMPLETE', cursor: JSON.stringify({ head: pr.head.sha, nextPage: page.nextPage, catalogRevision }), edges: [] })
@@ -304,10 +247,111 @@ export function registrySources(options: {
         diagnostic('GITHUB', discoveryUnavailable ? 'SOURCE_UNAVAILABLE' : prs.size > 2 ? 'BACKLOG_PENDING' : 'SOURCE_READY', githubStage)
       } catch (error) {
         assertCurrent()
+        githubPrUnresolved = true
         const classified = classifySourceError(error, githubStage)
         unavailable('GITHUB', classified.status, classified.reasonCode, classified.stage)
       }
     }
+    if (selector?.kind === 'PR') await resolveGitHub()
+    const discoveredExecutionIds = new Set<string>()
+    for (const [source, read] of [
+      ['DELIVERY_GIT', options.gitDeliveries],
+      ['DELIVERY_PR', options.github.deliveryProjectionPage ? (cursor?: string, filter?: DeliveryProjectionFilter) => options.github.deliveryProjectionPage!(repositoryId, cursor, filter) : undefined],
+      ['DELIVERY_CONTINUUM', service?.publicationDeliveryPage ? async (cursor?: string, filter?: DeliveryProjectionFilter) => service.publicationDeliveryPage!(cursor, undefined, filter) : undefined]
+    ] as const) if (read) {
+      let deliveryStage = 'DELIVERY_CURSOR'
+      try {
+        const savedCursor = cursors[source]
+        if (!deliveryFilter && savedCursor !== undefined && typeof savedCursor !== 'string') throw new Error('CURSOR_STALE')
+        deliveryStage = 'DELIVERY_PAGE'
+        const focalCursorKey = selector ? source + ':FOCAL:' + digest(JSON.stringify([selector.kind, selector.id])) : undefined
+        const focalCursor = focalCursorKey && typeof cursors[focalCursorKey] === 'string' && cursors[focalCursorKey] ? cursors[focalCursorKey] : undefined
+        let page: DeliveryProjectionPage
+        let forceFocalPartial = false
+        if (source === 'DELIVERY_GIT' && selector?.kind === 'PR') {
+          if (prMemberCommits.size > 0) {
+            const seenReceipts = new Set<string>()
+            const merged: DeliveryProjectionPage['observations'] = []
+            for (const sha of [...prMemberCommits].slice(0, 20)) {
+              const sub = await read(undefined, { commitSha: sha })
+              if (sub?.nextCursor) forceFocalPartial = true
+              for (const obs of sub?.observations ?? []) {
+                if (!seenReceipts.has(obs.receiptId)) {
+                  seenReceipts.add(obs.receiptId)
+                  merged.push(obs)
+                }
+              }
+            }
+            page = { observations: merged }
+          } else {
+            if (githubPrUnresolved) forceFocalPartial = true
+            page = { observations: [] }
+          }
+        } else if (source === 'DELIVERY_CONTINUUM' && deliveryFilter && !deliveryFilter.artifactId && !deliveryFilter.executionId && discoveredExecutionIds.size > 0) {
+          const merged: DeliveryProjectionPage['observations'] = []
+          for (const execId of [...discoveredExecutionIds].slice(0, 5)) {
+            const sub = await read(undefined, { executionId: execId })
+            if (sub?.nextCursor) forceFocalPartial = true
+            if (sub?.observations) merged.push(...sub.observations)
+          }
+          page = { observations: merged }
+        } else {
+          page = deliveryFilter ? await read(focalCursor, deliveryFilter) : await read(savedCursor)
+        }
+        assertCurrent()
+        if (!page || !Array.isArray(page.observations)) throw new Error('CONTRACT_STALE')
+        deliveryStage = 'DELIVERY_PROJECT'
+        for (const observation of page.observations) {
+          const anchor = validDeliveryAnchor(observation.anchor)
+          if (!anchor) continue
+          discoveredExecutionIds.add(anchor.executionId)
+          if (observation.operation === 'CREATE_PULL_REQUEST' && (!canonicalRepository || observation.repository?.toLowerCase() !== canonicalRepository.toLowerCase())) continue
+          const from = deliveryExecutionEntity(anchor)
+          const target: RegistryEntity | undefined = observation.commitSha && /^[a-f0-9]{40}$/.test(observation.commitSha)
+            ? { kind: 'COMMIT', id: observation.commitSha }
+            : observation.pullRequest && Number.isSafeInteger(observation.pullRequest)
+              ? { kind: 'PR', id: String(observation.pullRequest) }
+              : observation.artifactId && observation.artifactRevision && service?.provenanceSnapshot(observation.artifactId, observation.artifactRevision)
+                ? { kind: 'ARTIFACT', id: observation.artifactId + ':' + observation.artifactRevision }
+                : undefined
+          if (!target) continue
+          const freshness = service?.get(anchor.planArtifactId)?.revision === anchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE'
+          const evidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: observation.receiptId, digest: digest(JSON.stringify(observation)), freshness }
+          const scopedExecution: RegistryEntity = { kind: 'EXECUTION', id: anchor.executionId }
+          const batch: Omit<RegistryBatch, 'repositoryId'> = { source: source + ':' + digest(observation.operationId), revision: digest(observation.receiptId + ':' + freshness), status: 'COMPLETE', entities: [from, scopedExecution, target], edges: [
+            { from: { kind: 'ARTIFACT', id: anchor.planArtifactId + ':' + anchor.planRevision }, relation: 'execution-context', to: from, ...evidence },
+            { from, relation: 'delivery-context', to: target, ...evidence },
+            { from: scopedExecution, relation: 'delivery-context', to: target, ...evidence }
+          ] }
+          if (target.kind === 'PR') prDeliveries.push({ batch, number: Number(target.id), head: observation.headSha })
+          else addBatch(batch)
+          addArtifact(anchor.planArtifactId + ':' + anchor.planRevision); addArtifact(anchor.bindingArtifactId + ':' + anchor.bindingRevision)
+          if (target.kind === 'ARTIFACT') addArtifact(target.id)
+          if (target.kind === 'PR') prs.add(Number(target.id))
+        }
+        const isPartial = Boolean(page.nextCursor) || forceFocalPartial
+        if (selector) {
+          if (focalCursorKey) {
+            addBatch({ source: focalCursorKey, revision: digest(page.nextCursor ?? 'DONE'), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
+          }
+          addBatch({ source, revision: digest(JSON.stringify([selector.kind, selector.id, page.observations.map(o => o.receiptId)])), cursor: savedCursor ?? '', status: isPartial ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
+          if (isPartial) diagnostic(source, githubPrUnresolved && source === 'DELIVERY_GIT' && selector.kind === 'PR' ? 'GITHUB_PR_COMMITS_UNRESOLVED' : 'BACKLOG_PENDING', deliveryStage)
+        } else {
+          addBatch({ source, revision: digest(JSON.stringify(page.observations.map(o => o.receiptId))), cursor: page.nextCursor ?? '', status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [] })
+          diagnostic(source, page.nextCursor ? 'BACKLOG_PENDING' : 'SOURCE_READY', deliveryStage)
+        }
+      } catch (error) {
+        assertCurrent()
+        const classified = classifySourceError(error, deliveryStage)
+        if (classified.reasonCode === 'CURSOR_STALE') {
+          addBatch({ source, revision: digest('CURSOR_STALE:' + deliveryStage), cursor: '', status: 'PARTIAL', edges: [] })
+          diagnostic(source, 'CURSOR_STALE', deliveryStage)
+        } else {
+          unavailable(source, classified.status, classified.reasonCode, classified.stage)
+        }
+      }
+    }
+    if (selector?.kind !== 'PR') await resolveGitHub()
     for (const { batch, number, head } of prDeliveries) {
       const previous = JSON.parse(cursors[batch.source] ?? '{}')
       const drift = currentPrHeads.has(number) ? currentPrHeads.get(number) !== head : previous.headDrift === true
@@ -323,7 +367,12 @@ export function registrySources(options: {
       for (const sha of [...discoveredCommits].slice(0, 5)) {
         for (const row of service.list({ metadata: { commitSha: sha }, limit: 5 }).artifacts) addArtifact(row.artifactId)
       }
-      for (const artifact of [...artifacts.values()]) for (const relation of artifact.metadata.relations ?? []) addArtifact(relation.artifactId)
+      for (const artifact of [...artifacts.values()]) {
+        if (artifact.metadata.kind === 'EXECUTABLE_PLAN') {
+          for (const row of service.list({ relatedToArtifactId: artifact.artifactId, direction: 'both', limit: 10 }).artifacts) addArtifact(row.artifactId)
+        }
+        for (const relation of artifact.metadata.relations ?? []) addArtifact(relation.artifactId)
+      }
     }
     const projectProof = (proof: Awaited<ReturnType<ValidationLedger['getProofWithFreshness']>>) => {
       assertCurrent()
