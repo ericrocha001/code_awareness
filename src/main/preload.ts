@@ -15,6 +15,7 @@ if (process.argv.includes('--runtime-preview')) {
 }
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { DashExecutionResult } from '../shared/types/dash-types'
+import type { SessionSourceGrantsApi } from '../shared/types/session-source-grants-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { GitAtlasCheckoutObservation, GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../shared/types/git-atlas-types'
 import type { AtlasCatalogRequest, AtlasCatalogState, AtlasCatalogChange } from '../shared/types/git-atlas-catalog-types'
@@ -65,6 +66,13 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     enrollRepository: (repositoryId, options) => ipcRenderer.invoke('antigravity-hooks:enroll-repository', repositoryId, options),
     revokeRepository: repositoryId => ipcRenderer.invoke('antigravity-hooks:revoke-repository', repositoryId)
   } satisfies AntigravityUserHooksApi,
+  sessionSourceGrants: {
+    status: (repositoryId: string, worktreeRoot?: string) => ipcRenderer.invoke('session-grants:status', repositoryId, worktreeRoot),
+    enable: input => ipcRenderer.invoke('session-grants:enable', input),
+    revoke: input => ipcRenderer.invoke('session-grants:revoke', input),
+    setLexicalIndex: input => ipcRenderer.invoke('session-grants:set-lexical', input),
+    dismiss: input => ipcRenderer.invoke('session-grants:dismiss', input)
+  } satisfies SessionSourceGrantsApi,
   getBranchOrchestration: (request: BranchManagerRequest): Promise<BranchManagerResult> => ipcRenderer.invoke('work-orchestration:branches', request),
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
   getWorkBoard: (request: WorkBoardRequest): Promise<WorkBoardResult> => ipcRenderer.invoke('work-orchestration:board', request),

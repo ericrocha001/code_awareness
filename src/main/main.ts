@@ -102,6 +102,7 @@ import { prepareEnrolledNativeHooks, reconcileRepositoryAntigravityHooks, reconc
 import { GitWorktreeRegistry } from './git-operations/git-worktree-registry'
 import { RepositoryCatalogService } from './repository-catalog/repository-catalog-service'
 import { registerAntigravityHooksHandlers, registerCodexHooksHandlers } from './ipc/codex-hooks-handler'
+import { registerSessionSourceGrantsHandlers } from './ipc/session-source-grants-handler'
 import { RepositoryRuntimeService } from './repository-catalog/repository-runtime-service'
 import { GitHubCredentialStore } from './github/github-credential-store'
 import { GitHubAuthService } from './github/github-auth-service'
@@ -931,6 +932,10 @@ app.whenReady().then(async () => {
     resourcesPath: process.resourcesPath,
     packaged: app.isPackaged,
     settingsService
+  }, trustedRendererUrl)
+  registerSessionSourceGrantsHandlers({
+    baseProfile: app.getPath('userData'),
+    activeProjectService: activeProjects!
   }, trustedRendererUrl)
   registerSystemHealthHandlers(systemHealth)
   try {

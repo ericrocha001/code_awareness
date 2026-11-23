@@ -26,6 +26,7 @@ import { useProjectPreferences } from "./hooks/useProjectPreferences";
 import { useTheme } from "./hooks/useTheme";
 import { useNavigationVisibility } from './hooks/useNavigationVisibility';
 import { SettingsModal } from './components/SettingsModal/SettingsModal';
+import { SessionSourceGrantsControl } from './components/SessionSourceGrantsControl/SessionSourceGrantsControl';
 import { resolveDeepLink } from "./utils/deep-link-resolver";
 import type { Tab } from "./config/navigation";
 import "./App.css";
@@ -192,6 +193,9 @@ export const App: React.FC = () => {
           {activeProjectState.context.dataOrigin && <span>Dados: {activeProjectState.context.dataOrigin.artifacts} Artifacts · {activeProjectState.context.dataOrigin.media} mídias · fotografia {activeProjectState.context.dataOrigin.at}</span>}
           <span>Contexto fixo. As alterações de dados ficam nesta sessão.</span>
         </div>}
+        {activeProjectState.context?.mode !== 'PREVIEW' && activeProject?.id && (
+          <SessionSourceGrantsControl repositoryId={activeProject.id} worktreeRoot={activeProject.path} mode="banner" />
+        )}
         {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
         <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} onArtifact={intent => { setArtifactIntent(intent); setActiveTab("continuum"); }} />
         <ChannelTab active={activeTab === "channel"} />
@@ -260,6 +264,7 @@ export const App: React.FC = () => {
       </main>
 
       {isSettingsOpen && <SettingsModal hidden={navigation.hidden} ready={navigation.ready} saving={navigation.saving} error={navigation.error}
+        activeRepositoryId={activeProject?.id} activeWorktreeRoot={activeProject?.path}
         onClose={() => setIsSettingsOpen(false)} onRestore={navigation.restoreDefaults}
         onSetVisible={(id, visible) => {
           if (!navigation.ready) return;
