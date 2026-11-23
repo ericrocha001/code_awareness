@@ -22,7 +22,7 @@ function sha256(text: string): { digest: string; size: number } {
 describe('Activation Contract (code-awareness-activation/v1) & ActivationSession', () => {
   it('builds progressive compact bootstrap (skills.load only) and rejects batching, malformed, incomplete, or quoted envelopes', () => {
     const prompt = buildActivationBootstrapMessage({
-      site: 'deepseek',
+      site: 'qwen',
       mode: 'PROJECT',
       projectId: 'proj-1',
       sessionNonce: 's1',
@@ -360,7 +360,7 @@ describe('Activation Contract (code-awareness-activation/v1) & ActivationSession
     }
 
     const session = new ActivationSession({
-      site: 'deepseek',
+      site: 'qwen',
       transport,
       maxCyclesPerUserTurn: 2
     })
@@ -508,7 +508,7 @@ describe('Activation Contract (code-awareness-activation/v1) & ActivationSession
     }
 
     const session = new ActivationSession({
-      site: 'deepseek',
+      site: 'qwen',
       transport,
       maxCyclesPerUserTurn: 10
     })
@@ -617,7 +617,7 @@ describe('Activation Contract (code-awareness-activation/v1) & ActivationSession
 
     // 7. Pagination works cleanly when response exceeds maxResultChars
     const tightSession = new ActivationSession({
-      site: 'deepseek',
+      site: 'qwen',
       transport,
       maxResultChars: 900,
       maxCyclesPerUserTurn: 10
@@ -738,7 +738,7 @@ describe('Activation Contract (code-awareness-activation/v1) & ActivationSession
     }
 
     const session = new ActivationSession({
-      site: 'deepseek',
+      site: 'qwen',
       transport,
       maxCyclesPerUserTurn: 2,
       logicalCallTimeoutMs: 5000,

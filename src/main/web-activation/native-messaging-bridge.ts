@@ -4,7 +4,6 @@ import { join } from 'node:path'
 import { ConsentStore } from './consent-store'
 import { MAX_NATIVE_OUTBOUND_BYTES } from './native-messaging-protocol'
 import {
-  ALLOWED_WEB_MCP_TOOLS,
   classifyWebMcpDataClass,
   DEFAULT_ALLOWED_WEB_ORIGINS,
   normalizeConsentProjectId,
@@ -17,6 +16,7 @@ import {
   type NativeBridgeErrorPayload,
   type NativeBridgeResponse
 } from './web-activation-types'
+import { webMcpPolicy } from '../../shared/web-activation/web-allowlist'
 
 const EXTENSION_ORIGIN_RE = /^chrome-extension:\/\/[a-z0-9]{16,64}\/?$/i
 export const DEFAULT_PIPE_TIMEOUT_MS = 2500
@@ -504,7 +504,8 @@ export class NativeMessagingBridge {
         const checkedOrigin = this.validateWebOrigin(rawId, command.webOrigin, command.site)
         if ('err' in checkedOrigin) return checkedOrigin.err
 
-        const allowCheck = validateReadOnlyWebMcpRequest(command.method, command.params)
+        const site = resolveSiteForWebOrigin(checkedOrigin.origin)
+        const allowCheck = validateReadOnlyWebMcpRequest(command.method, command.params, site)
         if (!allowCheck.ok) {
           return this.error(rawId, allowCheck.code, allowCheck.message)
         }
@@ -659,7 +660,7 @@ export class NativeMessagingBridge {
           cloned.result = {
             ...origResult,
             tools: (origResult.tools as Array<{ name?: unknown }>).filter(
-              (tool) => typeof tool?.name === 'string' && ALLOWED_WEB_MCP_TOOLS.has(tool.name)
+              (tool) => typeof tool?.name === 'string' && webMcpPolicy(site).tools.has(tool.name)
             )
           }
           sanitizedMcpBody = cloned

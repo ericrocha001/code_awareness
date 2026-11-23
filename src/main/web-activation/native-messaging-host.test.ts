@@ -131,7 +131,13 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
     let activeProjectId: string | null = 'proj-1'
     const mcpTransport = vi.fn(async (_endpoint, _headers, payload) => ({
       status: 200,
-      body: { jsonrpc: '2.0', id: (payload as { id: number }).id, result: { ok: true } }
+      body: {
+        jsonrpc: '2.0',
+        id: (payload as { id: number }).id,
+        result: (payload as { method: string }).method === 'tools/list'
+          ? { tools: [{ name: 'list_artifacts' }, { name: 'read_code' }, { name: 'publish_artifact' }] }
+          : { ok: true }
+      }
     }))
 
     const bridge = new NativeMessagingBridge({
@@ -199,7 +205,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       method: 'resources/read',
       params: { uri: 'file:///C:/Windows/win.ini' }
     })
-    expect(forbiddenUri.error?.code).toBe('INVALID_URI')
+    expect(forbiddenUri.error?.code).toBe('METHOD_NOT_ALLOWED')
     expect(mcpTransport).not.toHaveBeenCalled()
 
     // Require METADATA consent first
@@ -208,7 +214,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(noMetaConsent.error?.code).toBe('CONSENT_REQUIRED')
     expect(noMetaConsent.error?.details).toMatchObject({
@@ -234,16 +240,29 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(allowedMeta.ok).toBe(true)
+    expect(allowedMeta.result).toMatchObject({ mcp: { result: { tools: [{ name: 'list_artifacts' }] } } })
+    expect(mcpTransport).toHaveBeenCalledTimes(1)
+
+    for (const method of ['server/discover', 'skills/list', 'skills/get', 'resources/list', 'resources/read']) {
+      const denied = await bridge.handle({
+        id: method, action: 'mcp_request', site: 'deepseek', webOrigin: 'https://chat.deepseek.com', method
+      })
+      expect(denied.error?.code).toBe('METHOD_NOT_ALLOWED')
+    }
+    const deniedTool = await bridge.handle({
+      id: 'deny-tool', action: 'mcp_request', site: 'deepseek', webOrigin: 'https://chat.deepseek.com',
+      method: 'tools/call', params: { name: 'publish_artifact', arguments: { name: 'list_artifacts' } }
+    })
+    expect(deniedTool.error?.code).toBe('TOOL_NOT_ALLOWED')
     expect(mcpTransport).toHaveBeenCalledTimes(1)
 
     // LITERAL_SOURCE remains gated even when METADATA is granted
     for (const literalCall of [
-      { method: 'tools/call', params: { name: 'read_code', arguments: { targets: ['src/index.ts'] } } },
+      { method: 'tools/call', params: { name: 'get_artifact', arguments: { artifactId: 'fixture' } } },
       { method: 'tools/call', params: { name: 'read_artifact_section', arguments: {} } },
-      { method: 'resources/read', params: { uri: 'skill://project/dest-1/sk-1/my-skill/SKILL.md' } }
     ]) {
       const blockedLiteral = await bridge.handle({
         id: 'lit-blocked',
@@ -271,7 +290,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
       method: 'tools/call',
-      params: { name: 'read_code', arguments: { targets: ['src/index.ts'] } }
+      params: { name: 'get_artifact', arguments: { artifactId: 'fixture' } }
     })
     expect(allowedLiteral.ok).toBe(true)
 
@@ -281,7 +300,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'qwen',
       webOrigin: 'https://chat.qwen.ai',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(qwenBlocked.error?.code).toBe('CONSENT_REQUIRED')
 
@@ -291,7 +310,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(otherProjBlocked.error?.code).toBe('CONSENT_REQUIRED')
     expect(otherProjBlocked.error?.details?.projectId).toBe('proj-2')
@@ -312,7 +331,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
       method: 'tools/call',
-      params: { name: 'read_code', arguments: {} }
+      params: { name: 'get_artifact', arguments: {} }
     })
     expect(revokedRead.error?.code).toBe('CONSENT_REQUIRED')
 
@@ -327,7 +346,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(globalBlocked.error?.details?.projectId).toBe(GLOBAL_CONSENT_PROJECT_ID)
   })
@@ -376,7 +395,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list',
+      method: 'tools/list',
       expectedProjectId: 'proj-A',
       expectedBindingId: 'bind-A',
       expectedInstanceId: 'inst-A'
@@ -395,7 +414,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list',
+      method: 'tools/list',
       expectedProjectId: 'proj-A',
       expectedBindingId: 'bind-A'
     })
@@ -411,7 +430,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list',
+      method: 'tools/list',
       expectedProjectId: 'proj-B',
       expectedBindingId: 'bind-B'
     })
@@ -428,7 +447,7 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
       action: 'mcp_request',
       site: 'deepseek',
       webOrigin: 'https://chat.deepseek.com',
-      method: 'skills/list'
+      method: 'tools/list'
     })
     expect(blockedUnavailable.error?.code).toBe('APP_UNAVAILABLE')
   })

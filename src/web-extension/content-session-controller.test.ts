@@ -303,7 +303,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
     }
   })
 
-  it('advances from skills.load and list_artifacts (req-1) to get_artifact (get-artifact-f24c4c39-v2) after old message mutation and remount without DUPLICATE_REQUEST_ID', async () => {
+  it('advances from rejected skills.load and list_artifacts (req-1) to get_artifact (get-artifact-f24c4c39-v2) after old message mutation and remount without DUPLICATE_REQUEST_ID', async () => {
     const ds = createDeepSeekDom('https://chat.deepseek.com/a/chat/s/conv-1')
     const fixture = createContinuumFixtureTransport()
     const controller = new ContentSessionController(new DeepSeekWebAdapter(), ds.doc, fixture.transport, true)
@@ -331,6 +331,14 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
     await controller.handleDomMutation()
     expect(ds.sent).toHaveLength(3)
 
+    const listReply = parseSentResultEnvelope(ds.sent[2])
+    const renderedReply = ds.appendUserTurn('', 'rendered-list-result')
+    const code = ds.doc.createElement('pre')
+    code.textContent = JSON.stringify(listReply, null, 2)
+    renderedReply.appendChild(code)
+    await controller.handleDomMutation()
+    expect(controller.getStatusSnapshot().lastDelivery?.status).toBe('DELIVERED')
+
     // Mutate old assistant turn in-place AND remount a brand new Element keeping logical data-message-id="ds-list"
     const extraParagraph = ds.doc.createElement('p')
     extraParagraph.textContent = 'Extra rendered note'
@@ -355,8 +363,8 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
     })
     await controller.handleDomMutation()
 
-    expect(fixture.callCounts.skillsGet).toBe(1)
-    expect(fixture.callCounts.resourcesRead).toBe(1)
+    expect(fixture.callCounts.skillsGet).toBe(0)
+    expect(fixture.callCounts.resourcesRead).toBe(0)
     expect(fixture.callCounts.toolsList).toBe(1)
     expect(fixture.callCounts.listArtifacts).toBe(1)
     expect(fixture.callCounts.getArtifact).toBe(1)
@@ -364,10 +372,17 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
 
     const envelopes = ds.sent.slice(1).map(parseSentResultEnvelope)
     expect(envelopes.map((e) => e.requestId)).toEqual(['req-load-1', 'req-1', 'get-artifact-f24c4c39-v2'])
-    expect(envelopes.every((e) => e.ok)).toBe(true)
+    expect(envelopes[0].error?.code).toBe('METHOD_NOT_ALLOWED')
+    expect(envelopes.slice(1).every((e) => e.ok)).toBe(true)
     expect(envelopes.some((e) => e.error?.code === 'DUPLICATE_REQUEST_ID')).toBe(false)
     expect(ds.sent[3]).toContain(fixture.artifactFixture.metadata.name)
     expect(ds.sent[3]).toContain('Preserve strict isolation between renderer and main.')
+    const trace = controller.getStatusSnapshot().requestTrace
+    expect(trace.filter(({ requestId }) => requestId === 'req-load-1').map(({ stage }) => stage))
+      .toEqual(['CANDIDATE_SEEN', 'PARSED', 'OUT_OF_SCOPE', 'CHAT_DISPATCH_ATTEMPTED'])
+    expect(trace.filter(({ requestId }) => requestId === 'req-1').map(({ stage }) => stage))
+      .toEqual(['CANDIDATE_SEEN', 'PARSED', 'MCP_DISPATCHED', 'MCP_SETTLED', 'CHAT_DISPATCH_ATTEMPTED', 'CHAT_DELIVERED'])
+    expect(JSON.stringify(trace)).not.toContain(fixture.artifactFixture.metadata.name)
   })
 
   it('ignores repeated re-renders, unanchored slot remounts, prepended history shifts, historical edits, and preserves true DOM selector order', async () => {
@@ -382,8 +397,8 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
     const weakTurn = ds.appendAssistantTurn({
       messageId: null,
       requestId: 'req-weak-1',
-      method: 'skills.load',
-      params: { uri: fixture.skillUri }
+      method: 'tools.schema',
+      params: { name: 'list_artifacts' }
     })
     await controller.handleDomMutation()
     expect(ds.sent).toHaveLength(1)
@@ -394,8 +409,8 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
     const weakRemount = ds.createAssistantElement({
       messageId: null,
       requestId: 'req-weak-1',
-      method: 'skills.load',
-      params: { uri: fixture.skillUri },
+      method: 'tools.schema',
+      params: { name: 'list_artifacts' },
       suffixHtml: '<p>remounted-same-slot</p>'
     })
     weakTurn.replaceWith(weakRemount)

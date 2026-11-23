@@ -1,6 +1,7 @@
 import {
   ACTIVATION_CONTRACT_PROTOCOL,
-  extractActivationResultEnvelopes
+  extractActivationResultEnvelopes,
+  parseActivationCallEnvelopes
 } from '../shared/web-activation/activation-contract'
 import {
   ActivationSession,
@@ -70,6 +71,13 @@ export interface LastDeliveryStatus {
   epoch: number
 }
 
+interface RequestTraceEntry {
+  requestId: string
+  stage: string
+  epoch: number
+  state: ActivationSessionState
+}
+
 interface PendingDeliveryRecord {
   kind: 'tool_result' | 'bootstrap'
   replyText: string
@@ -79,6 +87,7 @@ interface PendingDeliveryRecord {
   epoch: number
   conversationKey: string | null
   turnMessageId?: string
+  assistantAnchor?: { strongKey: string | null; element?: Element }
   bindingSnapshot: {
     mode: 'PROJECT' | 'GLOBAL_ONLY'
     projectId: string | null
@@ -172,6 +181,7 @@ export class ContentSessionController {
   private hadAssistantTurnsInConversation = false
   private lastErrorMessage: string | null = null
   private lastDiagnostic: ControllerDiagnostic | null = null
+  private readonly requestTrace: RequestTraceEntry[] = []
   private lastDelivery: LastDeliveryStatus | null = null
   private pendingDelivery: PendingDeliveryRecord | null = null
   private userTurnObservedAfterExecution = false
@@ -232,6 +242,7 @@ export class ContentSessionController {
     busy: boolean
     lastError: string | null
     lastDiagnostic: ControllerDiagnostic | null
+    requestTrace: RequestTraceEntry[]
     lastDelivery: LastDeliveryStatus | null
   } {
     const quiescence = this.checkMaintenanceReadiness(false)
@@ -244,8 +255,18 @@ export class ContentSessionController {
       busy: !quiescence.ready,
       lastError: this.lastErrorMessage,
       lastDiagnostic: this.lastDiagnostic,
+      requestTrace: this.requestTrace.filter((entry) => entry.epoch === this.activationEpoch),
       lastDelivery: this.lastDelivery
     }
+  }
+
+  private recordTrace(requestId: string, stage: string): void {
+    const shortId = requestId.slice(0, 64)
+    if (this.requestTrace.some((entry) =>
+      entry.epoch === this.activationEpoch && entry.requestId === shortId && entry.stage === stage
+    )) return
+    this.requestTrace.push({ requestId: shortId, stage, epoch: this.activationEpoch, state: this.session.getState() })
+    if (this.requestTrace.length > 48) this.requestTrace.shift()
   }
 
   private getConversationKey(): string | null {
@@ -295,6 +316,7 @@ export class ContentSessionController {
     }
 
     this.activationEpoch += 1
+    this.requestTrace.length = 0
     this.clearPendingDeliveryState()
     this.awaitingPostSwitchHydration = false
     this.pendingMutationCheck = false
@@ -332,6 +354,7 @@ export class ContentSessionController {
 
   startNewChat(): void {
     this.activationEpoch += 1
+    this.requestTrace.length = 0
     this.clearPendingDeliveryState()
     this.lastErrorMessage = null
     this.lastDiagnostic = null
@@ -347,6 +370,7 @@ export class ContentSessionController {
 
   revoke(): void {
     this.activationEpoch += 1
+    this.requestTrace.length = 0
     this.clearPendingDeliveryState()
     this.pendingMutationCheck = false
     this.lastDelivery = null
@@ -394,6 +418,7 @@ export class ContentSessionController {
 
   dispose(): void {
     this.activationEpoch += 1
+    this.requestTrace.length = 0
     this.clearPendingDeliveryState()
     this.pendingMutationCheck = false
     this.maintenanceDrainUntil = 0
@@ -501,6 +526,7 @@ export class ContentSessionController {
         this.activeConversationKey = currentKey
       } else {
         this.activationEpoch += 1
+        this.requestTrace.length = 0
         this.clearPendingDeliveryState()
         this.activeConversationKey = currentKey
         this.session.startNewChat()
@@ -752,6 +778,7 @@ export class ContentSessionController {
     }
 
     if (!candidate.isComplete) {
+      this.recordTrace('unidentified', 'TURN_INCOMPLETE')
       return
     }
 
@@ -765,6 +792,10 @@ export class ContentSessionController {
     const effectiveConsumedAssistantCount = Math.max(this.consumedAssistantCount, anchoredCount)
     const runEpoch = this.activationEpoch
     const runConversationKey = this.activeConversationKey
+    const candidateCalls = parseActivationCallEnvelopes(candidate)
+    for (const request of [...candidateCalls.calls, ...candidateCalls.rejected]) {
+      this.recordTrace(request.requestId ?? 'invalid', 'CANDIDATE_SEEN')
+    }
 
     if (
       (candidateStrongKey !== null && this.consumedStrongIds.has(candidateStrongKey)) ||
@@ -778,6 +809,9 @@ export class ContentSessionController {
     }
 
     if (candidate.identitySource === 'ambiguous') {
+      for (const request of [...candidateCalls.calls, ...candidateCalls.rejected]) {
+        this.recordTrace(request.requestId ?? 'invalid', 'TURN_IDENTITY_AMBIGUOUS')
+      }
       this.failClosedAmbiguous(
         turns,
         activeIdx,
@@ -898,9 +932,18 @@ export class ContentSessionController {
     this.lastConsumedAssistantStrongKey = candidateStrongKey
     this.snapshotAnchors(turns)
 
-    const processed = await this.session.processAssistantTurn(candidate)
+    const processed = await this.session.processAssistantTurn(candidate, (requestId, stage) => {
+      if (runEpoch === this.activationEpoch && this.getConversationKey() === runConversationKey) {
+        this.recordTrace(requestId, stage)
+      }
+    })
     if (runEpoch !== this.activationEpoch || this.getConversationKey() !== runConversationKey) {
       return
+    }
+    for (const call of processed.executedCalls) {
+      if (call.errorCode === 'METHOD_NOT_ALLOWED' || call.errorCode === 'TOOL_NOT_ALLOWED') {
+        this.recordTrace(call.requestId, 'OUT_OF_SCOPE')
+      }
     }
 
     if (processed.shouldSendReply && processed.emulatedResponses.length > 0) {
@@ -979,16 +1022,23 @@ export class ContentSessionController {
       return false
     }
 
+    const anchor = pending.assistantAnchor
+    const assistantAnchorIndex = !anchor ? -1 : turns.findIndex((turn) =>
+      turn.role === 'assistant' &&
+      ((anchor.strongKey !== null && getStrongKey(turn) === anchor.strongKey) ||
+        (anchor.element !== undefined && turn.element === anchor.element))
+    )
     let userOrdinal = 0
-    for (const turn of turns) {
+    for (const [turnIndex, turn] of turns.entries()) {
       if (turn.role !== 'user') continue
       const idx = userOrdinal
       userOrdinal += 1
       const sk = getStrongKey(turn)
       const isBaseline =
+        turn.identitySource === 'ambiguous' ||
         (sk !== null && pending.baselineUserStrongKeys.has(sk)) ||
         (turn.element !== undefined && pending.baselineUserElements.has(turn.element)) ||
-        idx < pending.baselineUserCount
+        (assistantAnchorIndex >= 0 ? turnIndex <= assistantAnchorIndex : idx < pending.baselineUserCount)
       if (isBaseline) continue
 
       let matched = false
@@ -997,7 +1047,7 @@ export class ContentSessionController {
           !RESULT_FENCE_RE.test(turn.text) &&
           turn.text.includes('[Code Awareness Local Context')
       } else {
-        const foundEnvelopes = extractActivationResultEnvelopes(turn.text)
+        const foundEnvelopes = extractActivationResultEnvelopes(turn.text, this.adapter.site === 'deepseek')
         matched =
           pending.expectedEnvelopes.size > 0 &&
           Array.from(pending.expectedEnvelopes.entries()).every(([reqId, expectedJson]) =>
@@ -1011,6 +1061,7 @@ export class ContentSessionController {
         this.seenUserCount = Math.max(this.seenUserCount, userOrdinal)
 
         const { requestIds, epoch } = pending
+        for (const requestId of requestIds) this.recordTrace(requestId, 'CHAT_DELIVERED')
         this.clearPendingDeliveryState()
         this.lastDelivery = {
           ok: true,
@@ -1040,7 +1091,12 @@ export class ContentSessionController {
     executionError?: { requestId: string; code: string }
     existingPending?: PendingDeliveryRecord
   }): Promise<{ dispatched: boolean; reason?: string }> {
-    const baseline = this.captureBaselineUserTurns(this.adapter.readTurns(this.rootDocument))
+    const beforeDispatch = this.adapter.readTurns(this.rootDocument)
+    const baseline = this.captureBaselineUserTurns(beforeDispatch)
+    const assistant = beforeDispatch.find((turn) => turn.role === 'assistant' && turn.messageId === params.turnMessageId)
+    const assistantAnchor = params.existingPending?.assistantAnchor ?? (assistant
+      ? { strongKey: getStrongKey(assistant), element: assistant.element }
+      : undefined)
     let sent: Awaited<ReturnType<WebChatAdapter['sendMessage']>>
     try {
       this.programmaticComposerWrite = true
@@ -1073,6 +1129,7 @@ export class ContentSessionController {
     const expiresAt = params.existingPending?.expiresAt ?? firstAttemptAt + this.deliveryRecoveryTtlMs
 
     if (!sent.ok) {
+      for (const requestId of params.requestIds) this.recordTrace(requestId, 'CHAT_BLOCKED')
       const reason = sent.reason ?? 'SEND_FAILED'
       if (sent.status === 'PRE_DISPATCH_BLOCKED' && nowMs < expiresAt) {
         const expectedEnvelopes =
@@ -1089,6 +1146,7 @@ export class ContentSessionController {
           epoch: params.runEpoch,
           conversationKey: params.runConversationKey,
           turnMessageId: params.turnMessageId,
+          assistantAnchor,
           bindingSnapshot: params.existingPending?.bindingSnapshot ?? { ...binding },
           baselineUserCount: baseline.count,
           baselineUserStrongKeys: baseline.strongKeys,
@@ -1204,6 +1262,7 @@ export class ContentSessionController {
       epoch: params.runEpoch,
       conversationKey: params.runConversationKey,
       turnMessageId: params.turnMessageId,
+      assistantAnchor,
       bindingSnapshot: params.existingPending?.bindingSnapshot ?? { ...this.session.getBinding() },
       baselineUserCount: baseline.count,
       baselineUserStrongKeys: baseline.strongKeys,
@@ -1215,6 +1274,7 @@ export class ContentSessionController {
       inFlight: false
     }
     this.pendingDelivery = ackRecord
+    for (const requestId of params.requestIds) this.recordTrace(requestId, 'CHAT_DISPATCH_ATTEMPTED')
 
     if (params.executionError) {
       this.lastDiagnostic = {
@@ -1252,6 +1312,7 @@ export class ContentSessionController {
         return
       }
       const reqIds = active.requestIds
+      for (const requestId of reqIds) this.recordTrace(requestId, 'CHAT_UNKNOWN')
       this.clearPendingDeliveryState()
       this.lastDelivery = {
         ok: false,
@@ -1470,6 +1531,10 @@ export class ContentSessionController {
       label.title = `${phaseInfo}${this.lastDiagnostic.code}${reqInfo} — ${this.lastDiagnostic.message}`
     } else {
       label.title = ''
+    }
+    const trace = this.getStatusSnapshot().requestTrace
+    if (trace.length) {
+      label.title = [label.title, ...trace.map(({ requestId, stage }) => `${requestId} ${stage}`)].filter(Boolean).join('\n')
     }
 
     const btn = this.rootDocument.createElement('button')
