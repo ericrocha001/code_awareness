@@ -94,8 +94,9 @@ const schemas = {
   }).strict().refine(q => (!q.worktreeId === !q.generation) && (!!q.checkpointId || !!q.commit)),
   list_agent_sessions: z.object({ state: z.enum(['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(), after: date, before: date,
     worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    scope: z.enum(['WORKTREE', 'REPOSITORY']).optional(),
     ...historicalSelectors, source: z.enum(['IMPORTED', 'NATIVE_HOOK']).optional(), view: z.enum(['FOCAL', 'LEGACY']).optional(), includeArchived: z.boolean().optional(), archiveCursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict()
-    .refine(q => (!q.worktreeId === !q.generation) && (!q.archiveCursor || q.includeArchived === true) && (q.source !== 'NATIVE_HOOK' || (![q.state, q.includeArchived, q.archiveCursor].some(v => v !== undefined) && !(q.commitSha && q.pullRequest)))),
+    .refine(q => (!q.worktreeId === !q.generation) && !(q.scope === 'REPOSITORY' && q.worktreeId) && (!q.archiveCursor || q.includeArchived === true) && (q.source !== 'NATIVE_HOOK' || (![q.state, q.includeArchived, q.archiveCursor].some(v => v !== undefined) && !(q.commitSha && q.pullRequest)))),
   inspect_agent_session: z.union([legacySessionDetail, nativeSessionDetail]),
   list_agent_session_events: z.union([legacySessionEvents, nativeSessionEvents]),
   read_agent_session_event: z.union([legacyEventRead, nativeEventRead]),
@@ -1093,15 +1094,17 @@ export async function executeSessionTool(
     } else if (name === 'refresh_agent_sessions') {
       const request = q as z.infer<typeof schemas.refresh_agent_sessions>
       if (request.nativeSession && request.sourceSessionId) {
-        if (!selectedTarget || !root) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
-        if (request.nativeSession.worktreeId !== selectedTarget.worktreeId || request.nativeSession.generation !== selectedTarget.generation) {
-          throw new Error('ORIGIN_UNVERIFIED')
-        }
+        const matchedLive = liveTargets.find(t => t.worktreeId === request.nativeSession!.worktreeId && t.generation === request.nativeSession!.generation)
+        const targetRef = matchedLive
+          ? { worktreeId: matchedLive.worktreeId, generation: matchedLive.generation }
+          : (selectedTarget && request.nativeSession.worktreeId === selectedTarget.worktreeId && request.nativeSession.generation === selectedTarget.generation ? selectedTarget : undefined)
+        const targetRoot = matchedLive?.root ?? (targetRef ? root : undefined)
+        if (!targetRef || !targetRoot) throw new Error('ORIGIN_UNVERIFIED')
         data = runNativeSessionIndexStep(
           store as SessionStore,
           { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId },
-          selectedTarget,
-          root,
+          targetRef,
+          targetRoot,
           assertActive,
           archiveAccountHash,
           nativeStepBudget
@@ -1212,52 +1215,80 @@ export async function executeSessionTool(
         contextMap.sources = contextMap.sources.filter(s => !s.source.includes(':')).slice(0, 4)
         while (!fits(contextMap, 4500) && contextMap.edges.length) { contextMap.edges.pop(); contextMap.coverage = 'PARTIAL' }
       }
-      const mergeRegistry = query.source !== 'IMPORTED' && (!!selector || !!(filter.worktreeId && filter.generation))
+      const isRepositoryScope = query.scope === 'REPOSITORY'
+      const mergeRegistry = query.source !== 'IMPORTED' && (isRepositoryScope || !!selector || !!(filter.worktreeId && filter.generation))
       const importedLimit = mergeRegistry ? 200 : filter.limit + 1
       const linkedSelectorResult = mergeRegistry && selector ? actualStore.registry.linkedSessions(selector, filter, archiveAccountHash) : undefined
       const nativeMergeRevision = mergeRegistry && !selector ? actualStore.registry.nativeSessionsRevision(filter) : undefined
-      const activeRoot = filter.worktreeId && filter.generation
-        ? (selectedTarget?.worktreeId === filter.worktreeId && selectedTarget?.generation === filter.generation
-          ? root
-          : liveTargets.find(t => t.worktreeId === filter.worktreeId && t.generation === filter.generation)?.root)
-        : undefined
+      const discoveryTargets: Array<{ worktreeId: string; generation: string; root: string }> = (() => {
+        if (isRepositoryScope) {
+          const seen = new Set<string>()
+          const list: Array<{ worktreeId: string; generation: string; root: string }> = []
+          for (const t of liveTargets) {
+            if (!t.root) continue
+            const k = `${t.worktreeId}:${t.generation}`
+            if (seen.has(k)) continue
+            seen.add(k)
+            list.push({ worktreeId: t.worktreeId, generation: t.generation, root: t.root })
+          }
+          if (!list.length && selectedTarget && root) {
+            list.push({ worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation, root })
+          }
+          return list
+        }
+        if (filter.worktreeId && filter.generation) {
+          const matchedRoot = selectedTarget?.worktreeId === filter.worktreeId && selectedTarget?.generation === filter.generation
+            ? root
+            : liveTargets.find(t => t.worktreeId === filter.worktreeId && t.generation === filter.generation)?.root
+          return matchedRoot ? [{ worktreeId: filter.worktreeId, generation: filter.generation, root: matchedRoot }] : []
+        }
+        return []
+      })()
       const wantCodex = !filter.agent || filter.agent === 'codex'
       const wantAntigravity = !filter.agent || filter.agent === 'antigravity'
-      const runNativeDiscovery = mergeRegistry && activeRoot && filter.worktreeId && filter.generation && !selector
-      const codexDiscovery = runNativeDiscovery && wantCodex
-        ? discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, after: filter.after, before: filter.before, limit: filter.limit, assertCurrent: assertActive })
-        : undefined
-      if (codexDiscovery) {
-        onDiscovery?.({ provider: 'codex', truncated: codexDiscovery.truncated, coverageReason: codexDiscovery.coverageReason, bytesRead: codexDiscovery.stats.headerBytesRead, filesOpened: codexDiscovery.stats.filesOpened, usedIndex: codexDiscovery.stats.usedIndex })
-      }
-      const agDiscovery = runNativeDiscovery && wantAntigravity
-        ? discoverAntigravityAppSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: activeRoot, after: filter.after, before: filter.before, limit: filter.limit, assertCurrent: assertActive })
-        : undefined
-      if (agDiscovery) {
-        onDiscovery?.({ provider: 'antigravity', truncated: agDiscovery.truncated, coverageReason: agDiscovery.coverageReason, bytesRead: agDiscovery.stats.transcriptBytesRead, filesOpened: agDiscovery.stats.transcriptFilesOpened, usedIndex: agDiscovery.stats.usedIndex })
-      }
+      const runNativeDiscovery = mergeRegistry && discoveryTargets.length > 0 && !selector
       const discoveryReasons: Record<string, number> = {}
-      if (codexDiscovery?.truncated && codexDiscovery.coverageReason) {
-        discoveryReasons[codexDiscovery.coverageReason] = (discoveryReasons[codexDiscovery.coverageReason] ?? 0) + 1
+      const discoveredByTarget: Array<{
+        session: ReturnType<typeof discoverCodexSources>['sessions'][number] | ReturnType<typeof discoverAntigravityAppSources>['sessions'][number]
+        worktreeId: string
+        generation: string
+      }> = []
+      if (runNativeDiscovery) {
+        for (const dt of discoveryTargets) {
+          const codexDiscovery = wantCodex
+            ? discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: dt.root, after: filter.after, before: filter.before, limit: 20, assertCurrent: assertActive })
+            : undefined
+          if (codexDiscovery) {
+            onDiscovery?.({ provider: 'codex', truncated: codexDiscovery.truncated, coverageReason: codexDiscovery.coverageReason, bytesRead: codexDiscovery.stats.headerBytesRead, filesOpened: codexDiscovery.stats.filesOpened, usedIndex: codexDiscovery.stats.usedIndex })
+            if (codexDiscovery.truncated && codexDiscovery.coverageReason) {
+              discoveryReasons[codexDiscovery.coverageReason] = (discoveryReasons[codexDiscovery.coverageReason] ?? 0) + 1
+            }
+            for (const s of codexDiscovery.sessions) discoveredByTarget.push({ session: s, worktreeId: dt.worktreeId, generation: dt.generation })
+          }
+          const agDiscovery = wantAntigravity
+            ? discoverAntigravityAppSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: dt.root, after: filter.after, before: filter.before, limit: 20, assertCurrent: assertActive })
+            : undefined
+          if (agDiscovery) {
+            onDiscovery?.({ provider: 'antigravity', truncated: agDiscovery.truncated, coverageReason: agDiscovery.coverageReason, bytesRead: agDiscovery.stats.transcriptBytesRead, filesOpened: agDiscovery.stats.transcriptFilesOpened, usedIndex: agDiscovery.stats.usedIndex })
+            if (agDiscovery.truncated && agDiscovery.coverageReason) {
+              discoveryReasons[agDiscovery.coverageReason] = (discoveryReasons[agDiscovery.coverageReason] ?? 0) + 1
+            }
+            for (const s of agDiscovery.sessions) discoveredByTarget.push({ session: s, worktreeId: dt.worktreeId, generation: dt.generation })
+          }
+        }
       }
-      if (agDiscovery?.truncated && agDiscovery.coverageReason) {
-        discoveryReasons[agDiscovery.coverageReason] = (discoveryReasons[agDiscovery.coverageReason] ?? 0) + 1
-      }
-      const localGranted = [
-        ...(codexDiscovery?.sessions ?? []),
-        ...(agDiscovery?.sessions ?? [])
-      ].filter(item => {
+      const localGranted = discoveredByTarget.filter(({ session: item, worktreeId: wtId, generation: gen }) => {
         if (filter.agent && item.agent !== filter.agent) return false
         if (filter.after && (!item.lastObserved || Date.parse(item.lastObserved) < Date.parse(filter.after))) return false
         if (filter.before && (!item.lastObserved || Date.parse(item.lastObserved) > Date.parse(filter.before))) return false
         if (!actualStore.registry.visible({ kind: 'SESSION', id: `${item.provider}:${item.providerSessionId}` }, archiveAccountHash)) return false
         const known = actualStore.registry.sessionWorktrees(item.provider, item.providerSessionId)
-        if (known.length > 0 && !known.some(w => w.worktreeId === filter.worktreeId && w.generation === filter.generation)) return false
+        if (known.length > 0 && !known.some(w => w.worktreeId === wtId && w.generation === gen)) return false
         return true
       })
       const scopeRevision = digest(JSON.stringify([actualStore.catalogRevision(), mergeRegistry ? actualStore.registry.source('NATIVE_HOOK')?.revision ?? 'empty' : null,
         linkedSelectorResult ? linkedSelectorResult.rows.map(r => [r.provider, r.providerSessionId, r.agent, r.witness]) : nativeMergeRevision ?? [],
-        localGranted.map(g => [g.provider, g.providerSessionId, g.lastObserved ?? null]),
+        localGranted.map(g => [g.session.provider, g.session.providerSessionId, g.worktreeId, g.generation, g.session.lastObserved ?? null]),
         Object.entries(discoveryReasons)]))
       const scope = { name, repositoryId: actualStore.repositoryId, revision: scopeRevision, accountHash: archiveAccountHash ?? null, filter, view: focal ? 'FOCAL' : 'LEGACY' }
       const offset = actualStore.offset(cursor, scope)
@@ -1290,17 +1321,18 @@ export async function executeSessionTool(
             byIdentity.set(k, { registry: reg, worktrees: reg.worktrees })
           }
         }
-        const wtRef = filter.worktreeId && filter.generation ? { worktreeId: filter.worktreeId, generation: filter.generation } : undefined
-        for (const granted of localGranted) {
+        for (const grantedEntry of localGranted) {
+          const granted = grantedEntry.session
+          const wtRef = { worktreeId: grantedEntry.worktreeId, generation: grantedEntry.generation }
           const k = keyOf(granted.provider, granted.agent, granted.providerSessionId)
           const existing = byIdentity.get(k)
           if (existing) {
-            existing.granted = granted
-            if (wtRef && !existing.worktrees.some(w => w.worktreeId === wtRef.worktreeId && w.generation === wtRef.generation)) {
+            existing.granted = grantedEntry
+            if (!existing.worktrees.some(w => w.worktreeId === wtRef.worktreeId && w.generation === wtRef.generation)) {
               existing.worktrees.push(wtRef)
             }
           } else {
-            byIdentity.set(k, { granted, worktrees: wtRef ? [wtRef] : [] })
+            byIdentity.set(k, { granted: grantedEntry, worktrees: [wtRef] })
           }
         }
         const merged = [...byIdentity.values()].map((entry): UnifiedItem => {
@@ -1315,7 +1347,9 @@ export async function executeSessionTool(
           }
           if (entry.registry) {
             const reg = entry.registry
-            const granted = entry.granted
+            const grantedEntry = entry.granted
+            const granted = grantedEntry?.session
+            const wtRef = grantedEntry ? { worktreeId: grantedEntry.worktreeId, generation: grantedEntry.generation } : undefined
             return {
               sortTime: reg.lastObserved ?? granted?.lastObserved ?? '', sortId: reg.providerSessionId,
               project: () => ({
@@ -1340,7 +1374,9 @@ export async function executeSessionTool(
               })
             }
           }
-          const granted = entry.granted!
+          const grantedEntry = entry.granted!
+          const granted = grantedEntry.session
+          const wtRef = { worktreeId: grantedEntry.worktreeId, generation: grantedEntry.generation }
           return {
             sortTime: granted.lastObserved ?? '', sortId: granted.providerSessionId,
             project: () => ({
@@ -1355,14 +1391,14 @@ export async function executeSessionTool(
               identityEvidence: granted.identityEvidence,
               lastObserved: granted.lastObserved,
               worktrees: entry.worktrees,
-              worktreeAvailability: availability,
+              worktreeAvailability: isRepositoryScope ? 'ACTIVE' : availability,
               claimsVerified: false,
               deepen: {
                 tool: 'inspect_agent_session',
                 arguments: {
                   repositoryId: actualStore.repositoryId,
                   sourceSessionId: granted.sourceSessionId,
-                  nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...(wtRef ? wtRef : {}) }
+                  nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...wtRef }
                 }
               }
             })
@@ -1376,9 +1412,10 @@ export async function executeSessionTool(
         }))
       }
       const discoveryPartialReason = Object.keys(discoveryReasons).length
-        ? (agDiscovery?.coverageReason ?? codexDiscovery?.coverageReason ?? 'SOURCE_DISCOVERY_LIMIT_REACHED')
+        ? Object.keys(discoveryReasons)[0]
         : undefined
-      const focalSpoolPending = !!(filter.worktreeId && filter.generation && (nativeCatchUp ? nativeCatchUp.pending : inspectFocalSpoolPending(activeRoot, filter.agent)))
+      const focalRoot = filter.worktreeId && filter.generation ? discoveryTargets[0]?.root : undefined
+      const focalSpoolPending = !!(filter.worktreeId && filter.generation && (nativeCatchUp ? nativeCatchUp.pending : inspectFocalSpoolPending(focalRoot, filter.agent)))
       const nextDiscovery = !pageRows.length
         ? (focalSpoolPending && filter.worktreeId && filter.generation
           ? { reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING', tool: 'list_agent_sessions', arguments: { worktreeId: filter.worktreeId, generation: filter.generation, ...(filter.agent ? { agent: filter.agent } : {}) } }
@@ -1391,6 +1428,7 @@ export async function executeSessionTool(
         : discoveryPartialReason ?? (anyAssociation ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED')
       data = page(actualStore, scope, offset, pageRows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL',
+          ...(isRepositoryScope ? { scope: 'REPOSITORY' } : {}),
           ...(wtState ? { worktreeState: wtState } : {}),
           ...(focalSpoolPending ? { nativeCatchUp: { state: 'PARTIAL', pending: true, ...(nativeCatchUp?.deferred ? { deferred: true } : {}), reason: nativeCatchUp?.reason ?? 'INGESTION_PENDING' } } : nativeCatchUp ? { nativeCatchUp } : {}),
           ...(Object.keys(discoveryReasons).length ? { sourceDiscoveryCoverage: 'PARTIAL', coverageReasons: discoveryReasons } : {}),
@@ -1418,8 +1456,10 @@ export async function executeSessionTool(
     } else if ('nativeSession' in q) {
       const target = nativeLiteralTarget(name, q)
       if (target) {
-        if (!root || !selectedTarget || target.worktreeId !== selectedTarget.worktreeId || target.generation !== selectedTarget.generation) throw new Error('ORIGIN_UNVERIFIED')
-        data = nativeLiteralProjection(store as SessionStore, name, q as z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>, target, root, assertActive, budget, archiveAccountHash, nativeStepBudget)
+        const matchedLive = liveTargets.find(t => t.worktreeId === target.worktreeId && t.generation === target.generation)
+        const targetRoot = matchedLive?.root ?? (selectedTarget && target.worktreeId === selectedTarget.worktreeId && target.generation === selectedTarget.generation ? root : undefined)
+        if (!targetRoot) throw new Error('ORIGIN_UNVERIFIED')
+        data = nativeLiteralProjection(store as SessionStore, name, q as z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>, target, targetRoot, assertActive, budget, archiveAccountHash, nativeStepBudget)
       } else if (name === 'read_agent_session_event') {
         const request = q as z.infer<typeof nativeEventRead>
         nativeSessionProjection(store as SessionStore, { ...request, limit: 1 }, 'MAP', archiveAccountHash)

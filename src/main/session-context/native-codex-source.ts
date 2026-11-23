@@ -216,7 +216,8 @@ function canonicalIndexPathMatchesRoot(rawCwd: unknown, root: string): boolean {
 function indexedCodexCandidates(
   profile: string,
   root: string,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  offset = 0
 ): { usedIndex: true; truncated: boolean; candidates: { path: string; sessionId: string; mtimeMs: number }[] } | undefined {
   const dbPath = join(profile, 'state_5.sqlite')
   let stat: BigIntStats
@@ -243,8 +244,8 @@ function indexedCodexCandidates(
          FROM threads
          WHERE ${expr} = ?
          ORDER BY updated_at DESC
-         LIMIT ?`
-      ).all(comparableRoot, maxCandidateFiles + 1) as Array<{ id?: unknown; rollout_path?: unknown; cwd?: unknown; updated_at?: unknown }>
+         LIMIT ? OFFSET ?`
+      ).all(comparableRoot, maxCandidateFiles + 1, offset) as Array<{ id?: unknown; rollout_path?: unknown; cwd?: unknown; updated_at?: unknown }>
     } catch {
       return undefined
     }
@@ -275,6 +276,7 @@ export function discoverCodexSources(options: {
   after?: string
   before?: string
   limit?: number
+  offset?: number
   assertCurrent: () => void
 }): CodexDiscoveryResult {
   const grantStatus = readCodexGrantStatus(options.storePath, options.repositoryId)
@@ -302,7 +304,7 @@ export function discoverCodexSources(options: {
   let usedIndex = false
   let candidates: { path: string; sessionId: string; mtimeMs: number }[] = []
 
-  const indexed = indexedCodexCandidates(profile, root, options.assertCurrent)
+  const indexed = indexedCodexCandidates(profile, root, options.assertCurrent, options.offset ?? 0)
   if (indexed) {
     usedIndex = true
     truncated = indexed.truncated

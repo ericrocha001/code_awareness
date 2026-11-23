@@ -785,3 +785,91 @@ it('U2 qualifies Codex 0.171.0-alpha.13 and future structural equivalents while 
     nativeSession: { provider: 'codex-native', id: nativeDigest(JSON.stringify(['repo-u3', 'codex', sWrongAccount])), ...f.target }
   })).toEqual({ isError: true, data: { code: 'SOURCE_IDENTITY_CONFLICT' } })
 }, 60_000)
+
+it('U3 discovers sessions across governed repository worktrees via scope=REPOSITORY with cursor pagination and deepens from main without leaving main', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'u3-repo-scope-'))
+  cleanup.push(() => safeRemove(dir))
+  const mainRoot = join(dir, 'main-wt')
+  const codexWtRoot = join(dir, 'codex-wt')
+  mkdirSync(join(mainRoot, '.git'), { recursive: true })
+  mkdirSync(join(codexWtRoot, '.git'), { recursive: true })
+  const mainTarget = { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }
+  const codexTarget = { worktreeId: 'c'.repeat(64), generation: 'd'.repeat(64) }
+  const storePath = sessionStorePath(dir, 'repo-u3-scope')
+  const store = new SessionStore(storePath, 'repo-u3-scope')
+  cleanup.push(() => store.close())
+
+  const agProfile = join(dir, '.gemini', 'antigravity')
+  const codexProfile = join(dir, 'codex-profile')
+  const accHash = nativeDigest(JSON.stringify(['u-scope', 'a-scope']))
+  const agId = '019ba000-0000-7000-8000-000000000701'
+  const codexId = '01a1f200-0000-7000-8000-000000000702'
+
+  const agTxPath = antigravityAppTranscriptPath(agProfile, agId)
+  mkdirSync(dirname(agTxPath), { recursive: true })
+  writeFileSync(agTxPath, [
+    JSON.stringify({ step_index: 0, type: 'USER_INPUT', source: 'USER', created_at: '2026-11-23T09:00:00Z', content: 'ag-main-wt-msg' })
+  ].join('\n') + '\n')
+  seedAntigravitySummariesDb(agProfile, [{ id: agId, workspaceUris: [pathToFileURL(mainRoot).href], lastModified: '2026-11-23 09:00:00+00:00' }])
+
+  const day = new Date(Number.parseInt(codexId.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+  const codexDir = join(codexProfile, 'sessions', ...day)
+  mkdirSync(codexDir, { recursive: true })
+  writeFileSync(join(codexDir, `rollout-2026-11-23T10-00-00-${codexId}.jsonl`), [
+    JSON.stringify({
+      timestamp: '2026-11-23T10:00:00Z', type: 'session_meta',
+      payload: { id: codexId, session_id: codexId, account_scoped: true, creator_user_id: 'u-scope', creator_account_id: 'a-scope', cwd: codexWtRoot, runtime_workspace_roots: [codexWtRoot], cli_version: '0.171.0-alpha.13' }
+    }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'codex-other-wt-literal' }] } })
+  ].join('\n') + '\n')
+
+  writeFileSync(join(dirname(storePath), 'session-context.provider.json'), JSON.stringify({
+    repositoryId: 'repo-u3-scope',
+    nativeSources: {
+      antigravityApp: { profile: agProfile },
+      codex: { profile: codexProfile, creatorAccountHash: accHash }
+    }
+  }))
+
+  const liveTargets = [
+    { ...mainTarget, root: mainRoot, fingerprint: 'fp-main' },
+    { ...codexTarget, root: codexWtRoot, fingerprint: 'fp-codex' }
+  ]
+  const call = async (name: Parameters<typeof executeSessionTool>[2], args: unknown) => {
+    const res = await executeSessionTool(store, {}, name, args, () => {}, mainTarget, liveTargets, undefined, mainRoot)
+    return { isError: !!res.isError, data: JSON.parse((res.content[0] as { text: string }).text) }
+  }
+
+  // Paginate across governed worktrees with limit=1
+  const page1 = await call('list_agent_sessions', { scope: 'REPOSITORY', limit: 1 })
+  expect(page1.isError).toBe(false)
+  expect(page1.data.scope).toBe('REPOSITORY')
+  expect(page1.data.sessions).toHaveLength(1)
+  expect(page1.data.nextCursor).toBeDefined()
+  expect(JSON.stringify(page1.data)).not.toContain('codex-other-wt-literal')
+  expect(JSON.stringify(page1.data)).not.toContain('ag-main-wt-msg')
+
+  const page2 = await call('list_agent_sessions', { scope: 'REPOSITORY', limit: 1, cursor: page1.data.nextCursor })
+  expect(page2.isError).toBe(false)
+  expect(page2.data.sessions).toHaveLength(1)
+
+  const allSessions = [...page1.data.sessions, ...page2.data.sessions]
+  const codexFound = allSessions.find((s: any) => s.sourceSessionId === codexId)
+  const agFound = allSessions.find((s: any) => s.sourceSessionId === agId)
+  expect(codexFound).toBeDefined()
+  expect(agFound).toBeDefined()
+  expect(codexFound.worktrees[0].worktreeId).toBe(codexTarget.worktreeId)
+
+  // Deepen directly into the other governed worktree's Codex session while staying on main!
+  const insp = await call('inspect_agent_session', codexFound.deepen.arguments)
+  expect(insp.isError).toBe(false)
+  const evs = await call('list_agent_session_events', { ...codexFound.deepen.arguments, expectedRevision: insp.data.revision, limit: 5 })
+  const read = await call('read_agent_session_event', { ...codexFound.deepen.arguments, expectedRevision: insp.data.revision, eventId: evs.data.events[0].eventId })
+  expect(read.data.content).toBe('codex-other-wt-literal')
+
+  // Ungoverned worktree still rejected
+  expect(await call('inspect_agent_session', {
+    sourceSessionId: codexId,
+    nativeSession: { provider: 'codex-native', id: codexFound.providerSessionId, worktreeId: '9'.repeat(64), generation: '9'.repeat(64) }
+  })).toEqual({ isError: true, data: { code: 'ORIGIN_UNVERIFIED' } })
+}, 60_000)
