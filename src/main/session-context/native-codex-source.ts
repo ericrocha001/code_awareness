@@ -539,6 +539,15 @@ export function stepCodexSourceIndex(options: {
         if (item.type === 'task_started' && typeof item.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) {
           acc.state.currentTurnId = item.turn_id
           emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
+        } else if (
+          item.type === 'item_completed' ||
+          item.type === 'token_count' ||
+          item.type === 'thread_settings_applied' ||
+          item.type === 'token_usage_record'
+        ) {
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
+        } else if (item.type === 'agent_reasoning' || item.type === 'reasoning') {
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNQUALIFIED_CONTENT', lineStart, lineEnd })
         } else if (item.type === 'turn_aborted' || item.type === 'error') {
           const turnId = typeof item.turn_id === 'string' && item.turn_id.length <= 128 ? item.turn_id : acc.state.currentTurnId
           const reason = typeof item.reason === 'string' ? item.reason : typeof item.message === 'string' ? item.message : String(item.type)

@@ -653,7 +653,7 @@ it('U2 addresses every Antigravity record (INPUT, TOOL_CALL, AGENT_UPDATE, TOOL_
   expect(map.isError).toBe(false)
   expect(map.data.readinessReason).toBe('READY')
   expect(map.data.sourceVariant).toBe('TRANSCRIPT_DOCUMENTED')
-  expect(map.data.recordCoverage).toEqual({
+  expect(map.data.recordCoverage).toMatchObject({
     recordsTotal: 6,
     recordsAddressable: 6,
     typed: 4,
@@ -712,4 +712,90 @@ it('U2 addresses every Antigravity record (INPUT, TOOL_CALL, AGENT_UPDATE, TOOL_
   const invalidInspect = await f.call('inspect_agent_session', deepen)
   expect(invalidInspect.data.contentAvailability).toBe('SOURCE_UNAVAILABLE')
   expect(invalidInspect.data.readinessReason).toBe('GRANT_INVALID_OR_REVOKED')
+}, 60_000)
+
+it('U4 classifies opaque Codex protocol metadata separately from unqualified/unrecognized records and enforces LEXICAL_INDEX_NOT_AUTHORIZED vs authorized FTS5 search', async () => {
+  const f = setupWorkerEnv('repo-u4-lexical')
+  const profile = join(f.base, 'codex-profile')
+  const sessionUuid = '01a1f300-0000-7000-8000-000000000909'
+  const day = new Date(Number.parseInt(sessionUuid.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+  const rolloutDir = join(profile, 'sessions', ...day)
+  mkdirSync(rolloutDir, { recursive: true })
+  const accHash = nativeDigest(JSON.stringify(['u4-u', 'u4-a']))
+  const rolloutPath = join(rolloutDir, `rollout-2026-11-23T10-00-00-${sessionUuid}.jsonl`)
+
+  writeFileSync(rolloutPath, [
+    JSON.stringify({ timestamp: '2026-11-23T10:00:00Z', type: 'session_meta', payload: { id: sessionUuid, session_id: sessionUuid, account_scoped: true, creator_user_id: 'u4-u', creator_account_id: 'u4-a', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:01Z', type: 'turn_context', payload: { turn_id: 't1', cwd: f.root } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:02Z', type: 'event_msg', payload: { type: 'token_count', total_tokens: 100 } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:03Z', type: 'event_msg', payload: { type: 'item_completed', item_id: 'i1' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:04Z', type: 'event_msg', payload: { type: 'agent_reasoning', text: 'hidden_private_thought_999' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:05Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Literal answer with discriminative_u4_token_777' }] } })
+  ].join('\n') + '\n')
+
+  // 1. Grant without allowLexicalIndex -> search returns LEXICAL_INDEX_NOT_AUTHORIZED
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u4-lexical',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash, allowLexicalIndex: false } }
+  }))
+
+  const listed = await f.call('list_agent_sessions', { ...f.target })
+  const deepen = listed.data.sessions[0].deepen.arguments
+  const map = await f.call('inspect_agent_session', deepen)
+  expect(map.isError).toBe(false)
+  expect(map.data.recordCoverage).toMatchObject({
+    recordsTotal: 6,
+    recordsAddressable: 6,
+    typed: 1,
+    opaque: 5,
+    unavailable: 0,
+    interpretedContentCoverage: 'PARTIAL',
+    opaqueBreakdown: {
+      protocolMetadata: 4,
+      unqualifiedContent: 1,
+      unrecognizedFormat: 0,
+      unavailable: 0
+    }
+  })
+
+  const deniedSearch = await f.call('search_agent_session_evidence', {
+    ...f.target,
+    query: 'discriminative_u4_token_777',
+    limit: 5
+  })
+  expect(deniedSearch.isError).toBe(false)
+  expect(deniedSearch.data.hits).toHaveLength(0)
+  expect(deniedSearch.data.coverage.nativeSource).toMatchObject({
+    state: 'LEXICAL_INDEX_NOT_AUTHORIZED',
+    reason: 'LEXICAL_INDEX_NOT_AUTHORIZED',
+    next: { action: 'ENABLE_LEXICAL_INDEX', requires: ['allowLexicalIndex'] }
+  })
+
+  // 2. Enable allowLexicalIndex -> FTS5 indexes typed content (not private reasoning) and returns deepening selector
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u4-lexical',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash, allowLexicalIndex: true } }
+  }))
+  const refreshed = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: deepen.sourceSessionId })
+  expect(refreshed.data.state).toBe('READY')
+
+  const allowedSearch = await f.call('search_agent_session_evidence', {
+    ...f.target,
+    query: 'discriminative_u4_token_777',
+    limit: 5
+  })
+  expect(allowedSearch.isError).toBe(false)
+  expect(allowedSearch.data.coverage.nativeSource.state).toBe('READY')
+  expect(allowedSearch.data.hits).toHaveLength(1)
+  const hit = allowedSearch.data.hits[0]
+  expect(JSON.stringify(hit)).not.toContain('Literal answer')
+  const readHit = await f.call('read_agent_session_event', hit.deepen.arguments)
+  expect(readHit.data.content).toBe('Literal answer with discriminative_u4_token_777')
+
+  const reasoningSearch = await f.call('search_agent_session_evidence', {
+    ...f.target,
+    query: 'hidden_private_thought_999',
+    limit: 5
+  })
+  expect(reasoningSearch.data.hits).toHaveLength(0)
 }, 60_000)

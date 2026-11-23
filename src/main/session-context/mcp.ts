@@ -886,14 +886,27 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
       ...((!Array.isArray(observedEvents) || observedEvents.length || hookObserved) ? { observedEvents } : {}),
       sourceEventCount: summary.eventCount,
       omittedSourceEvents: summary.omittedRecords,
-      recordCoverage: {
-        recordsTotal: summary.recordsTotal,
-        recordsAddressable: summary.recordsAddressable,
-        typed: summary.typedRecords,
-        opaque: summary.opaqueRecords,
-        unavailable: summary.unavailableRecords,
-        coverage: summary.recordsAddressable === summary.recordsTotal && summary.unavailableRecords === 0 ? 'COMPLETE' : 'PARTIAL'
-      },
+      recordCoverage: (() => {
+        const bd = summary.opaqueBreakdown ?? {
+          protocolMetadata: 0,
+          unrecognizedFormat: summary.opaqueRecords,
+          unqualifiedContent: 0,
+          unavailable: summary.unavailableRecords
+        }
+        const interpretedContentCoverage = summary.typedRecords === 0
+          ? 'UNKNOWN'
+          : (bd.unrecognizedFormat === 0 && bd.unqualifiedContent === 0 && summary.unavailableRecords === 0 ? 'COMPLETE' : 'PARTIAL')
+        return {
+          recordsTotal: summary.recordsTotal,
+          recordsAddressable: summary.recordsAddressable,
+          typed: summary.typedRecords,
+          opaque: summary.opaqueRecords,
+          unavailable: summary.unavailableRecords,
+          opaqueBreakdown: bd,
+          interpretedContentCoverage,
+          coverage: summary.recordsAddressable === summary.recordsTotal && summary.unavailableRecords === 0 ? 'COMPLETE' : 'PARTIAL'
+        }
+      })(),
       ...(summary.sourceVariant ? { sourceVariant: summary.sourceVariant } : {}),
       ...(summary.coexistingVariants?.length ? { coexistingVariants: summary.coexistingVariants } : {}),
       sourceTypeCounts: summary.sourceTypeCounts,

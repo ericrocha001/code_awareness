@@ -81,6 +81,7 @@ export interface EvidenceHit {
 export interface EvidenceSourceCoverage {
   state: string
   reason?: string
+  next?: Record<string, unknown>
 }
 
 export interface EvidenceSearchEnvelope {
@@ -779,7 +780,14 @@ export function executeSearchEvidence(
       return { state: 'UNAVAILABLE', reason: 'LEXICAL_INDEX_UNAVAILABLE' }
     }
     if (query.query && allowedProviders.length === 0) {
-      return { state: 'NOT_INDEXED', reason: lexicalOptInMissing ? 'LEXICAL_INDEX_OPT_IN_REQUIRED' : 'NO_GRANTED_NATIVE_SOURCE' }
+      if (lexicalOptInMissing) {
+        return {
+          state: 'LEXICAL_INDEX_NOT_AUTHORIZED',
+          reason: 'LEXICAL_INDEX_NOT_AUTHORIZED',
+          next: { action: 'ENABLE_LEXICAL_INDEX', requires: ['allowLexicalIndex'] }
+        }
+      }
+      return { state: 'NOT_INDEXED', reason: 'NO_GRANTED_NATIVE_SOURCE' }
     }
     if (allowedProviders.length === 0) {
       const configuredAny = codexGrant.configured || agGrant.configured
@@ -795,10 +803,13 @@ export function executeSearchEvidence(
       sourceSessionId: query.sourceSessionId
     }, 0, 1).length
     if (readyCount === 0) {
+      const refreshNext = query.nativeSession && query.sourceSessionId
+        ? { next: { tool: 'refresh_agent_sessions', arguments: { nativeSession: query.nativeSession, sourceSessionId: query.sourceSessionId } } }
+        : {}
       if (store.references.native.hasPendingCheckpoints(store.repositoryId, effectiveWorktree?.worktreeId, effectiveWorktree?.generation)) {
-        return { state: 'INDEXING_PENDING' }
+        return { state: 'INDEXING_PENDING', reason: 'INDEXING_PENDING', ...refreshNext }
       }
-      return { state: 'NON_INDEXED' }
+      return { state: 'NON_INDEXED', ...refreshNext }
     }
     if (lexicalMixedOptIn) return { state: 'PARTIAL', reason: 'LEXICAL_OPT_IN_PARTIAL' }
     if (query.types?.some(t => !NATIVE_SOURCE_TYPES.has(t))) return { state: 'PARTIAL', reason: 'UNSUPPORTED_EVENT_TYPE_FILTER' }

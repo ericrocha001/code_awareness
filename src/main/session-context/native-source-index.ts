@@ -8,7 +8,8 @@ import {
   type NativeIndexedDiagnosticRef,
   type NativeIndexedEventRow,
   type NativeSessionReferences,
-  type NativeSourceRecordSummary
+  type NativeSourceRecordSummary,
+  type OpaqueRecordBreakdown
 } from './native-session-references'
 import type { NativeSourceEventType } from './native-source-events'
 
@@ -35,6 +36,7 @@ export interface NativeIndexerState {
   typedRecords: number
   opaqueRecords: number
   unavailableRecords: number
+  opaqueBreakdown: OpaqueRecordBreakdown
   omittedRecords: number
   currentTurnId?: string
   typeCounts: Record<string, number>
@@ -59,6 +61,7 @@ export function createInitialIndexerState(attemptCoverage: string): NativeIndexe
     typedRecords: 0,
     opaqueRecords: 0,
     unavailableRecords: 0,
+    opaqueBreakdown: { protocolMetadata: 0, unrecognizedFormat: 0, unqualifiedContent: 0, unavailable: 0 },
     omittedRecords: 0,
     typeCounts: {},
     toolStats: {},
@@ -247,6 +250,10 @@ export function emitOpaqueRecord(
   }
   acc.events.push(row)
   acc.state.opaqueRecords++
+  if (!acc.state.opaqueBreakdown) acc.state.opaqueBreakdown = { protocolMetadata: 0, unrecognizedFormat: 0, unqualifiedContent: 0, unavailable: 0 }
+  if (input.limitation === 'PROTOCOL_METADATA') acc.state.opaqueBreakdown.protocolMetadata++
+  else if (input.limitation === 'UNQUALIFIED_CONTENT' || input.limitation === 'EMPTY_RECORD') acc.state.opaqueBreakdown.unqualifiedContent++
+  else acc.state.opaqueBreakdown.unrecognizedFormat++
   return row
 }
 
@@ -276,6 +283,8 @@ export function emitUnavailableRecord(
   }
   acc.events.push(row)
   acc.state.unavailableRecords++
+  if (!acc.state.opaqueBreakdown) acc.state.opaqueBreakdown = { protocolMetadata: 0, unrecognizedFormat: 0, unqualifiedContent: 0, unavailable: 0 }
+  acc.state.opaqueBreakdown.unavailable++
   acc.state.omittedRecords++
   return row
 }
@@ -350,6 +359,12 @@ export function buildSummaryFromState(meta: {
     typedRecords,
     opaqueRecords,
     unavailableRecords,
+    opaqueBreakdown: state.opaqueBreakdown ?? {
+      protocolMetadata: 0,
+      unrecognizedFormat: opaqueRecords,
+      unqualifiedContent: 0,
+      unavailable: unavailableRecords
+    },
     ...(meta.sourceVariant ? { sourceVariant: meta.sourceVariant } : {}),
     ...(meta.coexistingVariants?.length ? { coexistingVariants: meta.coexistingVariants } : {}),
     sourceCoverage: meta.sourceCoverage,
