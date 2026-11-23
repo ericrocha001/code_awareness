@@ -379,9 +379,12 @@ export class ChannelMcpAdapter {
       null
     const scope = parsed?.scope === 'GLOBAL' || parsed?.scope === 'PROJECT' ? parsed.scope : 'UNKNOWN'
     const isErr = toolResult.isError === true
+    const isHistoryMetadataOnly =
+      name === 'get_academy_skill_history' &&
+      (argObj?.metadataOnly === true || !(parsed?.package && typeof parsed.package === 'object'))
     const observationClass = isErr
       ? 'ATTEMPT_FAILED_OR_REFUSED'
-      : name === 'list_academy_skills'
+      : name === 'list_academy_skills' || isHistoryMetadataOnly
         ? 'DISCOVERED_MANIFEST_FETCHED'
         : 'CONTENT_DELIVERED'
     try {

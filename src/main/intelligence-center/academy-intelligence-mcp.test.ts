@@ -396,12 +396,81 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
     expect(q21Missing.isError).toBe(false)
     expect(q21Missing.data.evidence.q21Diagnosis.discriminativeGap).toBe('MISSING_LINKED_FAILURE_OR_SKILL')
 
-    // 10. Verify SQLite does NOT persist Skill body
+    // 10. Negative discriminatives for native events & metadataOnly history (must NEVER become CONTENT_DELIVERED)
+    const { sessionId: nativeNegSessionId } = store.ingest({
+      providerSessionId: 'native-sess-neg-disc',
+      providerVersion: '0.169.0',
+      agent: 'codex',
+      state: 'ENDED',
+      endedAt: '2026-11-23T01:10:00.000Z',
+      coverage: 'PARTIAL',
+      importState: 'METADATA_ONLY',
+      sourceDigest: digest('native-sess-neg-disc'),
+      sourceBytes: 0
+    }, [])
+
+    const extractedCount = store.skillIntelligence.extractFromNativeEvents(nativeNegSessionId, [
+      // (a) Unpaired TOOL_CALL read without TOOL_RESULT -> UNKNOWN attempt, NEVER CONTENT_DELIVERED
+      {
+        ordinal: 1,
+        type: 'TOOL_CALL',
+        tool: 'resources/read',
+        callId: 'call-unpaired-1',
+        content: JSON.stringify({ uri: skillRootUri })
+      },
+      // (b) metadataOnly get_academy_skill_history -> DISCOVERED_MANIFEST_FETCHED, NEVER CONTENT_DELIVERED
+      {
+        ordinal: 2,
+        type: 'TOOL_CALL',
+        tool: 'get_academy_skill_history',
+        callId: 'call-hist-meta-1',
+        content: JSON.stringify({ skillId, metadataOnly: true })
+      },
+      {
+        ordinal: 3,
+        type: 'TOOL_RESULT',
+        tool: 'get_academy_skill_history',
+        callId: 'call-hist-meta-1',
+        content: JSON.stringify({ id: skillId, versions: [{ version: 1, packageHash: v1Hash }] })
+      }
+    ])
+    expect(extractedCount).toBe(2)
+
+    const q20NativeNeg = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { sessionId: nativeNegSessionId }
+    })
+    expect(q20NativeNeg.isError).toBe(false)
+    expect(q20NativeNeg.data.evidence.decisionSignal.delivered).toEqual([])
+    expect(q20NativeNeg.data.evidence.decisionSignal.attempted).toEqual([
+      expect.objectContaining({
+        operation: 'resources/read',
+        operationStatus: 'UNKNOWN',
+        errorCode: 'UNPAIRED_TOOL_CALL'
+      })
+    ])
+    expect(q20NativeNeg.data.evidence.decisionSignal.discovered).toEqual([
+      expect.objectContaining({
+        skillId,
+        operation: 'get_academy_skill_history'
+      })
+    ])
+
+    // Also verify MCP tools/call get_academy_skill_history with metadataOnly:true is NOT CONTENT_DELIVERED
+    const mcpHistMeta = await mcpCall('get_academy_skill_history', { skillId, metadataOnly: true })
+    expect(mcpHistMeta.isError).toBe(false)
+    const boundAfterHist = store.skillIntelligence.querySkillEvents({ sessionId: boundSessionId, limit: 20 })
+    const histEvt = boundAfterHist.events.find(e => e.operation === 'get_academy_skill_history')
+    expect(histEvt).toBeDefined()
+    expect(histEvt!.observationClass).toBe('DISCOVERED_MANIFEST_FETCHED')
+
+    // 11. Verify SQLite does NOT persist Skill body
     const rawDb = new Database(storePath, { readonly: true })
     const rows = rawDb.prepare('SELECT * FROM skill_events').all()
     rawDb.close()
     expect(JSON.stringify(rows)).not.toContain('UNIQUE_SECRET_BODY_V1')
     expect(JSON.stringify(rows)).not.toContain('UNIQUE_SECRET_BODY_V2')
     expect(readFileSync(storePath, 'latin1')).not.toContain('UNIQUE_SECRET_BODY_V1')
-  })
+  }, 30_000)
 })
