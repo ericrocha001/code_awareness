@@ -167,19 +167,50 @@ export class GitOperationsService {
   }
   async deliveryProjectionPage(after?: string): Promise<DeliveryProjectionPage> {
     const page = await this.git.operationReceiptPage(this.repoRoot, after)
-    const observations: DeliveryProjectionPage['observations'] = []
+    const candidates: Array<{ observation: DeliveryProjectionPage['observations'][number]; allowMergeParents: boolean }> = []
     for (const { receipt, sha } of page.receipts) {
       const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
-      if (receipt.deliveryVerified !== true || !parsed.success || receipt.status !== 'COMPLETED' || !['commit_git_changes', 'mutate_worktree'].includes(receipt.operation) || !receipt.result || receipt.result.isError) continue
+      if (
+        receipt.deliveryVerified !== true ||
+        !parsed.success ||
+        receipt.status !== 'COMPLETED' ||
+        typeof receipt.completedAt !== 'string' ||
+        typeof receipt.operationId !== 'string' ||
+        !receipt.operationId ||
+        !/^[a-f0-9]{64}$/.test(receipt.argumentFingerprint) ||
+        !['commit_git_changes', 'mutate_worktree', 'merge_git_branch', 'revert_git_commit'].includes(receipt.operation) ||
+        !receipt.result ||
+        receipt.result.isError
+      ) continue
       if (parsed.data.repositoryId !== this.coordinationIdentity?.repositoryId) continue
       const text = receipt.result.content?.[0]?.text
       if (typeof text !== 'string') continue
       let result: Record<string, unknown>
       try { result = JSON.parse(text) as Record<string, unknown> } catch { continue }
+      if (receipt.operation === 'mutate_worktree' && typeof result.worktreeId === 'string' && result.worktreeId !== parsed.data.snapshot.worktreeId) continue
+      if (receipt.operation === 'merge_git_branch' && result.result !== 'MERGED') continue
+      if (receipt.operation === 'revert_git_commit' && result.result !== 'REVERTED') continue
       const commitSha = typeof result.sha === 'string' ? result.sha : result.head
-      if (typeof commitSha !== 'string' || !/^[a-f0-9]{40}$/.test(commitSha) || result.parent !== parsed.data.snapshot.head) continue
-      observations.push({ receiptId: sha, operationId: receipt.operationId, operation: receipt.operation as 'commit_git_changes' | 'mutate_worktree', argumentFingerprint: receipt.argumentFingerprint, anchor: parsed.data, commitSha })
+      if (typeof commitSha !== 'string' || !/^[a-f0-9]{40}$/.test(commitSha)) continue
+      if ((receipt.operation === 'commit_git_changes' || receipt.operation === 'mutate_worktree') && result.parent !== parsed.data.snapshot.head) continue
+      candidates.push({
+        allowMergeParents: receipt.operation === 'merge_git_branch',
+        observation: { receiptId: sha, operationId: receipt.operationId, operation: receipt.operation as DeliveryProjectionPage['observations'][number]['operation'], argumentFingerprint: receipt.argumentFingerprint, anchor: parsed.data, commitSha }
+      })
     }
+    let verifiedObjects: Map<string, { sha: string; parents: string[] }> | undefined
+    const candidateShas = [...new Set(candidates.map(c => c.observation.commitSha).filter((sha): sha is string => typeof sha === 'string'))]
+    if (candidateShas.length && typeof this.git.getCommitOperationObjects === 'function') {
+      const objects = await this.git.getCommitOperationObjects(this.repoRoot, candidateShas)
+      verifiedObjects = new Map(objects.map(obj => [obj.sha, obj]))
+    }
+    const observations = candidates
+      .filter(({ observation, allowMergeParents }) => {
+        if (!verifiedObjects || !observation.commitSha) return true
+        const obj = verifiedObjects.get(observation.commitSha)
+        return Boolean(obj && obj.parents.length >= 1 && (allowMergeParents || obj.parents.length === 1) && obj.parents[0] === observation.anchor.snapshot.head)
+      })
+      .map(c => c.observation)
     return { observations, nextCursor: page.nextCursor }
   }
   async deliverySnapshot(worktreeId?: string) {

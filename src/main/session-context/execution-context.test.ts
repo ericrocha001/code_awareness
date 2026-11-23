@@ -348,3 +348,55 @@ it('projects Antigravity contextual/delegated lineage without elevating to verif
     relevantCoverage: { causalSession: { state: 'PARTIAL' } }
   })
 })
+
+it('U3: separates executionCommit/deliveryLink from CONTEXTUAL_ONLY_NO_HOST_WITNESS causalSession and exposes drainage details', async () => {
+  const f = fixture(), execId = 'exec-u3-ag', invId = 'd'.repeat(64)
+  const s1 = 'antigravity-native:' + 'e'.repeat(64)
+  f.store.registry.applyAll([
+    {
+      repositoryId: 'repo', source: 'DELIVERY_GIT:' + digest('op-1'), revision: '1', status: 'COMPLETE',
+      artifactLabels: [{ id: plan1, snapshot: { id: plan1, title: 'Plan U3', artifactKind: 'EXECUTABLE_PLAN', status: 'PENDING', revision: 1, contentHash: digest('plan-u3'), freshness: 'CURRENT_REVISION_AT_PROJECTION' } }],
+      edges: [
+        edge(entity('ARTIFACT', plan1 + ':1'), entity('EXECUTION', execId), 'OPERATION_EXECUTION_CONTEXT', 'execution-context'),
+        edge(entity('ARTIFACT', plan1), entity('ARTIFACT', plan1 + ':1'), 'CONTINUUM_REVISION', 'revision'),
+        edge(entity('EXECUTION', execId), entity('COMMIT', commit), 'OPERATION_EXECUTION_CONTEXT', 'delivery-context'),
+        edge(entity('COMMIT', commit), entity('PR', '42'), 'GITHUB_COMMIT_LIST', 'member-of')
+      ]
+    },
+    {
+      repositoryId: 'repo', source: 'NATIVE_HOOK:ag-u3', revision: '1', status: 'COMPLETE',
+      edges: [
+        edge(entity('SESSION', s1), entity('EXECUTION', execId), 'EXECUTION_CONTEXT_OBSERVED', 'observed-in-execution'),
+        edge(entity('SESSION', s1), entity('EXECUTION', 'native-invocation:' + invId), 'EXECUTION_CONTEXT_OBSERVED', 'invoked')
+      ]
+    },
+    {
+      repositoryId: 'repo', source: 'NATIVE_GIT:' + invId, revision: digest('CONTEXTUAL_ONLY_NO_HOST_WITNESS'),
+      status: 'UNSUPPORTED', cursor: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS', edges: []
+    },
+    { repositoryId: 'repo', source: 'DELIVERY_GIT', revision: 'r1', cursor: 'c1', status: 'PARTIAL', edges: [] },
+    { repositoryId: 'repo', source: 'DELIVERY_GIT:DIAGNOSTIC', revision: 'd1', cursor: JSON.stringify({ reasonCode: 'BACKLOG_PENDING', stage: 'DELIVERY_PAGE' }), status: 'BACKLOG_PENDING', edges: [] }
+  ], () => {})
+
+  const workRes = JSON.parse(((await f.call({ selector: { type: 'COMMIT', id: commit }, view: 'WORK' }, undefined, true)).content[0] as { text: string }).text)
+  expect(workRes).toMatchObject({
+    workLink: { state: 'FOUND', weakestLink: 'OBSERVED' },
+    executionCommit: { state: 'FOUND' },
+    deliveryLink: { state: 'VERIFIED' },
+    causalSession: { state: 'CONTEXTUAL_ONLY', reason: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS' },
+    reconciliation: {
+      backlog: {
+        pending: true,
+        details: expect.arrayContaining([
+          expect.objectContaining({ source: 'DELIVERY_GIT', drainState: 'PENDING', cursor: 'c1', nextStep: 'ADVANCE_CURSOR' })
+        ])
+      }
+    }
+  })
+
+  f.store.registry.apply({ repositoryId: 'repo', source: 'DELIVERY_GIT', revision: 'r2', cursor: '', status: 'COMPLETE', edges: [] }, 'r1')
+  const drainedRes = JSON.parse(((await f.call({ selector: { type: 'COMMIT', id: commit }, view: 'WORK' }, undefined, true)).content[0] as { text: string }).text)
+  expect(drainedRes.reconciliation.backlog.details).toEqual(expect.arrayContaining([
+    expect.objectContaining({ source: 'DELIVERY_GIT', drainState: 'DRAINED', pending: false, nextStep: 'NONE' })
+  ]))
+})
