@@ -33,3 +33,16 @@ export const ALLOWED_WEB_MCP_TOOLS = new Set<string>([
   'inspect_artifact_structure',
   'read_artifact_section'
 ])
+const DEEPSEEK_METHODS: ReadonlySet<string> = new Set(['tools/list', 'tools/call'])
+const DEEPSEEK_TOOLS: ReadonlySet<string> = new Set([
+  'list_artifacts',
+  'inspect_artifact_structure',
+  'read_artifact_section',
+  'get_artifact'
+])
+
+export function webMcpPolicy(site: string | null): { methods: ReadonlySet<string>; tools: ReadonlySet<string> } {
+  return site === 'deepseek'
+    ? { methods: DEEPSEEK_METHODS, tools: DEEPSEEK_TOOLS }
+    : { methods: ALLOWED_WEB_MCP_METHODS, tools: ALLOWED_WEB_MCP_TOOLS }
+}

@@ -10,7 +10,7 @@ import {
   type ParsedActivationCall
 } from './activation-contract'
 import { deepEqualFrontmatter, parseSkillFrontmatter } from './skill-frontmatter'
-import { ALLOWED_WEB_MCP_TOOLS } from './web-allowlist'
+import { webMcpPolicy } from './web-allowlist'
 
 export type ActivationSessionState =
   | 'INACTIVE'
@@ -607,6 +607,7 @@ export class ActivationSession {
   }
 
   async refreshCatalog(): Promise<{ changed: boolean; catalogRevision: string | null }> {
+    if (this.site === 'deepseek') return { changed: false, catalogRevision: null }
     const previousRevision = this.catalogRevision
     const skillsRes = await this.transport.mcpRequest({
       method: 'skills/list',
@@ -656,7 +657,7 @@ export class ActivationSession {
     this.catalogTools = []
     this.fullToolsByName.clear()
     for (const item of rawTools) {
-      if (typeof item?.name !== 'string' || !ALLOWED_WEB_MCP_TOOLS.has(item.name)) continue
+      if (typeof item?.name !== 'string' || !webMcpPolicy(this.site).tools.has(item.name)) continue
       const compact: BootstrapToolSummary = {
         name: item.name,
         ...(typeof item.description === 'string' ? { description: item.description } : {})
@@ -694,6 +695,36 @@ export class ActivationSession {
     this.instanceId = status.instanceId ?? null
     this.bindingId = status.bindingId ?? null
     this.sessionNonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+
+    if (this.site === 'deepseek') {
+      const inventory = await this.ensureToolsInventory()
+      if (!inventory.ok) return this.handleActivateError(inventory.res)
+      const descriptions: Record<string, string> = {
+        list_artifacts: 'Discover artifacts by metadata.',
+        inspect_artifact_structure: 'Inspect the outline of an artifact.',
+        read_artifact_section: 'Read a selected section at the inspected revision.',
+        get_artifact: 'Read the complete artifact when needed.'
+      }
+      const bootstrapPrompt = [
+        '[Code Awareness Local Context · Continuum Read-Only]',
+        'Use only these reads in the active repository:',
+        ...this.catalogTools.map(({ name }) => {
+          const schema = this.fullToolsByName.get(name)?.inputSchema
+          const required = Array.isArray(schema?.required) ? schema.required.join(', ') : ''
+          return `- ${name}: ${descriptions[name]}${required ? ` Required: ${required}.` : ''}`
+        }),
+        'Discover by metadata, inspect structure, then read the selected section. Use get_artifact only when the complete artifact is needed.',
+        'Emit one fenced code-awareness-call JSON envelope and wait for the correlated code-awareness-result. Use a unique requestId for every call.',
+        'Example tools.call params: {"name":"list_artifacts","arguments":{}}',
+        'Example envelope:',
+        '```code-awareness-call',
+        JSON.stringify({ protocol: ACTIVATION_CONTRACT_PROTOCOL, requestId: 'example-schema-1', method: 'tools.schema', params: { name: 'list_artifacts' } }),
+        '```'
+      ].join('\n')
+      this.state = 'READY'
+      this.activeChatPresence.add('bootstrap://activation-contract')
+      return { state: 'READY', bootstrapPrompt, skills: [], catalogRevision: null }
+    }
 
     const skillsRes = await this.transport.mcpRequest({
       method: 'skills/list',
@@ -750,7 +781,10 @@ export class ActivationSession {
     }
   }
 
-  async processAssistantTurn(turn: AssistantTurnInput): Promise<ProcessTurnResult> {
+  async processAssistantTurn(
+    turn: AssistantTurnInput,
+    trace?: (requestId: string, stage: 'PARSED' | 'PARSE_REJECTED' | 'MCP_DISPATCHED' | 'MCP_SETTLED') => void
+  ): Promise<ProcessTurnResult> {
     if (this.state === 'INACTIVE' || this.state === 'REVOKED' || this.state === 'UNAVAILABLE') {
       return {
         state: this.state,
@@ -788,6 +822,11 @@ export class ActivationSession {
 
     for (const bad of parsed.rejected) {
       const requestId = bad.requestId ?? 'invalid'
+      trace?.(requestId, 'PARSE_REJECTED')
+      if (this.site === 'deepseek') {
+        if (this.turnCycleCount >= this.maxCyclesPerUserTurn) break
+        this.turnCycleCount += 1
+      }
       emulatedResponses.push(
         formatActivationResultEnvelope({
           protocol: ACTIVATION_CONTRACT_PROTOCOL,
@@ -802,7 +841,10 @@ export class ActivationSession {
 
     for (let i = 0; i < parsed.calls.length; i += 1) {
       const call = parsed.calls[i]
+      trace?.(call.requestId, 'PARSED')
+      if (this.site === 'deepseek' && this.turnCycleCount >= this.maxCyclesPerUserTurn) break
       if (this.seenRequestIds.has(call.requestId)) {
+        if (this.site === 'deepseek') this.turnCycleCount += 1
         emulatedResponses.push(
           formatActivationResultEnvelope({
             protocol: ACTIVATION_CONTRACT_PROTOCOL,
@@ -846,7 +888,7 @@ export class ActivationSession {
       this.turnCycleCount += 1
       this.state = 'WAITING_TOOL'
 
-      const resultEnvelope = await this.executeCallWithDeadline(call)
+      const resultEnvelope = await this.executeCallWithDeadline(call, trace)
       emulatedResponses.push(formatActivationResultEnvelope(resultEnvelope))
       executedCalls.push({
         requestId: call.requestId,
@@ -876,7 +918,10 @@ export class ActivationSession {
     }
   }
 
-  private async executeCallWithDeadline(call: ParsedActivationCall): Promise<ActivationEnvelopeResultPayload> {
+  private async executeCallWithDeadline(
+    call: ParsedActivationCall,
+    trace?: (requestId: string, stage: 'MCP_DISPATCHED' | 'MCP_SETTLED') => void
+  ): Promise<ActivationEnvelopeResultPayload> {
     const startSessionGen = this.sessionGeneration
     const callToken = ++this.activeCallToken
     let settled = false
@@ -910,7 +955,7 @@ export class ActivationSession {
       })
 
       const executionPromise = Promise.resolve()
-        .then(() => this.executeSingleCall(call, guard))
+        .then(() => this.executeSingleCall(call, guard, trace))
         .catch((err): ActivationEnvelopeResultPayload => ({
           protocol: ACTIVATION_CONTRACT_PROTOCOL,
           requestId: call.requestId,
@@ -988,10 +1033,21 @@ export class ActivationSession {
 
   private async executeSingleCall(
     call: ParsedActivationCall,
-    guard: () => boolean = () => true
+    guard: () => boolean = () => true,
+    trace?: (requestId: string, stage: 'MCP_DISPATCHED' | 'MCP_SETTLED') => void
   ): Promise<ActivationEnvelopeResultPayload> {
-    if (call.method === 'tools.schema' || call.method === 'tools/describe') {
+    if (call.method === 'tools.schema' || (this.site !== 'deepseek' && call.method === 'tools/describe')) {
       return await this.executeToolsSchemaCall(call.requestId, call.params)
+    }
+
+    if (this.site === 'deepseek' && call.method !== 'tools.call' && call.method !== 'tools/call') {
+      return {
+        protocol: ACTIVATION_CONTRACT_PROTOCOL,
+        requestId: call.requestId,
+        server: this.serverId,
+        ok: false,
+        error: { code: 'METHOD_NOT_ALLOWED', message: 'DeepSeek supports only Continuum tool calls and schema lookup' }
+      }
     }
 
     if (call.method === 'skills.load') {
@@ -1051,7 +1107,7 @@ export class ActivationSession {
 
     if (normalizedMethod === 'tools/call') {
       const toolName = typeof call.params.name === 'string' ? call.params.name.trim() : ''
-      if (!ALLOWED_WEB_MCP_TOOLS.has(toolName)) {
+      if (!webMcpPolicy(this.site).tools.has(toolName)) {
         return {
           protocol: ACTIVATION_CONTRACT_PROTOCOL,
           requestId: call.requestId,
@@ -1072,13 +1128,14 @@ export class ActivationSession {
       }
     }
 
+    trace?.(call.requestId, 'MCP_DISPATCHED')
     const res = await this.transport.mcpRequest({
       method: normalizedMethod,
       params: outboundParams,
       expectedProjectId: this.projectId,
       expectedBindingId: this.bindingId,
       expectedInstanceId: this.instanceId
-    })
+    }).finally(() => trace?.(call.requestId, 'MCP_SETTLED'))
 
     if (!res.ok) {
       if (!guard()) {
@@ -1192,7 +1249,7 @@ export class ActivationSession {
     }
 
     for (const toolName of requestedNames) {
-      if (!ALLOWED_WEB_MCP_TOOLS.has(toolName)) {
+      if (!webMcpPolicy(this.site).tools.has(toolName)) {
         return {
           protocol: ACTIVATION_CONTRACT_PROTOCOL,
           requestId,

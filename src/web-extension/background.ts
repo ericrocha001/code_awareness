@@ -547,7 +547,14 @@ export function registerBackgroundServiceWorker(
   registerGlobalMaintenanceDebugHandle(maintenance)
 
   chromeApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    void router.handleMessage(message, sender).then((res) => {
+    void router.handleMessage(message, sender).catch(() => ({
+      ok: false,
+      error: {
+        code: 'BACKGROUND_REQUEST_FAILED',
+        message: 'Extension background could not complete the request',
+        details: { executionStateUnknown: true }
+      }
+    })).then((res) => {
       if (res && typeof res === 'object' && (res as { ok?: unknown }).ok === true) {
         maintenance.resetBackoff()
       }

@@ -20,6 +20,20 @@ Code Awareness connects external web AI chats (`https://chat.deepseek.com` and `
      - Bounded layer deadlines distinguish `TIMEOUT` (from `APP_UNAVAILABLE` and protocol errors): Local Channel pipe discovery `2.5s`, Native MCP HTTP `15s` (`AbortController`), Extension Native Port & one-shot `20s`, Content-to-Background runtime message `25s`, and logical composite call `75s`. Timeouts discard late mutations without retrying automatically.
      - Adapter dispatch distinguishes `PRE_DISPATCH_BLOCKED` (retaining only the formatted reply up to `60s` for event-driven recovery after revalidating epoch, conversation, consent, and Desktop binding without re-running MCP) from post-click `AWAITING_DELIVERY_ACK` (`10s` bounded DOM confirmation via new user turn + `code-awareness-result` correlation -> `DELIVERED` or non-retrying `DELIVERY_UNKNOWN`).
 
+## DeepSeek Continuum Read-Only
+
+Activate Code Awareness in an authorized DeepSeek conversation with the intended repository active in Desktop. The extension exchanges text envelopes with the chat and applies the existing metadata and literal-source consent checks.
+
+```code-awareness-call
+{"protocol":"code-awareness-activation/v1","requestId":"read-1","method":"tools.call","params":{"name":"list_artifacts","arguments":{"limit":5}}}
+```
+
+```code-awareness-call
+{"protocol":"code-awareness-activation/v1","requestId":"schema-1","method":"tools.schema","params":{"name":"read_artifact_section"}}
+```
+
+Use a unique request ID per call and wait for its result. Use `inspect_artifact_structure` and `read_artifact_section` for selected sections, or `get_artifact` for the full document.
+
 ## Packaging & Setup
 
 Build the Chrome MV3 extension (`dist/web-extension/`) and Native Messaging host bundle (`dist/web-activation/native-host.cjs`):

@@ -465,8 +465,16 @@ export interface ParsedResultEnvelopeSummary {
  * Extracts valid `code-awareness-result` envelopes from serialized or rendered chat turn text
  * for exact DOM delivery correlation without matching arbitrary prose.
  */
-export function extractActivationResultEnvelopes(markdown: string): ParsedResultEnvelopeSummary[] {
+export function extractActivationResultEnvelopes(
+  markdown: string,
+  allowUnlabelledTurn = false
+): ParsedResultEnvelopeSummary[] {
   const blocks = extractFencedBlocks(markdown, RESULT_FENCE_LANGUAGE)
+  if (allowUnlabelledTurn && blocks.length === 0) {
+    const text = markdown.trim()
+    const unlabelled = /^(`{3,}|~{3,})(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n\1$/.exec(text)
+    blocks.push({ info: RESULT_FENCE_LANGUAGE, body: unlabelled?.[2] ?? text, closed: true })
+  }
   const out: ParsedResultEnvelopeSummary[] = []
   for (const block of blocks) {
     if (!block.closed) continue

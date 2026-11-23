@@ -1,4 +1,4 @@
-import { ALLOWED_WEB_MCP_METHODS, ALLOWED_WEB_MCP_TOOLS } from '../../shared/web-activation/web-allowlist'
+import { ALLOWED_WEB_MCP_METHODS, ALLOWED_WEB_MCP_TOOLS, webMcpPolicy } from '../../shared/web-activation/web-allowlist'
 
 export { ALLOWED_WEB_MCP_METHODS, ALLOWED_WEB_MCP_TOOLS }
 
@@ -176,9 +176,11 @@ export function resolveSiteForWebOrigin(origin: string): WebSiteId | null {
 
 export function validateReadOnlyWebMcpRequest(
   method: string,
-  params: unknown
+  params: unknown,
+  site: string | null = null
 ): { ok: true } | { ok: false; code: 'METHOD_NOT_ALLOWED' | 'TOOL_NOT_ALLOWED' | 'INVALID_URI'; message: string } {
-  if (!ALLOWED_WEB_MCP_METHODS.has(method)) {
+  const policy = webMcpPolicy(site)
+  if (!policy.methods.has(method)) {
     return {
       ok: false,
       code: 'METHOD_NOT_ALLOWED',
@@ -191,7 +193,7 @@ export function validateReadOnlyWebMcpRequest(
       params && typeof params === 'object' && typeof (params as { name?: unknown }).name === 'string'
         ? (params as { name: string }).name.trim()
         : ''
-    if (!toolName || !ALLOWED_WEB_MCP_TOOLS.has(toolName)) {
+    if (!toolName || !policy.tools.has(toolName)) {
       return {
         ok: false,
         code: 'TOOL_NOT_ALLOWED',
