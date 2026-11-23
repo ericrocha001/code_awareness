@@ -38,6 +38,13 @@ export interface NativeTimeCoverage {
   missingTimestamps: number
 }
 
+export interface OpaqueRecordBreakdown {
+  protocolMetadata: number
+  unrecognizedFormat: number
+  unqualifiedContent: number
+  unavailable: number
+}
+
 export interface NativeSourceRecordSummary {
   nativeKey: string
   provider: 'codex' | 'antigravity'
@@ -61,6 +68,7 @@ export interface NativeSourceRecordSummary {
   typedRecords: number
   opaqueRecords: number
   unavailableRecords: number
+  opaqueBreakdown?: OpaqueRecordBreakdown
   sourceVariant?: string
   coexistingVariants?: string[]
   sourceCoverage: string
@@ -271,6 +279,7 @@ export class NativeSessionReferences {
         typedRecords INTEGER NOT NULL DEFAULT 0,
         opaqueRecords INTEGER NOT NULL DEFAULT 0,
         unavailableRecords INTEGER NOT NULL DEFAULT 0,
+        opaqueBreakdown TEXT,
         sourceVariant TEXT,
         coexistingVariants TEXT,
         updatedAt TEXT NOT NULL
@@ -355,6 +364,7 @@ export class NativeSessionReferences {
       'ALTER TABLE native_reference_sources ADD COLUMN typedRecords INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE native_reference_sources ADD COLUMN opaqueRecords INTEGER NOT NULL DEFAULT 0',
       'ALTER TABLE native_reference_sources ADD COLUMN unavailableRecords INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE native_reference_sources ADD COLUMN opaqueBreakdown TEXT',
       'ALTER TABLE native_reference_sources ADD COLUMN sourceVariant TEXT',
       'ALTER TABLE native_reference_sources ADD COLUMN coexistingVariants TEXT'
     ]) {
@@ -396,6 +406,7 @@ export class NativeSessionReferences {
       typedRecords: Number(row.typedRecords ?? row.lastOrdinal ?? 0),
       opaqueRecords: Number(row.opaqueRecords ?? 0),
       unavailableRecords: Number(row.unavailableRecords ?? 0),
+      ...(row.opaqueBreakdown ? { opaqueBreakdown: JSON.parse(String(row.opaqueBreakdown)) as OpaqueRecordBreakdown } : {}),
       ...(row.sourceVariant ? { sourceVariant: String(row.sourceVariant) } : {}),
       ...(row.coexistingVariants ? { coexistingVariants: JSON.parse(String(row.coexistingVariants)) as string[] } : {}),
       sourceCoverage: String(row.sourceCoverage),
@@ -606,15 +617,16 @@ export class NativeSessionReferences {
         INSERT OR REPLACE INTO native_reference_sources (
           nativeKey, provider, repositoryId, worktreeId, generation, sourceSessionId, locatorHash, normalizer, revision,
           fileIdentity, prefixDigest, tailOffset, tailDigest, sourceBytes, indexedBytes, eventCount, omittedRecords,
-          recordsTotal, recordsAddressable, typedRecords, opaqueRecords, unavailableRecords, sourceVariant, coexistingVariants,
+          recordsTotal, recordsAddressable, typedRecords, opaqueRecords, unavailableRecords, opaqueBreakdown, sourceVariant, coexistingVariants,
           sourceCoverage, attemptCoverage, timeCoverage, sourceTools, sourceTypeCounts, attemptSummary,
           errors, omittedErrors, danglingCalls, omittedDanglingCalls, turnCount, lastOrdinal, currentTurnId, openCallsJson, updatedAt
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
       `).run(
         persisted.nativeKey, persisted.provider, persisted.repositoryId, persisted.worktreeId, persisted.generation, persisted.sourceSessionId,
         persisted.locatorHash, persisted.normalizer, persisted.revision, persisted.fileIdentity, persisted.prefixDigest,
         persisted.tailOffset, persisted.tailDigest, persisted.sourceBytes, persisted.indexedBytes, persisted.eventCount, persisted.omittedRecords,
         persisted.recordsTotal, persisted.recordsAddressable, persisted.typedRecords, persisted.opaqueRecords, persisted.unavailableRecords,
+        persisted.opaqueBreakdown ? JSON.stringify(persisted.opaqueBreakdown) : null,
         persisted.sourceVariant ?? null, persisted.coexistingVariants ? JSON.stringify(persisted.coexistingVariants) : null,
         persisted.sourceCoverage, persisted.attemptCoverage, JSON.stringify(persisted.timeCoverage),
         JSON.stringify(persisted.sourceTools), JSON.stringify(persisted.sourceTypeCounts), JSON.stringify(persisted.attemptSummary),

@@ -3,6 +3,7 @@ import { Settings, X } from 'lucide-react'
 import { NAV_ITEMS, type NavId } from '../../config/navigation'
 import type { AntigravityUserHooksStatus, CodexUserHooksStatus } from '../../../../shared/types/codex-hooks-types'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
+import { SessionSourceGrantsControl } from '../SessionSourceGrantsControl/SessionSourceGrantsControl'
 import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
 
@@ -11,12 +12,14 @@ interface SettingsModalProps {
   ready: boolean
   saving: boolean
   error: string | null
+  activeRepositoryId?: string
+  activeWorktreeRoot?: string
   onSetVisible: (id: NavId, visible: boolean) => void
   onRestore: () => void
   onClose: () => void
 }
 
-export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRestore, onClose }: SettingsModalProps) {
+export function SettingsModal({ hidden, ready, saving, error, activeRepositoryId, activeWorktreeRoot, onSetVisible, onRestore, onClose }: SettingsModalProps) {
   const dialog = useRef<HTMLDialogElement>(null)
   const [automaticFetch, setAutomaticFetch] = useState<boolean | null>(null)
   const [gitSaving, setGitSaving] = useState(false)
@@ -280,6 +283,16 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       {antigravityNotice && <p role="status">{antigravityNotice}</p>}
       {antigravityError && <p role="alert">{antigravityError}</p>}
     </div>
+    {activeRepositoryId && (
+      <>
+        <div className="settings-intro">
+          <h3>Leitura local de sessões (Repositório ativo)</h3>
+        </div>
+        <div className="settings-list">
+          <SessionSourceGrantsControl repositoryId={activeRepositoryId} worktreeRoot={activeWorktreeRoot} mode="settings" />
+        </div>
+      </>
+    )}
     </div>
     <footer className="settings-footer">
       <p>Home e Configurações ficam sempre disponíveis.</p>

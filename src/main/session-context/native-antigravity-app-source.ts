@@ -412,6 +412,7 @@ export function discoverAntigravityAppSources(options: {
   after?: string
   before?: string
   limit?: number
+  offset?: number
   assertCurrent: () => void
 }): AntigravityAppDiscoveryResult {
   const status = readAntigravityAppGrantStatus(options.storePath, options.repositoryId)
@@ -464,8 +465,8 @@ export function discoverAntigravityAppSources(options: {
         `SELECT conversation_id, workspace_uris, last_modified_time
          FROM conversation_summaries
          ORDER BY last_modified_time DESC
-         LIMIT ?`
-      ).all(maxDiscoveryRows + 1) as Array<{ conversation_id?: unknown; workspace_uris?: unknown; last_modified_time?: unknown }>
+         LIMIT ? OFFSET ?`
+      ).all(maxDiscoveryRows + 1, options.offset ?? 0) as Array<{ conversation_id?: unknown; workspace_uris?: unknown; last_modified_time?: unknown }>
     } catch {
       return {
         sessions: [],

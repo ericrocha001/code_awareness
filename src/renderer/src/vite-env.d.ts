@@ -138,6 +138,7 @@ declare global {
       localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
       codexUserHooks?: import('../../shared/types/codex-hooks-types').CodexUserHooksApi
       antigravityUserHooks?: import('../../shared/types/codex-hooks-types').AntigravityUserHooksApi
+      sessionSourceGrants?: import('../../shared/types/session-source-grants-types').SessionSourceGrantsApi
       onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
       getSystemHealthDiagnosticReport: () => Promise<string>

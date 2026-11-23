@@ -132,6 +132,45 @@ function checkCodexWorktreeRoots(item: Record<string, unknown>, root: string, pr
   return item.runtime_workspace_roots.slice(1).every(isVisualizationRoot)
 }
 
+const KNOWN_CODEX_CLI_VERSIONS = new Set(['0.169.0-alpha.11.1', '0.171.0-alpha.13'])
+
+function qualifyCodexSessionMeta(
+  record: unknown,
+  expectedSessionId: string,
+  creatorAccountHash: string,
+  root: string,
+  profile: string
+): { ok: true; meta: Record<string, unknown> } | { ok: false; error: 'SOURCE_IDENTITY_CONFLICT' | 'SOURCE_FORMAT_UNSUPPORTED' | 'ORIGIN_UNVERIFIED' } {
+  const rec = record as { type?: unknown; payload?: Record<string, unknown> } | null
+  const meta = rec?.payload
+  if (
+    rec?.type !== 'session_meta' ||
+    !meta ||
+    typeof meta !== 'object' ||
+    meta.id !== expectedSessionId ||
+    typeof meta.session_id !== 'string' ||
+    !uuid.test(meta.session_id) ||
+    meta.account_scoped !== true ||
+    typeof meta.creator_account_id !== 'string' ||
+    !meta.creator_account_id ||
+    typeof meta.creator_user_id !== 'string' ||
+    !meta.creator_user_id ||
+    digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash
+  ) {
+    return { ok: false, error: 'SOURCE_IDENTITY_CONFLICT' }
+  }
+  const cliVersion = meta.cli_version
+  const validVersion = typeof cliVersion === 'string' && (KNOWN_CODEX_CLI_VERSIONS.has(cliVersion) || (cliVersion.trim().length > 0 && cliVersion.length <= 64))
+  const validFormat = validVersion && typeof meta.cwd === 'string' && Array.isArray(meta.runtime_workspace_roots) && meta.runtime_workspace_roots.length > 0
+  if (!validFormat) {
+    return { ok: false, error: 'SOURCE_FORMAT_UNSUPPORTED' }
+  }
+  if (!checkCodexWorktreeRoots(meta, root, profile)) {
+    return { ok: false, error: 'ORIGIN_UNVERIFIED' }
+  }
+  return { ok: true, meta }
+}
+
 function exactRollout(profile: string, id: string) {
   const sessions = join(profile, 'sessions')
   const stamp = Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16)
@@ -177,7 +216,8 @@ function canonicalIndexPathMatchesRoot(rawCwd: unknown, root: string): boolean {
 function indexedCodexCandidates(
   profile: string,
   root: string,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  offset = 0
 ): { usedIndex: true; truncated: boolean; candidates: { path: string; sessionId: string; mtimeMs: number }[] } | undefined {
   const dbPath = join(profile, 'state_5.sqlite')
   let stat: BigIntStats
@@ -204,8 +244,8 @@ function indexedCodexCandidates(
          FROM threads
          WHERE ${expr} = ?
          ORDER BY updated_at DESC
-         LIMIT ?`
-      ).all(comparableRoot, maxCandidateFiles + 1) as Array<{ id?: unknown; rollout_path?: unknown; cwd?: unknown; updated_at?: unknown }>
+         LIMIT ? OFFSET ?`
+      ).all(comparableRoot, maxCandidateFiles + 1, offset) as Array<{ id?: unknown; rollout_path?: unknown; cwd?: unknown; updated_at?: unknown }>
     } catch {
       return undefined
     }
@@ -236,6 +276,7 @@ export function discoverCodexSources(options: {
   after?: string
   before?: string
   limit?: number
+  offset?: number
   assertCurrent: () => void
 }): CodexDiscoveryResult {
   const grantStatus = readCodexGrantStatus(options.storePath, options.repositoryId)
@@ -263,7 +304,7 @@ export function discoverCodexSources(options: {
   let usedIndex = false
   let candidates: { path: string; sessionId: string; mtimeMs: number }[] = []
 
-  const indexed = indexedCodexCandidates(profile, root, options.assertCurrent)
+  const indexed = indexedCodexCandidates(profile, root, options.assertCurrent, options.offset ?? 0)
   if (indexed) {
     usedIndex = true
     truncated = indexed.truncated
@@ -325,11 +366,9 @@ export function discoverCodexSources(options: {
       headerBytesRead += bytesRead
       if (!line) continue
       const record = JSON.parse(line)
-      const meta = record?.payload
-      if (record?.type !== 'session_meta' || meta?.id !== item.sessionId || typeof meta.session_id !== 'string' || !uuid.test(meta.session_id) ||
-        meta.account_scoped !== true || typeof meta.creator_account_id !== 'string' || typeof meta.creator_user_id !== 'string' ||
-        digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash ||
-        meta.cli_version !== '0.169.0-alpha.11.1' || !checkCodexWorktreeRoots(meta, root, profile)) continue
+      const qualified = qualifyCodexSessionMeta(record, item.sessionId, creatorAccountHash, root, profile)
+      if (!qualified.ok) continue
+      const meta = qualified.meta
       const ts = typeof meta.timestamp === 'string' && Number.isFinite(Date.parse(meta.timestamp)) ? meta.timestamp : new Date(item.mtimeMs).toISOString()
       const tsMs = Date.parse(ts)
       if (afterMs !== undefined && tsMs < afterMs) continue
@@ -485,18 +524,8 @@ export function stepCodexSourceIndex(options: {
       const checkRoot = (value: unknown) => typeof value === 'string' && isAbsolute(value) && sameNativePath(realpathSync.native(value), root) && sameNativePath(resolve(value), root)
 
       if (ordinal === 1) {
-        if (
-          record?.type !== 'session_meta' ||
-          item?.id !== sourceSessionId ||
-          typeof item.session_id !== 'string' ||
-          !uuid.test(item.session_id) ||
-          item.account_scoped !== true ||
-          typeof item.creator_account_id !== 'string' ||
-          typeof item.creator_user_id !== 'string' ||
-          digest(JSON.stringify([item.creator_user_id, item.creator_account_id])) !== creatorAccountHash
-        ) throw new Error('SOURCE_IDENTITY_CONFLICT')
-        if (item.cli_version !== '0.169.0-alpha.11.1') throw new Error('SOURCE_FORMAT_UNSUPPORTED')
-        if (!checkCodexWorktreeRoots(item, root, profile)) throw new Error('ORIGIN_UNVERIFIED')
+        const qualified = qualifyCodexSessionMeta(rawRecord, sourceSessionId, creatorAccountHash, root, profile)
+        if (!qualified.ok) throw new Error(qualified.error)
         emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
         return
       }
@@ -510,6 +539,15 @@ export function stepCodexSourceIndex(options: {
         if (item.type === 'task_started' && typeof item.turn_id === 'string' && item.turn_id.length > 0 && item.turn_id.length <= 128) {
           acc.state.currentTurnId = item.turn_id
           emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
+        } else if (
+          item.type === 'item_completed' ||
+          item.type === 'token_count' ||
+          item.type === 'thread_settings_applied' ||
+          item.type === 'token_usage_record'
+        ) {
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'PROTOCOL_METADATA', lineStart, lineEnd })
+        } else if (item.type === 'agent_reasoning' || item.type === 'reasoning') {
+          emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNQUALIFIED_CONTENT', lineStart, lineEnd })
         } else if (item.type === 'turn_aborted' || item.type === 'error') {
           const turnId = typeof item.turn_id === 'string' && item.turn_id.length <= 128 ? item.turn_id : acc.state.currentTurnId
           const reason = typeof item.reason === 'string' ? item.reason : typeof item.message === 'string' ? item.message : String(item.type)
