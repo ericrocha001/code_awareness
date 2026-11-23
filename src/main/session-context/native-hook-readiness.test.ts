@@ -411,17 +411,18 @@ it('Antigravity ingests ANTIGRAVITY_NATIVE_HOOK envelopes, exposes readiness and
   expect(context.edges.every((edge: { evidenceKind: string }) => !edge.evidenceKind.startsWith('NATIVE_GIT_') && !edge.evidenceKind.startsWith('NATIVE_ARTIFACT_'))).toBe(true)
 }, 30000)
 
-it('diagnoses only the selected Antigravity IDE source and never reads an unqualified transcript', () => {
+it('diagnoses only the selected Antigravity App source and never reads an unqualified transcript', () => {
   const f = fixture()
   const store = f.store()
   const id = '019ba000-0000-7000-8000-000000000001'
   const hash = nativeDigest(JSON.stringify([store.repositoryId, 'antigravity', id]))
-  const profile = join(f.root, 'ide-profile')
+  const profile = join(f.root, '.gemini', 'antigravity')
   const config = join(dirname(store.path), 'session-context.provider.json')
-  const diagnose = (assertCurrent = () => {}) => antigravitySourceDiagnostic(store.path, store.repositoryId, hash, id, assertCurrent)
+  const diagnose = (assertCurrent = () => {}, locatorDigest?: string) =>
+    antigravitySourceDiagnostic(store.path, store.repositoryId, hash, id, assertCurrent, locatorDigest)
   expect(diagnose()).toBe('PROFILE_UNAVAILABLE')
-  mkdirSync(profile)
-  writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { antigravityIde: { profile } } }))
+  mkdirSync(profile, { recursive: true })
+  writeFileSync(config, JSON.stringify({ repositoryId: store.repositoryId, nativeSources: { antigravityApp: { profile, sessionHashes: [hash] } } }))
   expect(antigravitySourceDiagnostic(store.path, store.repositoryId, '0'.repeat(64), id, () => {})).toBe('IDENTITY_MISMATCH')
   expect(diagnose()).toBe('SOURCE_NOT_FOUND')
   const path = join(profile, 'brain', id, '.system_generated', 'logs', 'transcript.jsonl')
@@ -429,6 +430,7 @@ it('diagnoses only the selected Antigravity IDE source and never reads an unqual
   writeFileSync(path, 'synthetic format sentinel')
   expect(diagnose()).toBe('FORMAT_UNSUPPORTED')
   expect(diagnose(() => writeFileSync(path, 'source changed'))).toBe('SOURCE_STALE')
+  expect(diagnose(() => {}, 'f'.repeat(64))).toBe('IDENTITY_MISMATCH')
 }, 20000)
 
 it('detects helper version drift, runtime source staleness, local tamper/drift non-regression, and Codex checkout vs portable parity', async () => {

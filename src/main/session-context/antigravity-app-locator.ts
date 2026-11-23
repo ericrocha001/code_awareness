@@ -2,10 +2,24 @@ import { createHash } from 'node:crypto'
 import { basename, dirname, isAbsolute, join, normalize } from 'node:path'
 
 export const antigravityAppSessionId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/
-const filename = 'transcript_full.jsonl'
+const canonicalFilename = 'transcript_full.jsonl'
+const documentedFilename = 'transcript.jsonl'
+
+export type AntigravityTranscriptVariant = 'TRANSCRIPT_FULL' | 'TRANSCRIPT_DOCUMENTED'
 
 export function antigravityAppTranscriptPath(profile: string, id: string): string {
-  return join(profile, 'brain', id, '.system_generated', 'logs', filename)
+  return join(profile, 'brain', id, '.system_generated', 'logs', canonicalFilename)
+}
+
+export function antigravityAppDocumentedTranscriptPath(profile: string, id: string): string {
+  return join(profile, 'brain', id, '.system_generated', 'logs', documentedFilename)
+}
+
+export function antigravityAppTranscriptCandidates(profile: string, id: string): Array<{ variant: AntigravityTranscriptVariant; path: string }> {
+  return [
+    { variant: 'TRANSCRIPT_FULL', path: antigravityAppTranscriptPath(profile, id) },
+    { variant: 'TRANSCRIPT_DOCUMENTED', path: antigravityAppDocumentedTranscriptPath(profile, id) }
+  ]
 }
 
 export function antigravityAppLocatorDigest(id: string, locator: unknown): string | undefined {
@@ -15,7 +29,9 @@ export function antigravityAppLocatorDigest(id: string, locator: unknown): strin
   const canonical = process.platform === 'win32' ? path.toLowerCase() : path
   let profile = canonical
   for (let depth = 0; depth < 5; depth++) profile = dirname(profile)
-  if (basename(profile) !== 'antigravity' || basename(dirname(profile)) !== '.gemini' ||
-    canonical !== antigravityAppTranscriptPath(profile, id)) return
+  if (basename(profile) !== 'antigravity' || basename(dirname(profile)) !== '.gemini') return
+  const matchesKnown = canonical === antigravityAppTranscriptPath(profile, id) ||
+    canonical === antigravityAppDocumentedTranscriptPath(profile, id)
+  if (!matchesKnown) return
   return createHash('sha256').update(canonical).digest('hex')
 }

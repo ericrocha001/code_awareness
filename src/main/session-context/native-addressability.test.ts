@@ -605,3 +605,111 @@ it('U2 enforces exact snapshot identity continuity, rejects interior+append tamp
     cpCheck.close()
   }
 }, 60_000)
+
+it('U2 addresses every Antigravity record (INPUT, TOOL_CALL, AGENT_UPDATE, TOOL_RESULT, OPAQUE, oversized UNAVAILABLE, post-limit) without dumping bodies or exposing opaque text in FTS', async () => {
+  const f = setupWorkerEnv('repo-u2-focal')
+  const agProfile = join(f.base, '.gemini', 'antigravity')
+  const convId = '019ba000-0000-7000-8000-000000000899'
+  const convHash = nativeDigest(JSON.stringify(['repo-u2-focal', 'antigravity', convId]))
+  const txPath = join(agProfile, 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl')
+  mkdirSync(dirname(txPath), { recursive: true })
+
+  const oversizedContent = 'X'.repeat(540 * 1024)
+  const opaqueSecretMarker = 'opaque_hidden_lexical_phrase_991'
+  const rows = [
+    JSON.stringify({ step_index: 0, type: 'USER_INPUT', source: 'USER_EXPLICIT', created_at: '2026-11-23T10:00:00Z', content: 'start-input-sentinel token=ag-secret-123' }),
+    JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', source: 'MODEL', created_at: '2026-11-23T10:00:01Z', tool_calls: [{ name: 'read_file', args: { path: 'a.ts' } }], content: 'planner-update-sentinel' }),
+    JSON.stringify({ step_index: 2, type: 'TASK_BOUNDARY', source: 'SYSTEM', created_at: '2026-11-23T10:00:02Z', content: opaqueSecretMarker }),
+    JSON.stringify({ step_index: 3, type: 'GENERIC', source: 'MODEL', created_at: '2026-11-23T10:00:03Z', content: 'tool-result-sentinel' }),
+    JSON.stringify({ step_index: 4, type: 'PLANNER_RESPONSE', source: 'MODEL', created_at: '2026-11-23T10:00:04Z', content: oversizedContent }),
+    JSON.stringify({ step_index: 5, type: 'PLANNER_RESPONSE', source: 'MODEL', created_at: '2026-11-23T10:00:05Z', content: 'post-limit-tail-sentinel discriminative_tail_phrase_882' })
+  ]
+  writeFileSync(txPath, rows.join('\n') + '\n')
+
+  const db = new Database(join(agProfile, 'conversation_summaries.db'))
+  db.exec('CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT, last_modified_time TEXT)')
+  db.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?)').run(convId, JSON.stringify([pathToFileURL(f.root).href]), '2026-11-23 10:00:05+00:00')
+  db.close()
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u2-focal',
+    nativeSources: { antigravityApp: { profile: agProfile, sessionHashes: [convHash], allowLexicalIndex: true } }
+  }))
+
+  const listed = await f.call('list_agent_sessions', { ...f.target })
+  expect(listed.isError).toBe(false)
+  expect(listed.data.sessions).toHaveLength(1)
+  const deepen = listed.data.sessions[0].deepen.arguments
+
+  let ready: any
+  for (let i = 0; i < 10; i++) {
+    const res = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: deepen.sourceSessionId })
+    expect(res.isError).toBe(false)
+    if (res.data.state === 'READY') { ready = res.data; break }
+  }
+  expect(ready.state).toBe('READY')
+
+  const map = await f.call('inspect_agent_session', deepen)
+  expect(map.isError).toBe(false)
+  expect(map.data.readinessReason).toBe('READY')
+  expect(map.data.sourceVariant).toBe('TRANSCRIPT_DOCUMENTED')
+  expect(map.data.recordCoverage).toEqual({
+    recordsTotal: 6,
+    recordsAddressable: 6,
+    typed: 4,
+    opaque: 1,
+    unavailable: 1,
+    coverage: 'PARTIAL'
+  })
+
+  const evPage = await f.call('list_agent_session_events', { ...deepen, expectedRevision: map.data.revision, limit: 15 })
+  expect(evPage.isError).toBe(false)
+  // 1 INPUT + 2 (TOOL_CALL, AGENT_UPDATE) + 1 OPAQUE + 1 TOOL_RESULT + 1 UNAVAILABLE + 1 AGENT_UPDATE = 7 rows
+  expect(evPage.data.events).toHaveLength(7)
+  const opaqueEv = evPage.data.events.find((e: any) => e.type === 'OPAQUE')
+  const unavailableEv = evPage.data.events.find((e: any) => e.type === 'UNAVAILABLE')
+  const inputEv = evPage.data.events.find((e: any) => e.type === 'INPUT')
+  const tailEv = evPage.data.events.at(-1)
+  expect(opaqueEv).toMatchObject({ ordinal: 3, recordKind: 'OPAQUE', limitation: 'UNRECOGNIZED_FORMAT' })
+  expect(unavailableEv).toMatchObject({ ordinal: 5, recordKind: 'UNAVAILABLE', limitation: 'RECORD_TOO_LARGE' })
+
+  const readInput = await f.call('read_agent_session_event', { ...deepen, expectedRevision: map.data.revision, eventId: inputEv.eventId })
+  expect(readInput.data.content).toBe('start-input-sentinel token=[REDACTED]')
+  expect(readInput.data.sanitized).toBe(true)
+
+  const readOpaque = await f.call('read_agent_session_event', { ...deepen, expectedRevision: map.data.revision, eventId: opaqueEv.eventId })
+  expect(readOpaque.isError).toBe(false)
+  expect(readOpaque.data).toMatchObject({ recordKind: 'OPAQUE', limitation: 'UNRECOGNIZED_FORMAT', content: '' })
+  expect(JSON.stringify(readOpaque.data)).not.toContain(opaqueSecretMarker)
+
+  const readUnavailable = await f.call('read_agent_session_event', { ...deepen, expectedRevision: map.data.revision, eventId: unavailableEv.eventId })
+  expect(readUnavailable.isError).toBe(false)
+  expect(readUnavailable.data).toMatchObject({ recordKind: 'UNAVAILABLE', limitation: 'RECORD_TOO_LARGE', content: '' })
+
+  const readTail = await f.call('read_agent_session_event', { ...deepen, expectedRevision: map.data.revision, eventId: tailEv.eventId })
+  expect(readTail.data.content).toContain('post-limit-tail-sentinel')
+
+  // FTS must find typed tail phrase and must NOT expose opaque content
+  const ftsTail = await f.call('search_agent_session_evidence', { ...deepen, query: 'discriminative_tail_phrase_882', limit: 5 })
+  expect(ftsTail.isError).toBe(false)
+  expect(ftsTail.data.hits).toHaveLength(1)
+  const ftsOpaque = await f.call('search_agent_session_evidence', { ...deepen, query: opaqueSecretMarker, limit: 5 })
+  expect(ftsOpaque.isError).toBe(false)
+  expect(ftsOpaque.data.hits).toHaveLength(0)
+
+  // Snapshot changed -> REVISION_CONFLICT
+  appendFileSync(txPath, JSON.stringify({ step_index: 6, type: 'USER_INPUT', source: 'USER', created_at: '2026-11-23T10:00:06Z', content: 'after-append' }) + '\n')
+  const staleRead = await f.call('read_agent_session_event', { ...deepen, expectedRevision: map.data.revision, eventId: tailEv.eventId })
+  expect(staleRead.isError).toBe(true)
+  expect(staleRead.data.code).toBe('REVISION_CONFLICT')
+
+  // Grant revoked -> blocks reads
+  writeFileSync(f.configPath, JSON.stringify({ repositoryId: 'repo-u2-focal', nativeSources: {} }))
+  const revokedInspect = await f.call('inspect_agent_session', deepen)
+  expect(revokedInspect.data.contentAvailability).toBe('SOURCE_UNAVAILABLE')
+  expect(revokedInspect.data.readinessReason).toBe('GRANT_MISSING')
+  writeFileSync(f.configPath, JSON.stringify({ repositoryId: 'repo-u2-focal', nativeSources: { antigravityApp: { profile: agProfile, sessionHashes: ['0'.repeat(64)] } } }))
+  const invalidInspect = await f.call('inspect_agent_session', deepen)
+  expect(invalidInspect.data.contentAvailability).toBe('SOURCE_UNAVAILABLE')
+  expect(invalidInspect.data.readinessReason).toBe('GRANT_INVALID_OR_REVOKED')
+}, 60_000)
