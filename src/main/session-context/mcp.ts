@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { closeSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { z } from 'zod'
 import type { McpToolDefinition, McpToolResult } from '../mcp/mcp-types'
@@ -25,16 +25,23 @@ import { provenanceClass } from './provenance-evidence'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { literalSnapshotRevision, nativeSessionProjection, nativeSessionSelector, verifyNativeLiteralContext } from './native-session-query'
 import { nativeBindingPath, nativeHookEvents, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
-import { discoverCodexSources, extractCodexRecordPart, readCodexGrantStatus, stepCodexSourceIndex } from './native-codex-source'
+import {
+  discoverCodexSourcesAsync,
+  extractCodexRecordPart,
+  openCodexSourceHandle,
+  readCodexGrantStatus,
+  stepCodexSourceIndexAsync
+} from './native-codex-source'
 import { diagnoseAntigravitySource } from './antigravity-source-diagnostics'
-import { discoverAntigravityAppSources, extractAntigravityRecordPart, stepAntigravityAppSourceIndex, type SourceReadinessReason } from './native-antigravity-app-source'
+import { discoverAntigravityAppSources, extractAntigravityRecordPart, openAntigravitySourceHandle, stepAntigravityAppSourceIndex, type SourceReadinessReason } from './native-antigravity-app-source'
 import { NATIVE_ANTIGRAVITY_NORMALIZER, NATIVE_CODEX_NORMALIZER, toNativeEventMeta, type NativeEventFilter } from './native-session-references'
 import {
   DEFAULT_NATIVE_STEP_BYTES,
   DEFAULT_NATIVE_STEP_LINES,
-  extractAndVerifyEventLiteral,
+  extractAndVerifyEventLiteralAsync,
   readEventLiteralSlice,
-  searchIndexedNativeEvents,
+  searchIndexedNativeEventsAsync,
+  verifyStaticSourceBeforeClose,
   type NativeReferenceStepResult,
   type NativeStepBudget
 } from './native-source-index'
@@ -371,7 +378,7 @@ function page<T>(store: SessionStore, scope: object, offset: number, rows: T[], 
 
 export { verifyNativeLiteralContext, literalSnapshotRevision }
 
-function runNativeSessionIndexStep(
+async function runNativeSessionIndexStep(
   store: SessionStore,
   request: { nativeSession: z.infer<typeof nativeSessionSelector>; sourceSessionId: string },
   target: { worktreeId: string; generation: string },
@@ -409,7 +416,7 @@ function runNativeSessionIndexStep(
         stepBudget: effectiveBudget,
         assertCurrent
       })
-    : stepCodexSourceIndex({
+    : stepCodexSourceIndexAsync({
         refs: store.references.native,
         storePath: store.path,
         repositoryId: store.repositoryId,
@@ -426,7 +433,7 @@ function runNativeSessionIndexStep(
   const maxAttempts = 2
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
-      const stepResult = runOnce()
+      const stepResult = await runOnce()
       if (stepResult.status === 'READY') {
         const revision = literalSnapshotRevision(baseRevision, normalizer, stepResult.summary.revision, stepResult.liveFingerprint)
         return {
@@ -544,7 +551,7 @@ function runNativeSessionIndexStep(
   }
 }
 
-function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
+async function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   query: z.infer<typeof nativeSessionDetail> | z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>,
   target: NonNullable<ReturnType<typeof nativeLiteralTarget>>, root: string, assertCurrent: () => void, budget: number, accountHash?: string,
   stepBudget?: NativeStepBudget) {
@@ -600,125 +607,18 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
     captureCoverage, identityEvidence, origin: hookObserved ? 'WORKTREE_REVALIDATED' : 'LOCAL_SOURCE_VERIFIED_NO_HOOK', causalEvidence: 'NOT_INFERRED',
     sourceCoverage, transcriptImported: false, untrusted: true, claimsVerified: false
   })
-  let readyResponse: object | undefined
-
-  const onReady = (ready: { summary: import('./native-session-references').NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => {
-    const rev = literalSnapshotRevision(baseRevision, normalizer, ready.summary.revision, ready.liveFingerprint)
-    if (expectedRevision !== undefined && rev !== expectedRevision) throw new Error('REVISION_CONFLICT')
-    const needsFd = name === 'read_agent_session_event' || (name === 'list_agent_session_events' && !!eventOptions?.query && !eventOptions.file && !eventOptions.operation && !eventOptions.invocationId)
-    if (!needsFd) return
-    const scope = makeScope(rev, ready.summary.revision)
-    const offset = store.offset(cursor, scope)
-    const base = makeBase(rev, ready.summary.sourceCoverage)
-    if (name === 'list_agent_session_events' && eventOptions?.query && 'limit' in query) {
-      const commonMeta = {
-        ...base,
-        omittedSourceEvents: ready.summary.omittedRecords,
-        ...(eventOptions.types?.some(t => !['INPUT', 'AGENT_UPDATE', 'TOOL_CALL', 'TOOL_RESULT', 'ERROR'].includes(t)) ? { coverageReason: 'UNSUPPORTED_EVENT_TYPE_FILTER' } : {}),
-        ...(eventOptions.turnId ? { turnCoverage: ready.summary.turnCount ? 'PARTIAL' : 'UNKNOWN', ...(ready.summary.turnCount ? {} : { reason: 'TURN_ID_NOT_OBSERVED_IN_SOURCE' }) } : {}),
-        ...(eventOptions.after || eventOptions.before ? { timeCoverage: ready.summary.timeCoverage } : {})
-      }
-      const filter: NativeEventFilter = {
-        eventId: eventOptions.eventId, types: eventOptions.types, tool: eventOptions.tool, turnId: eventOptions.turnId, status: eventOptions.status, isError: eventOptions.isError, errorKind: eventOptions.errorKind, after: eventOptions.after, before: eventOptions.before
-      }
-      const search = searchIndexedNativeEvents({
-        refs: store.references.native,
-        nativeKey: ready.nativeKey,
-        revision: ready.summary.revision,
-        filters: filter,
-        query: eventOptions.query,
-        matchOffset: offset,
-        limit: query.limit,
-        fd: ready.fd,
-        formatError,
-        staleError,
-        extractPart,
-        assertCurrent
-      })
-      if (!search.truncated && search.totalMatched !== undefined && offset > search.totalMatched) throw new Error('CURSOR_STALE')
-      readyResponse = page(store, scope, offset, search.items, query.limit, budget, {
-        ...commonMeta,
-        search: {
-          coverage: search.truncated || ready.summary.omittedRecords ? 'PARTIAL' : 'OBSERVED_SOURCE_EVENTS',
-          domain: 'SANITIZED_SOURCE_EVENTS',
-          caseSensitive: true,
-          ...(search.truncated ? { truncated: true } : {})
-        }
-      }, event => event, 'events')
-      return
-    }
-    if (!('eventId' in query) || !query.eventId) throw new Error('INVALID_ARGUMENT')
-    const row = store.references.native.getEventById(ready.nativeKey, ready.summary.revision, query.eventId)
-    if (!row) throw new Error('SOURCE_EVENT_UNAVAILABLE')
-    const extracted = extractAndVerifyEventLiteral({
-      fd: ready.fd,
-      row,
-      formatError,
-      staleError,
-      extractPart
-    })
-    if (extracted.unavailable) {
-      readyResponse = {
-        ...base,
-        eventId: row.eventId,
-        ordinal: row.ordinal,
-        recordKind: 'UNAVAILABLE',
-        limitation: extracted.limitation,
-        content: '',
-        range: { startByte: 0, endByte: 0 },
-        payloadDigest: row.payloadDigest,
-        provenance: 'OBSERVED_FROM_PROVIDER',
-        omission: extracted.limitation ?? 'RECORD_TOO_LARGE',
-        sanitized: false,
-        complete: false,
-        partial: false
-      }
-      return
-    }
-    if (extracted.opaque) {
-      readyResponse = {
-        ...base,
-        eventId: row.eventId,
-        ordinal: row.ordinal,
-        recordKind: 'OPAQUE',
-        limitation: extracted.limitation,
-        ...(extracted.safeFields ? { safeFields: extracted.safeFields } : {}),
-        content: '',
-        range: { startByte: 0, endByte: 0 },
-        payloadDigest: row.payloadDigest,
-        provenance: 'OBSERVED_FROM_PROVIDER',
-        omission: extracted.limitation ?? 'UNRECOGNIZED_FORMAT',
-        sanitized: true,
-        complete: true,
-        partial: false
-      }
-      return
-    }
-    readyResponse = readEventLiteralSlice({
-      content: extracted.content,
-      sanitized: extracted.sanitized,
-      eventId: row.eventId,
-      payloadDigest: row.payloadDigest,
-      offset,
-      budget,
-      base,
-      nextCursor: end => store.cursor(scope, end),
-      fits,
-      queryText: 'query' in query ? query.query : undefined,
-      mode: 'mode' in query ? query.mode : undefined
-    })
-  }
+  const needsFd = name === 'read_agent_session_event' || (name === 'list_agent_session_events' && !!eventOptions?.query && !eventOptions.file && !eventOptions.operation && !eventOptions.invocationId)
 
   const indexOutcome: NativeReferenceStepResult | {
     sourceDiagnostic: string
     readinessReason?: SourceReadinessReason
     next?: { action: string; provider: 'antigravityApp' | 'codex'; requires: string[] }
     stale?: boolean
-  } = (() => {
+  } = await (async () => {
     const mode = store.references.native.isReadOnly ? 'READ_ONLY' : 'ON_DEMAND'
     if (!app) {
       try {
-        return stepCodexSourceIndex({
+        return await stepCodexSourceIndexAsync({
           refs: store.references.native,
           ...source,
           worktreeId: target.worktreeId,
@@ -726,7 +626,6 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
           worktreeRoot: root,
           mode,
           stepBudget,
-          onReady,
           assertCurrent
         })
       } catch (error) {
@@ -749,7 +648,6 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
         registryVerifiedOrigin,
         mode,
         stepBudget,
-        onReady,
         assertCurrent
       })
     } catch (error) {
@@ -823,12 +721,134 @@ function nativeLiteralProjection(store: SessionStore, name: SessionToolName,
   }
   const revision = literalSnapshotRevision(baseRevision, normalizer, indexOutcome.summary.revision, indexOutcome.liveFingerprint)
   if (expectedRevision !== undefined && revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
-  if (readyResponse !== undefined) return readyResponse
 
   const summary = indexOutcome.summary
   const scope = makeScope(revision, summary.revision)
   const offset = store.offset(cursor, scope)
   const base = makeBase(revision, summary.sourceCoverage)
+  if (needsFd) {
+    const handle = app
+      ? openAntigravitySourceHandle({
+          storePath: store.path, repositoryId: store.repositoryId, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!,
+          ...(locators.length === 1 ? { locatorDigest: locators[0] } : {}),
+          worktreeRoot: root, registryVerifiedOrigin, assertCurrent
+        })
+      : openCodexSourceHandle({
+          storePath: store.path, repositoryId: store.repositoryId, worktreeRoot: root, nativeHash: nativeSession.id, sourceSessionId: sourceSessionId!, assertCurrent
+        })
+    try {
+      if (handle.identity !== summary.fileIdentity || handle.locatorHash !== summary.locatorHash || handle.sizeBytes !== summary.sourceBytes) {
+        throw new Error(staleError)
+      }
+      if (name === 'list_agent_session_events' && eventOptions?.query && 'limit' in query) {
+        const commonMeta = {
+          ...base,
+          omittedSourceEvents: summary.omittedRecords,
+          ...(eventOptions.types?.some(t => !['INPUT', 'AGENT_UPDATE', 'TOOL_CALL', 'TOOL_RESULT', 'ERROR', 'OPAQUE', 'UNAVAILABLE'].includes(t)) ? { coverageReason: 'UNSUPPORTED_EVENT_TYPE_FILTER' } : {}),
+          ...(eventOptions.turnId ? { turnCoverage: summary.turnCount ? 'PARTIAL' : 'UNKNOWN', ...(summary.turnCount ? {} : { reason: 'TURN_ID_NOT_OBSERVED_IN_SOURCE' }) } : {}),
+          ...(eventOptions.after || eventOptions.before ? { timeCoverage: summary.timeCoverage } : {})
+        }
+        const filter: NativeEventFilter = {
+          eventId: eventOptions.eventId, types: eventOptions.types, tool: eventOptions.tool, turnId: eventOptions.turnId, status: eventOptions.status, isError: eventOptions.isError, errorKind: eventOptions.errorKind, after: eventOptions.after, before: eventOptions.before
+        }
+        const search = await searchIndexedNativeEventsAsync({
+          refs: store.references.native,
+          nativeKey: indexOutcome.nativeKey,
+          revision: summary.revision,
+          filters: filter,
+          query: eventOptions.query,
+          matchOffset: offset,
+          limit: query.limit,
+          fd: handle.fd,
+          fileSize: handle.sizeBytes,
+          fileIdentity: handle.identity,
+          compressed: handle.compressed,
+          formatError,
+          staleError,
+          extractPart,
+          assertCurrent
+        })
+        verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+        if (!search.truncated && search.totalMatched !== undefined && offset > search.totalMatched) throw new Error('CURSOR_STALE')
+        return page(store, scope, offset, search.items, query.limit, budget, {
+          ...commonMeta,
+          search: {
+            coverage: search.truncated || summary.omittedRecords ? 'PARTIAL' : 'OBSERVED_SOURCE_EVENTS',
+            domain: 'SANITIZED_SOURCE_EVENTS',
+            caseSensitive: true,
+            ...(search.truncated ? { truncated: true } : {})
+          }
+        }, event => event, 'events')
+      }
+      if (!('eventId' in query) || !query.eventId) throw new Error('INVALID_ARGUMENT')
+      const row = store.references.native.getEventById(indexOutcome.nativeKey, summary.revision, query.eventId)
+      if (!row) throw new Error('SOURCE_EVENT_UNAVAILABLE')
+      const extracted = await extractAndVerifyEventLiteralAsync({
+        fd: handle.fd,
+        fileSize: handle.sizeBytes,
+        nativeKey: indexOutcome.nativeKey,
+        fileIdentity: handle.identity,
+        compressed: handle.compressed,
+        row,
+        formatError,
+        staleError,
+        extractPart,
+        assertCurrent
+      })
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      if (extracted.unavailable) {
+        return {
+          ...base,
+          eventId: row.eventId,
+          ordinal: row.ordinal,
+          recordKind: 'UNAVAILABLE',
+          limitation: extracted.limitation,
+          content: '',
+          range: { startByte: 0, endByte: 0 },
+          payloadDigest: row.payloadDigest,
+          provenance: 'OBSERVED_FROM_PROVIDER',
+          omission: extracted.limitation ?? 'RECORD_TOO_LARGE',
+          sanitized: false,
+          complete: false,
+          partial: false
+        }
+      }
+      if (extracted.opaque) {
+        return {
+          ...base,
+          eventId: row.eventId,
+          ordinal: row.ordinal,
+          recordKind: 'OPAQUE',
+          limitation: extracted.limitation,
+          ...(extracted.safeFields ? { safeFields: extracted.safeFields } : {}),
+          content: '',
+          range: { startByte: 0, endByte: 0 },
+          payloadDigest: row.payloadDigest,
+          provenance: 'OBSERVED_FROM_PROVIDER',
+          omission: extracted.limitation ?? 'UNRECOGNIZED_FORMAT',
+          sanitized: true,
+          complete: true,
+          partial: false
+        }
+      }
+      return readEventLiteralSlice({
+        content: extracted.content,
+        sanitized: extracted.sanitized,
+        eventId: row.eventId,
+        payloadDigest: row.payloadDigest,
+        offset,
+        budget,
+        base,
+        nextCursor: end => store.cursor(scope, end),
+        fits,
+        queryText: 'query' in query ? query.query : undefined,
+        mode: 'mode' in query ? query.mode : undefined
+      })
+    } finally {
+      try { closeSync(handle.fd) } catch {}
+      handle.verifyAfterClose?.()
+    }
+  }
   if (name === 'inspect_agent_session') {
     const mapQuery = query as z.infer<typeof nativeSessionDetail>
     const selectedView = mapQuery.facet || mapQuery.mapView
@@ -1113,7 +1133,7 @@ export async function executeSessionTool(
           : (selectedTarget && request.nativeSession.worktreeId === selectedTarget.worktreeId && request.nativeSession.generation === selectedTarget.generation ? selectedTarget : undefined)
         const targetRoot = matchedLive?.root ?? (targetRef ? root : undefined)
         if (!targetRef || !targetRoot) throw new Error('ORIGIN_UNVERIFIED')
-        data = runNativeSessionIndexStep(
+        data = await runNativeSessionIndexStep(
           store as SessionStore,
           { nativeSession: request.nativeSession, sourceSessionId: request.sourceSessionId },
           targetRef,
@@ -1262,14 +1282,14 @@ export async function executeSessionTool(
       const runNativeDiscovery = mergeRegistry && discoveryTargets.length > 0 && !selector
       const discoveryReasons: Record<string, number> = {}
       const discoveredByTarget: Array<{
-        session: ReturnType<typeof discoverCodexSources>['sessions'][number] | ReturnType<typeof discoverAntigravityAppSources>['sessions'][number]
+        session: Awaited<ReturnType<typeof discoverCodexSourcesAsync>>['sessions'][number] | ReturnType<typeof discoverAntigravityAppSources>['sessions'][number]
         worktreeId: string
         generation: string
       }> = []
       if (runNativeDiscovery) {
         for (const dt of discoveryTargets) {
           const codexDiscovery = wantCodex
-            ? discoverCodexSources({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: dt.root, after: filter.after, before: filter.before, limit: 20, assertCurrent: assertActive })
+            ? await discoverCodexSourcesAsync({ storePath: actualStore.path, repositoryId: actualStore.repositoryId, worktreeRoot: dt.root, after: filter.after, before: filter.before, limit: 20, assertCurrent: assertActive })
             : undefined
           if (codexDiscovery) {
             onDiscovery?.({ provider: 'codex', truncated: codexDiscovery.truncated, coverageReason: codexDiscovery.coverageReason, bytesRead: codexDiscovery.stats.headerBytesRead, filesOpened: codexDiscovery.stats.filesOpened, usedIndex: codexDiscovery.stats.usedIndex })
@@ -1402,18 +1422,23 @@ export async function executeSessionTool(
               contentAvailability: granted.contentAvailability,
               captureCoverage: granted.captureCoverage,
               identityEvidence: granted.identityEvidence,
+              ...('readinessReason' in granted && granted.readinessReason ? { readinessReason: granted.readinessReason } : {}),
+              ...('sourceLocation' in granted && granted.sourceLocation ? { sourceLocation: granted.sourceLocation } : {}),
+              ...('compressed' in granted && granted.compressed !== undefined ? { compressed: granted.compressed } : {}),
               lastObserved: granted.lastObserved,
               worktrees: entry.worktrees,
               worktreeAvailability: isRepositoryScope ? 'ACTIVE' : availability,
               claimsVerified: false,
-              deepen: {
-                tool: 'inspect_agent_session',
-                arguments: {
-                  repositoryId: actualStore.repositoryId,
-                  sourceSessionId: granted.sourceSessionId,
-                  nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...wtRef }
+              ...(granted.contentAvailability === 'AVAILABLE' ? {
+                deepen: {
+                  tool: 'inspect_agent_session',
+                  arguments: {
+                    repositoryId: actualStore.repositoryId,
+                    sourceSessionId: granted.sourceSessionId,
+                    nativeSession: { provider: granted.provider, id: granted.providerSessionId, ...wtRef }
+                  }
                 }
-              }
+              } : {})
             })
           }
         }).sort((a, b) => b.sortTime.localeCompare(a.sortTime) || a.sortId.localeCompare(b.sortId))
@@ -1472,7 +1497,7 @@ export async function executeSessionTool(
         const matchedLive = liveTargets.find(t => t.worktreeId === target.worktreeId && t.generation === target.generation)
         const targetRoot = matchedLive?.root ?? (selectedTarget && target.worktreeId === selectedTarget.worktreeId && target.generation === selectedTarget.generation ? root : undefined)
         if (!targetRoot) throw new Error('ORIGIN_UNVERIFIED')
-        data = nativeLiteralProjection(store as SessionStore, name, q as z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>, target, targetRoot, assertActive, budget, archiveAccountHash, nativeStepBudget)
+        data = await nativeLiteralProjection(store as SessionStore, name, q as z.infer<typeof nativeSessionEvents> | z.infer<typeof nativeEventRead>, target, targetRoot, assertActive, budget, archiveAccountHash, nativeStepBudget)
       } else if (name === 'read_agent_session_event') {
         const request = q as z.infer<typeof nativeEventRead>
         nativeSessionProjection(store as SessionStore, { ...request, limit: 1 }, 'MAP', archiveAccountHash)

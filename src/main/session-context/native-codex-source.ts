@@ -14,11 +14,13 @@ import {
   NATIVE_LINE_MAX_BYTES,
   openNoFollowReadOnly,
   runNativeReferenceStep,
+  runNativeReferenceStepAsync,
   type NativeIndexedSourceHandle,
   type NativeReferenceStepResult,
   type NativeStepBudget,
   type StepAccumulator
 } from './native-source-index'
+import { readZstdFirstLine } from './native-zstd-jsonl'
 import { NATIVE_CODEX_NORMALIZER, nativeReferenceKey, type NativeSessionReferences } from './native-session-references'
 import { digest, sanitize } from './privacy'
 
@@ -43,9 +45,12 @@ export interface DiscoveredCodexSource {
   sourceSessionId: string
   agent: 'codex'
   lastObserved?: string
-  contentAvailability: 'AVAILABLE'
+  contentAvailability: 'AVAILABLE' | 'IDENTITY_UNVERIFIED'
   captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE'
-  identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED'
+  identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED' | 'IDENTITY_UNVERIFIED'
+  readinessReason?: 'READY' | 'IDENTITY_UNVERIFIED'
+  sourceLocation?: 'ACTIVE' | 'ARCHIVED'
+  compressed?: boolean
 }
 
 export interface CodexDiscoveryResult {
@@ -140,7 +145,7 @@ function qualifyCodexSessionMeta(
   creatorAccountHash: string,
   root: string,
   profile: string
-): { ok: true; meta: Record<string, unknown> } | { ok: false; error: 'SOURCE_IDENTITY_CONFLICT' | 'SOURCE_FORMAT_UNSUPPORTED' | 'ORIGIN_UNVERIFIED' } {
+): { ok: true; meta: Record<string, unknown> } | { ok: false; error: 'SOURCE_IDENTITY_CONFLICT' | 'IDENTITY_UNVERIFIED' | 'SOURCE_FORMAT_UNSUPPORTED' | 'ORIGIN_UNVERIFIED' } {
   const rec = record as { type?: unknown; payload?: Record<string, unknown> } | null
   const meta = rec?.payload
   if (
@@ -149,13 +154,7 @@ function qualifyCodexSessionMeta(
     typeof meta !== 'object' ||
     meta.id !== expectedSessionId ||
     typeof meta.session_id !== 'string' ||
-    !uuid.test(meta.session_id) ||
-    meta.account_scoped !== true ||
-    typeof meta.creator_account_id !== 'string' ||
-    !meta.creator_account_id ||
-    typeof meta.creator_user_id !== 'string' ||
-    !meta.creator_user_id ||
-    digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash
+    !uuid.test(meta.session_id)
   ) {
     return { ok: false, error: 'SOURCE_IDENTITY_CONFLICT' }
   }
@@ -168,25 +167,70 @@ function qualifyCodexSessionMeta(
   if (!checkCodexWorktreeRoots(meta, root, profile)) {
     return { ok: false, error: 'ORIGIN_UNVERIFIED' }
   }
+  if (
+    meta.account_scoped !== true ||
+    typeof meta.creator_account_id !== 'string' ||
+    !meta.creator_account_id ||
+    typeof meta.creator_user_id !== 'string' ||
+    !meta.creator_user_id
+  ) {
+    return { ok: false, error: 'IDENTITY_UNVERIFIED' }
+  }
+  if (digest(JSON.stringify([meta.creator_user_id, meta.creator_account_id])) !== creatorAccountHash) {
+    return { ok: false, error: 'SOURCE_IDENTITY_CONFLICT' }
+  }
   return { ok: true, meta }
 }
 
-function exactRollout(profile: string, id: string) {
+const ROLLOUT_FILE_RE = /^rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl(\.zst)?$/
+
+function parseRolloutFileName(name: string): { sessionId: string; compressed: boolean } | undefined {
+  const match = ROLLOUT_FILE_RE.exec(name)
+  if (!match) return undefined
+  return { sessionId: match[1]!, compressed: match[2] === '.zst' }
+}
+
+function exactRollout(profile: string, id: string): { path: string; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' } {
   const sessions = join(profile, 'sessions')
+  const archived = join(profile, 'archived_sessions')
   const stamp = Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16)
-  const files: string[] = []
+  const activeMatches: Array<{ path: string; compressed: boolean }> = []
   for (const delta of [-1, 0, 1]) {
     const day = new Date(stamp + delta * 86400000).toISOString().slice(0, 10)
     const directory = join(sessions, ...day.split('-'))
     assertProfilePath(directory, profile)
     try {
       for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        if (entry.name.startsWith('rollout-') && entry.name.endsWith('-' + id + '.jsonl')) files.push(join(directory, entry.name))
+        const parsed = parseRolloutFileName(entry.name)
+        if (parsed && parsed.sessionId === id) {
+          activeMatches.push({ path: join(directory, entry.name), compressed: parsed.compressed })
+        }
       }
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
   }
-  if (files.length !== 1) throw new Error(files.length ? 'SOURCE_IDENTITY_CONFLICT' : 'SOURCE_NOT_FOUND')
-  return files[0]
+  const archivedMatches: Array<{ path: string; compressed: boolean }> = []
+  assertProfilePath(archived, profile)
+  try {
+    for (const entry of readdirSync(archived, { withFileTypes: true })) {
+      const parsed = parseRolloutFileName(entry.name)
+      if (parsed && parsed.sessionId === id) {
+        archivedMatches.push({ path: join(archived, entry.name), compressed: parsed.compressed })
+      }
+    }
+  } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+
+  const pickBest = (list: Array<{ path: string; compressed: boolean }>) => {
+    const plain = list.filter(x => !x.compressed)
+    if (plain.length === 1) return plain[0]!
+    if (plain.length > 1) throw new Error('SOURCE_IDENTITY_CONFLICT')
+    if (list.length === 1) return list[0]!
+    throw new Error('SOURCE_IDENTITY_CONFLICT')
+  }
+
+  if (activeMatches.length > 0 && archivedMatches.length > 0) throw new Error('SOURCE_IDENTITY_CONFLICT')
+  if (activeMatches.length > 0) return { ...pickBest(activeMatches), location: 'ACTIVE' }
+  if (archivedMatches.length > 0) return { ...pickBest(archivedMatches), location: 'ARCHIVED' }
+  throw new Error('SOURCE_NOT_FOUND')
 }
 
 function firstLine(path: string): { line?: string; bytesRead: number } {
@@ -199,6 +243,16 @@ function firstLine(path: string): { line?: string; bytesRead: number } {
     const nl = buf.subarray(0, read).indexOf(10)
     if (nl <= 0) return { bytesRead: read }
     return { line: decoder.decode(buf.subarray(0, nl)), bytesRead: read }
+  } finally { closeSync(fd) }
+}
+
+async function firstLineAsync(path: string, compressed: boolean, assertCurrent: () => void): Promise<{ line?: string; bytesRead: number }> {
+  if (!compressed) return firstLine(path)
+  const stat = lstatSync(path, { bigint: true })
+  if (!stat.isFile() || stat.nlink !== 1n || stat.size === 0n) return { bytesRead: 0 }
+  const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    return await readZstdFirstLine(fd, Number(stat.size), maxHeaderLine, 128 * 1024, assertCurrent)
   } finally { closeSync(fd) }
 }
 
@@ -218,7 +272,7 @@ function indexedCodexCandidates(
   root: string,
   assertCurrent: () => void,
   offset = 0
-): { usedIndex: true; truncated: boolean; candidates: { path: string; sessionId: string; mtimeMs: number }[] } | undefined {
+): { usedIndex: true; truncated: boolean; candidates: { path: string; sessionId: string; mtimeMs: number; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' }[] } | undefined {
   const dbPath = join(profile, 'state_5.sqlite')
   let stat: BigIntStats
   try {
@@ -231,6 +285,7 @@ function indexedCodexCandidates(
   }
   const db = new Database(dbPath, { readonly: true, fileMustExist: true, timeout: 100 })
   const sessionsRoot = join(profile, 'sessions')
+  const archivedRoot = join(profile, 'archived_sessions')
   try {
     const normalizedRoot = stripVerbatimPrefix(root).replaceAll('\\', '/')
     const comparableRoot = process.platform === 'win32' ? normalizedRoot.toLowerCase() : normalizedRoot
@@ -250,22 +305,164 @@ function indexedCodexCandidates(
       return undefined
     }
     const truncated = rows.length > maxCandidateFiles
-    const candidates: { path: string; sessionId: string; mtimeMs: number }[] = []
+    const candidates: { path: string; sessionId: string; mtimeMs: number; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' }[] = []
     for (const row of rows.slice(0, maxCandidateFiles)) {
       assertCurrent()
       if (typeof row.id !== 'string' || !uuid.test(row.id)) continue
       if (!canonicalIndexPathMatchesRoot(row.cwd, root)) continue
       if (typeof row.rollout_path !== 'string') continue
-      const rolloutPath = stripVerbatimPrefix(row.rollout_path)
-      try {
-        assertProfilePath(rolloutPath, sessionsRoot)
-        const s = statSync(rolloutPath)
-        candidates.push({ path: rolloutPath, sessionId: row.id, mtimeMs: s.mtimeMs })
-      } catch {}
+      const rawPath = stripVerbatimPrefix(row.rollout_path)
+      const inSessions = (() => { try { assertProfilePath(rawPath, sessionsRoot); return true } catch { return false } })()
+      const inArchived = !inSessions && (() => { try { assertProfilePath(rawPath, archivedRoot); return true } catch { return false } })()
+      if (!inSessions && !inArchived) continue
+      const location: 'ACTIVE' | 'ARCHIVED' = inArchived ? 'ARCHIVED' : 'ACTIVE'
+      const tryPaths = rawPath.endsWith('.jsonl.zst')
+        ? [{ path: rawPath.slice(0, -4), compressed: false }, { path: rawPath, compressed: true }]
+        : [{ path: rawPath, compressed: false }, { path: `${rawPath}.zst`, compressed: true }]
+      for (const tp of tryPaths) {
+        try {
+          assertProfilePath(tp.path, location === 'ARCHIVED' ? archivedRoot : sessionsRoot)
+          const s = statSync(tp.path)
+          candidates.push({ path: tp.path, sessionId: row.id, mtimeMs: s.mtimeMs, compressed: tp.compressed, location })
+          break
+        } catch {}
+      }
     }
     return { usedIndex: true, truncated, candidates }
   } finally {
     db.close()
+  }
+}
+
+function collectCodexDirCandidates(
+  profile: string,
+  root: string,
+  offset: number,
+  assertCurrent: () => void
+): {
+  usedIndex: boolean
+  truncated: boolean
+  dirsVisited: number
+  candidates: { path: string; sessionId: string; mtimeMs: number; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' }[]
+} {
+  const indexed = indexedCodexCandidates(profile, root, assertCurrent, offset)
+  if (indexed) {
+    return { usedIndex: true, truncated: indexed.truncated, dirsVisited: 0, candidates: indexed.candidates }
+  }
+  const sessionsDir = join(profile, 'sessions')
+  const archivedDir = join(profile, 'archived_sessions')
+  let dirsVisited = 0
+  let entriesChecked = 0
+  let truncated = false
+  const byDirAndId = new Map<string, { path: string; sessionId: string; mtimeMs: number; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' }>()
+
+  const addEntry = (full: string, sessionId: string, compressed: boolean, location: 'ACTIVE' | 'ARCHIVED', dirKey: string) => {
+    const key = `${dirKey}:${sessionId}`
+    const existing = byDirAndId.get(key)
+    if (existing && !existing.compressed) return
+    byDirAndId.set(key, { path: full, sessionId, mtimeMs: statSync(full).mtimeMs, compressed, location })
+  }
+
+  const collectDays = (dir: string, depth: number) => {
+    if (dirsVisited >= maxDiscoveryDirs || entriesChecked >= maxDiscoveryEntries) {
+      truncated = true
+      return
+    }
+    dirsVisited++
+    try {
+      const entries = readdirSync(dir, { withFileTypes: true }).map(e => e.name).sort().reverse()
+      const maxPerDepth = depth === 0 ? 3 : depth === 1 ? 4 : 16
+      if (entries.length > maxPerDepth) truncated = true
+      for (const name of entries.slice(0, maxPerDepth)) {
+        assertCurrent()
+        if (entriesChecked >= maxDiscoveryEntries) {
+          truncated = true
+          break
+        }
+        entriesChecked++
+        const full = join(dir, name)
+        assertProfilePath(full, profile)
+        if (depth < 3) collectDays(full, depth + 1)
+        else {
+          const parsed = parseRolloutFileName(name)
+          if (parsed) addEntry(full, parsed.sessionId, parsed.compressed, 'ACTIVE', dir)
+        }
+      }
+    } catch {}
+  }
+  collectDays(sessionsDir, 0)
+
+  try {
+    assertProfilePath(archivedDir, profile)
+    const archivedEntries = readdirSync(archivedDir, { withFileTypes: true }).map(e => e.name).sort().reverse()
+    if (archivedEntries.length > maxDiscoveryEntries) truncated = true
+    for (const name of archivedEntries.slice(0, maxDiscoveryEntries)) {
+      assertCurrent()
+      const full = join(archivedDir, name)
+      assertProfilePath(full, profile)
+      const parsed = parseRolloutFileName(name)
+      if (parsed) addEntry(full, parsed.sessionId, parsed.compressed, 'ARCHIVED', archivedDir)
+    }
+  } catch {}
+
+  return { usedIndex: false, truncated, dirsVisited, candidates: [...byDirAndId.values()] }
+}
+
+function buildDiscoveredCodexEntry(options: {
+  repositoryId: string
+  item: { path: string; sessionId: string; mtimeMs: number; compressed: boolean; location: 'ACTIVE' | 'ARCHIVED' }
+  line: string
+  creatorAccountHash: string
+  root: string
+  profile: string
+  afterMs?: number
+  beforeMs?: number
+}): DiscoveredCodexSource | undefined {
+  const { repositoryId, item, line, creatorAccountHash, root, profile, afterMs, beforeMs } = options
+  const record = JSON.parse(line)
+  const qualified = qualifyCodexSessionMeta(record, item.sessionId, creatorAccountHash, root, profile)
+  if (!qualified.ok) {
+    if (qualified.error === 'IDENTITY_UNVERIFIED') {
+      const meta = (record as { payload?: Record<string, unknown> })?.payload
+      const ts = typeof meta?.timestamp === 'string' && Number.isFinite(Date.parse(meta.timestamp))
+        ? meta.timestamp
+        : new Date(item.mtimeMs).toISOString()
+      const tsMs = Date.parse(ts)
+      if (afterMs !== undefined && tsMs < afterMs) return undefined
+      if (beforeMs !== undefined && tsMs > beforeMs) return undefined
+      return {
+        provider: 'codex-native',
+        providerSessionId: nativeDigest(JSON.stringify([repositoryId, 'codex', item.sessionId])),
+        sourceSessionId: item.sessionId,
+        agent: 'codex',
+        lastObserved: ts,
+        contentAvailability: 'IDENTITY_UNVERIFIED',
+        captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE',
+        identityEvidence: 'IDENTITY_UNVERIFIED',
+        readinessReason: 'IDENTITY_UNVERIFIED',
+        sourceLocation: item.location,
+        compressed: item.compressed
+      }
+    }
+    return undefined
+  }
+  const meta = qualified.meta
+  const ts = typeof meta.timestamp === 'string' && Number.isFinite(Date.parse(meta.timestamp)) ? meta.timestamp : new Date(item.mtimeMs).toISOString()
+  const tsMs = Date.parse(ts)
+  if (afterMs !== undefined && tsMs < afterMs) return undefined
+  if (beforeMs !== undefined && tsMs > beforeMs) return undefined
+  return {
+    provider: 'codex-native',
+    providerSessionId: nativeDigest(JSON.stringify([repositoryId, 'codex', item.sessionId])),
+    sourceSessionId: item.sessionId,
+    agent: 'codex',
+    lastObserved: ts,
+    contentAvailability: 'AVAILABLE',
+    captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE',
+    identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED',
+    readinessReason: 'READY',
+    sourceLocation: item.location,
+    compressed: item.compressed
   }
 }
 
@@ -292,55 +489,92 @@ export function discoverCodexSources(options: {
     }
   }
   const { profile, creatorAccountHash } = grantStatus
-  const sessionsDir = join(profile, 'sessions')
   const root = realpathSync.native(options.worktreeRoot)
   const limit = Math.min(Math.max(options.limit ?? maxDiscoveryResults, 1), maxDiscoveryResults)
   const afterMs = options.after ? Date.parse(options.after) : undefined
   const beforeMs = options.before ? Date.parse(options.before) : undefined
 
-  let dirsVisited = 0
-  let entriesChecked = 0
-  let truncated = false
-  let usedIndex = false
-  let candidates: { path: string; sessionId: string; mtimeMs: number }[] = []
-
-  const indexed = indexedCodexCandidates(profile, root, options.assertCurrent, options.offset ?? 0)
-  if (indexed) {
-    usedIndex = true
-    truncated = indexed.truncated
-    candidates = indexed.candidates
-  } else {
-    const collectDays = (dir: string, depth: number) => {
-      if (dirsVisited >= maxDiscoveryDirs || entriesChecked >= maxDiscoveryEntries) {
-        truncated = true
-        return
-      }
-      dirsVisited++
-      try {
-        const entries = readdirSync(dir, { withFileTypes: true }).map(e => e.name).sort().reverse()
-        const maxPerDepth = depth === 0 ? 3 : depth === 1 ? 4 : 16
-        if (entries.length > maxPerDepth) truncated = true
-        for (const name of entries.slice(0, maxPerDepth)) {
-          options.assertCurrent()
-          if (entriesChecked >= maxDiscoveryEntries) {
-            truncated = true
-            break
-          }
-          entriesChecked++
-          const full = join(dir, name)
-          assertProfilePath(full, profile)
-          if (depth < 3) collectDays(full, depth + 1)
-          else if (name.startsWith('rollout-') && name.endsWith('.jsonl')) {
-            const match = /([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.jsonl$/.exec(name)
-            if (match) candidates.push({ path: full, sessionId: match[1], mtimeMs: statSync(full).mtimeMs })
-          }
-        }
-      } catch {}
-    }
-    collectDays(sessionsDir, 0)
+  const collected = collectCodexDirCandidates(profile, root, options.offset ?? 0, options.assertCurrent)
+  let truncated = collected.truncated
+  let candidates = collected.candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  if (candidates.length > maxCandidateFiles) {
+    truncated = true
+    candidates = candidates.slice(0, maxCandidateFiles)
   }
 
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const found: DiscoveredCodexSource[] = []
+  let filesOpened = 0
+  let headerBytesRead = 0
+  for (const item of candidates) {
+    if (item.compressed) continue
+    options.assertCurrent()
+    if (filesOpened >= maxCandidateFiles || headerBytesRead >= maxTotalHeaderBytes) {
+      truncated = true
+      break
+    }
+    if (found.length >= limit) {
+      truncated = true
+      break
+    }
+    try {
+      if (!sameNativePath(item.path, realpathSync.native(item.path))) continue
+      filesOpened++
+      const { line, bytesRead } = firstLine(item.path)
+      headerBytesRead += bytesRead
+      if (!line) continue
+      const entry = buildDiscoveredCodexEntry({
+        repositoryId: options.repositoryId,
+        item,
+        line,
+        creatorAccountHash,
+        root,
+        profile,
+        afterMs,
+        beforeMs
+      })
+      if (entry) found.push(entry)
+    } catch {}
+  }
+
+  return {
+    sessions: found,
+    truncated,
+    ...(truncated ? { coverageReason: 'SOURCE_DISCOVERY_LIMIT_REACHED' as const } : {}),
+    stats: { usedIndex: collected.usedIndex, dirsVisited: collected.dirsVisited, filesOpened, headerBytesRead }
+  }
+}
+
+export async function discoverCodexSourcesAsync(options: {
+  storePath: string
+  repositoryId: string
+  worktreeRoot: string
+  after?: string
+  before?: string
+  limit?: number
+  offset?: number
+  assertCurrent: () => void
+}): Promise<CodexDiscoveryResult> {
+  const grantStatus = readCodexGrantStatus(options.storePath, options.repositoryId)
+  if (!grantStatus.configured) {
+    return { sessions: [], truncated: false, stats: { usedIndex: false, dirsVisited: 0, filesOpened: 0, headerBytesRead: 0 } }
+  }
+  if (!grantStatus.ok) {
+    return {
+      sessions: [],
+      truncated: true,
+      coverageReason: 'PROFILE_UNAVAILABLE',
+      stats: { usedIndex: false, dirsVisited: 0, filesOpened: 0, headerBytesRead: 0 }
+    }
+  }
+  const { profile, creatorAccountHash } = grantStatus
+  const root = realpathSync.native(options.worktreeRoot)
+  const limit = Math.min(Math.max(options.limit ?? maxDiscoveryResults, 1), maxDiscoveryResults)
+  const afterMs = options.after ? Date.parse(options.after) : undefined
+  const beforeMs = options.before ? Date.parse(options.before) : undefined
+
+  const collected = collectCodexDirCandidates(profile, root, options.offset ?? 0, options.assertCurrent)
+  let truncated = collected.truncated
+  let candidates = collected.candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
   if (candidates.length > maxCandidateFiles) {
     truncated = true
     candidates = candidates.slice(0, maxCandidateFiles)
@@ -362,27 +596,20 @@ export function discoverCodexSources(options: {
     try {
       if (!sameNativePath(item.path, realpathSync.native(item.path))) continue
       filesOpened++
-      const { line, bytesRead } = firstLine(item.path)
+      const { line, bytesRead } = await firstLineAsync(item.path, item.compressed, options.assertCurrent)
       headerBytesRead += bytesRead
       if (!line) continue
-      const record = JSON.parse(line)
-      const qualified = qualifyCodexSessionMeta(record, item.sessionId, creatorAccountHash, root, profile)
-      if (!qualified.ok) continue
-      const meta = qualified.meta
-      const ts = typeof meta.timestamp === 'string' && Number.isFinite(Date.parse(meta.timestamp)) ? meta.timestamp : new Date(item.mtimeMs).toISOString()
-      const tsMs = Date.parse(ts)
-      if (afterMs !== undefined && tsMs < afterMs) continue
-      if (beforeMs !== undefined && tsMs > beforeMs) continue
-      found.push({
-        provider: 'codex-native',
-        providerSessionId: nativeDigest(JSON.stringify([options.repositoryId, 'codex', item.sessionId])),
-        sourceSessionId: item.sessionId,
-        agent: 'codex',
-        lastObserved: ts,
-        contentAvailability: 'AVAILABLE',
-        captureCoverage: 'SOURCE_AVAILABLE_NO_HOOK_CAPTURE',
-        identityEvidence: 'HASH_AND_PROVIDER_HEADER_VERIFIED'
+      const entry = buildDiscoveredCodexEntry({
+        repositoryId: options.repositoryId,
+        item,
+        line,
+        creatorAccountHash,
+        root,
+        profile,
+        afterMs,
+        beforeMs
       })
+      if (entry) found.push(entry)
     } catch {}
   }
 
@@ -390,7 +617,7 @@ export function discoverCodexSources(options: {
     sessions: found,
     truncated,
     ...(truncated ? { coverageReason: 'SOURCE_DISCOVERY_LIMIT_REACHED' as const } : {}),
-    stats: { usedIndex, dirsVisited, filesOpened, headerBytesRead }
+    stats: { usedIndex: collected.usedIndex, dirsVisited: collected.dirsVisited, filesOpened, headerBytesRead }
   }
 }
 
@@ -428,7 +655,8 @@ export function openCodexSourceHandle(options: {
     throw new Error('SOURCE_IDENTITY_CONFLICT')
   }
   const { configPath, configText, profile, creatorAccountHash, allowLexicalIndex } = readCodexGrant(storePath, repositoryId)
-  const path = exactRollout(profile, sourceSessionId)
+  const resolved = exactRollout(profile, sourceSessionId)
+  const path = resolved.path
   assertProfilePath(path, profile)
   if (!sameNativePath(path, realpathSync.native(path))) throw new Error('SOURCE_PATH_ESCAPE')
   assertCurrent()
@@ -442,6 +670,9 @@ export function openCodexSourceHandle(options: {
       throw new Error('SOURCE_REVISION_CHANGED')
     }
     const root = realpathSync.native(worktreeRoot)
+    const sourceVariant = resolved.compressed
+      ? (resolved.location === 'ARCHIVED' ? 'ARCHIVED_ZSTD' : 'ACTIVE_ZSTD')
+      : (resolved.location === 'ARCHIVED' ? 'ARCHIVED_JSONL' : 'ACTIVE_JSONL')
     return {
       fd,
       path,
@@ -453,6 +684,8 @@ export function openCodexSourceHandle(options: {
       worktreeRootResolved: root,
       creatorAccountHash,
       allowLexicalIndex,
+      compressed: resolved.compressed,
+      sourceVariant,
       assertPath: () => assertProfilePath(path, profile),
       configUnchanged: () => boundedFile(configPath, 65536) === configText
     }
@@ -462,7 +695,7 @@ export function openCodexSourceHandle(options: {
   }
 }
 
-export function stepCodexSourceIndex(options: {
+function buildCodexStepOptions(options: {
   refs: NativeSessionReferences
   storePath: string
   repositoryId: string
@@ -475,7 +708,7 @@ export function stepCodexSourceIndex(options: {
   stepBudget?: NativeStepBudget
   onReady?: (ready: { summary: import('./native-session-references').NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
   assertCurrent: () => void
-}): NativeReferenceStepResult {
+}): Parameters<typeof runNativeReferenceStep>[0] {
   const {
     refs, storePath, repositoryId, worktreeId, generation, worktreeRoot,
     nativeHash, sourceSessionId, mode, stepBudget, onReady, assertCurrent
@@ -484,7 +717,7 @@ export function stepCodexSourceIndex(options: {
   let root = ''
   let profile = ''
   let creatorAccountHash = ''
-  return runNativeReferenceStep({
+  return {
     refs,
     nativeKey,
     provider: 'codex',
@@ -648,5 +881,13 @@ export function stepCodexSourceIndex(options: {
       }
       emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
     }
-  })
+  }
+}
+
+export function stepCodexSourceIndex(options: Parameters<typeof buildCodexStepOptions>[0]): NativeReferenceStepResult {
+  return runNativeReferenceStep(buildCodexStepOptions(options))
+}
+
+export function stepCodexSourceIndexAsync(options: Parameters<typeof buildCodexStepOptions>[0]): Promise<NativeReferenceStepResult> {
+  return runNativeReferenceStepAsync(buildCodexStepOptions(options))
 }

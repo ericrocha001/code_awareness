@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { zstdCompressSync } from 'node:zlib'
 import { afterEach, expect, it } from 'vitest'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
@@ -872,4 +873,70 @@ it('U3 discovers sessions across governed repository worktrees via scope=REPOSIT
     sourceSessionId: codexId,
     nativeSession: { provider: 'codex-native', id: codexFound.providerSessionId, worktreeId: '9'.repeat(64), generation: '9'.repeat(64) }
   })).toEqual({ isError: true, data: { code: 'ORIGIN_UNVERIFIED' } })
+}, 60_000)
+
+it('U1 discovers active .jsonl.zst and eligible archived_sessions while marking accountless archived sessions IDENTITY_UNVERIFIED', async () => {
+  const f = setup()
+  const profile = join(f.dir, 'codex-profile')
+  const accHash = nativeDigest(JSON.stringify(['u-zst', 'a-zst']))
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u3',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash } }
+  }))
+
+  const sActiveZst = '01a1f400-0000-7000-8000-000000000021'
+  const sArchivedEligible = '01a1f400-0000-7000-8000-000000000022'
+  const sArchivedAccountless = '01a1f400-0000-7000-8000-000000000023'
+  const sDuplicateConflict = '01a1f400-0000-7000-8000-000000000024'
+
+  const dayOf = (id: string) => new Date(Number.parseInt(id.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+
+  const activeDir = join(profile, 'sessions', ...dayOf(sActiveZst))
+  mkdirSync(activeDir, { recursive: true })
+  writeFileSync(join(activeDir, `rollout-2026-11-23T10-00-00-${sActiveZst}.jsonl.zst`), zstdCompressSync(Buffer.from([
+    JSON.stringify({ timestamp: '2026-11-23T10:00:00Z', type: 'session_meta', payload: { id: sActiveZst, session_id: sActiveZst, account_scoped: true, creator_user_id: 'u-zst', creator_account_id: 'a-zst', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'active-zst-literal' }] } })
+  ].join('\n') + '\n')))
+
+  const archivedDir = join(profile, 'archived_sessions')
+  mkdirSync(archivedDir, { recursive: true })
+  writeFileSync(join(archivedDir, `rollout-2026-11-23T09-00-00-${sArchivedEligible}.jsonl.zst`), zstdCompressSync(Buffer.from([
+    JSON.stringify({ timestamp: '2026-11-23T09:00:00Z', type: 'session_meta', payload: { id: sArchivedEligible, session_id: sArchivedEligible, account_scoped: true, creator_user_id: 'u-zst', creator_account_id: 'a-zst', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }),
+    JSON.stringify({ timestamp: '2026-11-23T09:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'archived-zst-literal' }] } })
+  ].join('\n') + '\n')))
+
+  writeFileSync(join(archivedDir, `rollout-2026-11-23T08-00-00-${sArchivedAccountless}.jsonl.zst`), zstdCompressSync(Buffer.from([
+    JSON.stringify({ timestamp: '2026-11-23T08:00:00Z', type: 'session_meta', payload: { id: sArchivedAccountless, session_id: sArchivedAccountless, cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }),
+    JSON.stringify({ timestamp: '2026-11-23T08:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'should-never-read-accountless' }] } })
+  ].join('\n') + '\n')))
+
+  // Conflicting duplicate in both active and archived
+  const dupActiveDir = join(profile, 'sessions', ...dayOf(sDuplicateConflict))
+  mkdirSync(dupActiveDir, { recursive: true })
+  const dupContent = JSON.stringify({ timestamp: '2026-11-23T07:00:00Z', type: 'session_meta', payload: { id: sDuplicateConflict, session_id: sDuplicateConflict, account_scoped: true, creator_user_id: 'u-zst', creator_account_id: 'a-zst', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }) + '\n'
+  writeFileSync(join(dupActiveDir, `rollout-2026-11-23T07-00-00-${sDuplicateConflict}.jsonl.zst`), zstdCompressSync(Buffer.from(dupContent)))
+  writeFileSync(join(archivedDir, `rollout-2026-11-23T07-00-00-${sDuplicateConflict}.jsonl.zst`), zstdCompressSync(Buffer.from(dupContent)))
+
+  const listed = await f.call('list_agent_sessions', { ...f.target })
+  expect(listed.isError).toBe(false)
+  const activeFound = listed.data.sessions.find((s: any) => s.sourceSessionId === sActiveZst)
+  const archivedFound = listed.data.sessions.find((s: any) => s.sourceSessionId === sArchivedEligible)
+  const accountlessFound = listed.data.sessions.find((s: any) => s.sourceSessionId === sArchivedAccountless)
+
+  expect(activeFound).toMatchObject({ contentAvailability: 'AVAILABLE', compressed: true, sourceLocation: 'ACTIVE' })
+  expect(archivedFound).toMatchObject({ contentAvailability: 'AVAILABLE', compressed: true, sourceLocation: 'ARCHIVED' })
+  expect(accountlessFound).toMatchObject({ contentAvailability: 'IDENTITY_UNVERIFIED', readinessReason: 'IDENTITY_UNVERIFIED' })
+  expect(accountlessFound.deepen).toBeUndefined()
+
+  // Accountless archived session rejects content inspection
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: sArchivedAccountless,
+    nativeSession: { provider: 'codex-native', id: accountlessFound.providerSessionId, ...f.target }
+  })).toEqual({ isError: true, data: { code: 'IDENTITY_UNVERIFIED' } })
+
+  // Duplicate active+archived rejects with SOURCE_IDENTITY_CONFLICT
+  expect(await f.call('inspect_agent_session', {
+    sourceSessionId: sDuplicateConflict,
+    nativeSession: { provider: 'codex-native', id: nativeDigest(JSON.stringify(['repo-u3', 'codex', sDuplicateConflict])), ...f.target }
+  })).toEqual({ isError: true, data: { code: 'SOURCE_IDENTITY_CONFLICT' } })
 }, 60_000)
