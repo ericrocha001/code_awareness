@@ -78,10 +78,16 @@ function workDiagnostics(graph: Graph, root: string, selector: ExecutionSelector
     const edge = edges.get(id)
     return !!edge && usable(edge)
   }))
+  const onlyNoHostWitness = causalCoverage.length > 0 && causalCoverage.every(reason => reason.endsWith('_CONTEXTUAL_ONLY_NO_HOST_WITNESS') || reason.endsWith('_UNSUPPORTED'))
   if (!appropriate || !commits.size) causalCoverage.push('COMMIT_SCOPE_NOT_OBSERVED')
+  const executionCommitEdges = graph.edges.filter(edge => usable(edge) && edge.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && edge.relation === 'delivery-context' && edge.to.startsWith('COMMIT:'))
+  const deliveryPrEdges = graph.edges.filter(edge => usable(edge) && ((edge.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && edge.to.startsWith('PR:')) || (edge.evidenceKind === 'GITHUB_COMMIT_LIST' && edge.to.startsWith('PR:'))))
+  const executionCommit = executionCommitEdges.length ? { state: 'FOUND' as const } : { state: workCoverage.length ? 'UNRESOLVED' as const : 'NOT_OBSERVED_IN_INSPECTED_SCOPE' as const }
+  const deliveryLink = deliveryPrEdges.length ? { state: 'VERIFIED' as const } : { state: workCoverage.length ? 'UNRESOLVED' as const : 'NOT_OBSERVED_IN_INSPECTED_SCOPE' as const }
   const causalSession = verified.length ? { state: 'VERIFIED_CAUSAL', evidenceRefs: [...new Set(verified.map(edge => edge.evidenceRef))].sort().slice(0, 6) }
-    : { state: causalCoverage.length ? 'UNRESOLVED' : contextual ? 'CONTEXTUAL_ONLY' : 'NOT_OBSERVED_IN_SNAPSHOT', ...(causalCoverage.length ? { reason: causalCoverage[0] } : {}), nextStep: expand }
-  return { workLink, causalSession, relevantCoverage: {
+    : onlyNoHostWitness && contextual ? { state: 'CONTEXTUAL_ONLY', reason: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS', nextStep: expand }
+      : { state: causalCoverage.length ? 'UNRESOLVED' : contextual ? 'CONTEXTUAL_ONLY' : 'NOT_OBSERVED_IN_SNAPSHOT', ...(causalCoverage.length ? { reason: causalCoverage[0] } : {}), nextStep: expand }
+  return { workLink, executionCommit, deliveryLink, causalSession, relevantCoverage: {
     workLink: { state: workCoverage.length ? 'PARTIAL' : 'SELECTED_SCOPE', reasons: workCoverage },
     causalSession: { state: causalCoverage.length ? 'PARTIAL' : 'SELECTED_SCOPE', reasons: causalCoverage }
   } }

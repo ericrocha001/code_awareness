@@ -115,12 +115,30 @@ export class CheckpointRegistry {
     const blocked = remote && ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(github ?? 'UNAVAILABLE')
     const nativePartialScan = !!this.db.prepare("SELECT 1 FROM registry_sources WHERE (source LIKE 'NATIVE_ARTIFACT_SCAN:%' OR source LIKE 'NATIVE_GIT_SCAN:%') AND status='PARTIAL' LIMIT 1").get()
     const labels = this.pendingArtifactLabels(1).length > 0
+    const sourceDetails = (['DELIVERY_GIT', 'DELIVERY_PR', 'DELIVERY_CONTINUUM', 'NATIVE_HOOK'] as const).flatMap(name => {
+      const row = this.source(name)
+      if (!row) return []
+      let diag: { reasonCode?: string; stage?: string } = {}
+      try { diag = JSON.parse(this.source(name + ':DIAGNOSTIC')?.cursor ?? '{}') } catch {}
+      const drainState = ['UNAVAILABLE', 'CONFLICT'].includes(row.status) ? 'FAILED' as const : row.status === 'PARTIAL' ? 'PENDING' as const : 'DRAINED' as const
+      return [{
+        source: name,
+        status: row.status,
+        drainState,
+        revision: row.revision,
+        cursor: row.cursor ?? '',
+        pending: row.status === 'PARTIAL',
+        ...(typeof diag.reasonCode === 'string' ? { reasonCode: diag.reasonCode } : {}),
+        ...(typeof diag.stage === 'string' ? { stage: diag.stage } : {}),
+        nextStep: drainState === 'PENDING' ? 'ADVANCE_CURSOR' : drainState === 'FAILED' ? 'CHECK_SOURCE' : 'NONE'
+      }]
+    })
     return { pending: local || remote || labels || nativePartialScan || unavailable.length > 0, drainable: local || remote && !blocked || labels && !unavailable.includes('CONTINUUM') || nativePartialScan, blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
       sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source),
-      details: this.source('GITHUB_DISCOVERY') ? [{ source: 'GITHUB_DISCOVERY', scope: 'UPDATED_PR_CATALOG',
+      details: [...(this.source('GITHUB_DISCOVERY') ? [{ source: 'GITHUB_DISCOVERY', scope: 'UPDATED_PR_CATALOG',
         ...(typeof discovery.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(discovery.reasonCode) ? { reasonCode: discovery.reasonCode } : {}),
         ...(discovery.lastAttemptAt ? { lastAttemptAt: discovery.lastAttemptAt } : {}), ...(discovery.lastAdvanceAt ? { lastAdvanceAt: discovery.lastAdvanceAt } : {}),
-        pending: discoveryPending }] : [] }
+        pending: discoveryPending }] : []), ...sourceDetails] }
   }
   nativeCaptureWindows(worktreeId: string, generation: string) {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })

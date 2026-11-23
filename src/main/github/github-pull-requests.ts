@@ -62,6 +62,8 @@ export class GitHubPullRequests {
           if (raced.fingerprint !== fingerprint) throw new PullRequestError('IDEMPOTENCY_CONFLICT')
         } else if (previous && !previous.completedAt && previous.operationId === effectiveInput.operationId && previous.createdNumber === existing.number) {
           await this.finalizeReceipt(operationPath, fingerprint, existing, execution, Boolean(previous.deliveryContext))
+          try { this.dependencies.onDeliveryObserved?.(context.repositoryId) }
+          catch { console.warn('[GitHub] DELIVERY_PROJECTION_REQUEST_FAILED') }
         }
       } catch (error) {
         if (error instanceof PullRequestError) throw error

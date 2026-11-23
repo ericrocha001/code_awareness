@@ -607,3 +607,93 @@ it('batches receipt paging cleanly, isolates malformed blobs, avoids EOF wrap-ar
   ]))
   expect(recovered.edges.some(e => e.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && (e.from.endsWith(externalSha) || e.to.endsWith(externalSha)))).toBe(false)
 }, 120000)
+
+it('U1: recovers EXECUTION -> COMMIT by both EXECUTION and COMMIT selectors, verifies Git object/parents, and rejects forged receipts', async () => {
+  const f = await fixture()
+  const operations = new GitOperationsService(f.root, f.git, { fetch: async () => {}, push: async () => {} } as any, { repositoryId: 'fixture', isActive: () => true })
+  writeFileSync(join(f.root, 'u1.txt'), 'u1-content')
+  const s0 = await operations.getState()
+  const stageRes = await executeGitOperationsTool(operations, 'stage_git_changes', {
+    operationId: 'u1-stage-1', mode: 'STAGE', paths: ['u1.txt'], expectedIndexRevision: s0.indexRevision, expectedWorktreeRevision: s0.worktreeRevision
+  })
+  expect(stageRes.isError, stageRes.content[0].text).toBeUndefined()
+  const s1 = await operations.getState()
+  const commitRes = await executeGitOperationsTool(operations, 'commit_git_changes', {
+    operationId: 'u1-commit-1',
+    message: 'u1 governed commit',
+    expectedHead: s1.head,
+    expectedIndexRevision: s1.indexRevision,
+    deliveryContext: f.request
+  }, (req, worktreeId) => f.service.prepareDeliveryContext(f.authority, req, f.observe, { worktreeId }), f.authority)
+  expect(commitRes.isError, commitRes.content[0].text).toBeUndefined()
+  const committed = JSON.parse(commitRes.content[0].text) as { sha: string }
+  expect(committed.sha).toMatch(/^[a-f0-9]{40}$/)
+
+  const replayRes = await executeGitOperationsTool(operations, 'commit_git_changes', {
+    operationId: 'u1-commit-1',
+    message: 'u1 governed commit',
+    expectedHead: s1.head,
+    expectedIndexRevision: s1.indexRevision,
+    deliveryContext: f.request
+  }, (req, worktreeId) => f.service.prepareDeliveryContext(f.authority, req, f.observe, { worktreeId }), f.authority)
+  expect(JSON.parse(replayRes.content[0].text)).toMatchObject({ sha: committed.sha, replayed: true })
+
+  // Forge a receipt whose commit SHA does not exist in Git and another whose parent mismatches anchor head.
+  const anchor = await f.prepare()
+  const forgedMissingSha = 'f'.repeat(40)
+  await f.git.prepareOperationReceipt(f.root, {
+    operationId: 'u1-forged-missing',
+    operation: 'commit_git_changes',
+    argumentFingerprint: 'a'.repeat(64),
+    status: 'COMPLETED' as const,
+    createdAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    deliveryContext: anchor,
+    deliveryVerified: true,
+    result: { content: [{ type: 'text' as const, text: JSON.stringify({ sha: forgedMissingSha, parent: anchor.snapshot.head }) }] }
+  })
+  const forgedWrongParent = {
+    operationId: 'u1-forged-parent',
+    operation: 'commit_git_changes',
+    argumentFingerprint: 'b'.repeat(64),
+    status: 'COMPLETED' as const,
+    createdAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    deliveryContext: { ...anchor, snapshot: { ...anchor.snapshot, head: '0'.repeat(40) } },
+    deliveryVerified: true,
+    result: { content: [{ type: 'text' as const, text: JSON.stringify({ sha: committed.sha, parent: '0'.repeat(40) }) }] }
+  }
+  await f.git.prepareOperationReceipt(f.root, forgedWrongParent)
+
+  const deliveries = await operations.deliveryProjectionPage()
+  expect(deliveries.observations.map(o => o.operationId)).toEqual(['u1-commit-1'])
+  expect(deliveries.observations[0].commitSha).toBe(committed.sha)
+
+  const sessions = new SessionStore(sessionStorePath(f.root, 'fixture'), 'fixture'); cleanup.push(async () => sessions.close())
+  const ledger = new ValidationLedger(join(f.root, '.git', 'validation-u1.db')); cleanup.push(async () => ledger.close())
+  const read = registrySources({
+    repositoryId: 'fixture',
+    root: f.root,
+    continuum: () => f.service,
+    ledger,
+    gitDeliveries: cursor => operations.deliveryProjectionPage(cursor),
+    github: { deliveryRepository: async () => 'owner/repo', commitPullRequests: async () => [], getPullRequest: async () => { throw new Error('UNEXPECTED') }, pullRequestCommits: async () => { throw new Error('UNEXPECTED') } } as any,
+    networkAllowed: () => false,
+    assertCurrent: () => {}
+  })
+  sessions.registry.applyAll(await read({ cursors: sessions.registry.cursors() }), () => {})
+
+  const byExecution = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'EXECUTION', id: 'execution-A' }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+  const execWork = JSON.parse(byExecution.content[0].text)
+  expect(execWork.workLink).toMatchObject({ state: 'FOUND', weakestLink: 'OBSERVED' })
+  expect(execWork.related.COMMIT).toEqual(expect.arrayContaining([expect.objectContaining({ id: committed.sha })]))
+
+  const byCommit = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', {
+    selector: { type: 'COMMIT', id: committed.sha }, view: 'WORK', depth: 4
+  }, () => {}, undefined, [], undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+  const commitWork = JSON.parse(byCommit.content[0].text)
+  expect(commitWork.workLink).toMatchObject({ state: 'FOUND', weakestLink: 'OBSERVED' })
+  expect(commitWork.work).toEqual(expect.arrayContaining([expect.objectContaining({ artifactId: f.plan.artifactId, role: 'PLAN' })]))
+}, 120000)

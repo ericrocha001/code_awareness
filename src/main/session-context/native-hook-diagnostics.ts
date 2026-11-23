@@ -186,7 +186,9 @@ export function nativeCorrelationSourceCoverage(registry: Pick<CheckpointRegistr
     if (state?.status !== 'COMPLETE' && state?.status !== 'CONFLICT' && state?.status !== 'UNSUPPORTED') return []
     const reasonCode = state.status === 'CONFLICT'
       ? correlationConflictReasons.find(reason => reason === state.cursor) ?? 'NATIVE_CONFLICT_UNCLASSIFIED'
-      : undefined
+      : state.status === 'UNSUPPORTED' && state.cursor === 'CONTEXTUAL_ONLY_NO_HOST_WITNESS'
+        ? 'CONTEXTUAL_ONLY_NO_HOST_WITNESS'
+        : undefined
     return [{ source, scope: 'VISIBLE_NATIVE_INVOCATION' as const, status: state.status, observedAt: state.observedAt,
       ...(reasonCode ? { reasonCode } : {}), pending: reasonCode === 'INVOCATION_INCOMPLETE' || reasonCode === 'RECEIPT_UNAVAILABLE' }]
   }))

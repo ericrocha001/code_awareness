@@ -116,10 +116,11 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
     const resolved = resolveEffectiveDeliveryContext(deliveryContext, authority?.deliveryContext, authority?.deliveryContextError)
     if (!resolved.ok) return operationalFailure({ code: resolved.reason === 'DELIVERY_CONTEXT_CONFLICT' ? 'DELIVERY_CONTEXT_CONFLICT' : 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
     if (deliveryContext !== undefined && name !== 'commit_git_changes') return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
-    const useDelivery = name === 'commit_git_changes' ? resolved.request : undefined
+    const supportsDelivery = name === 'commit_git_changes' || (name === 'merge_git_branch' && mutation.action === 'MERGE') || (name === 'revert_git_commit' && mutation.action !== 'ABORT')
+    const useDelivery = name === 'commit_git_changes' ? resolved.request : supportsDelivery ? authority?.deliveryContext : undefined
     if (useDelivery && !prepareDelivery) return operationalFailure({ code: 'DELIVERY_CONTEXT_INVALID', operationId, retryability: 'NOT_SAFE', recommendedAction: 'FIX_CONTEXT' })
     const mutate = () => dispatchGitOperationsTool(service, name, mutation)
-    const deliveryResolver = name !== 'commit_git_changes' ? undefined
+    const deliveryResolver = !supportsDelivery ? undefined
       : useDelivery ? () => prepareDelivery!(useDelivery, authority?.worktreeId)
       : authority?.worktreeId && resolveDelivery ? () => resolveDelivery(authority.worktreeId)
       : undefined

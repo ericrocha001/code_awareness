@@ -8,7 +8,7 @@ import { isLiveSessionTool } from './entire-live'
 import { sourceFingerprint, type SessionTargetSelection, type LiveSessionTarget } from './target'
 import type { RegistryBatch, RegistryReader } from './checkpoint-registry'
 import { existsSync } from 'node:fs'
-import { hasNativeBindingFile, nativeBindingPath, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
+import { hasNativeBindingFile, nativeBindingPath, nativeDigest, nativeHookProviders, readNativeBinding, spoolEventFiles, type NativeHookProvider } from './native-hooks'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { correlateNativeGit } from './native-git-correlation'
 import { nativeInvocationWindow } from './native-capture-window'
@@ -211,14 +211,42 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
                 } else if (receipt.ingested > 0 && !nativeCatchUp) {
                   nativeCatchUp = { state: 'OBSERVED', pending: false }
                 }
-                if (nativeMode === 'FOCAL' && targetProgressed && (binding.provider ?? 'codex') === 'codex') {
+                const activeStore = store
+                const hasManagedHostWitness = (invocationId: string) => {
+                  if ((binding.provider ?? 'codex') === 'codex') return true
+                  const obs = activeStore.registry.directEvidence({ kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, 'NATIVE_HOOK_OBSERVED')
+                  return obs.some(edge => {
+                    const raw = activeStore.registry.source('NATIVE_HOOK:' + edge.evidenceRef)?.cursor
+                    if (!raw) return false
+                    try {
+                      const env = JSON.parse(raw) as { producerWitness?: { verifiedBy?: string } }
+                      return env.producerWitness?.verifiedBy === 'MANAGED_RUNTIME'
+                    } catch { return false }
+                  })
+                }
+                const recordContextualOnly = (kind: 'GIT' | 'ARTIFACT', invocationId: string) => {
+                  const source = `NATIVE_${kind}:${invocationId}`
+                  const prev = activeStore.registry.source(source)
+                  if (prev?.status === 'UNSUPPORTED' && prev.cursor === 'CONTEXTUAL_ONLY_NO_HOST_WITNESS') return
+                  activeStore.registry.apply({
+                    repositoryId, source, revision: nativeDigest('CONTEXTUAL_ONLY_NO_HOST_WITNESS'),
+                    status: 'UNSUPPORTED', cursor: 'CONTEXTUAL_ONLY_NO_HOST_WITNESS', edges: []
+                  }, prev?.revision, assertRequest)
+                }
+                if (nativeMode === 'FOCAL' && targetProgressed && [...observed.keys()].some(hasManagedHostWitness)) {
                   targetRemainingScan = true
                 }
-                if (nativeMode !== 'FOCAL' && (binding.provider ?? 'codex') === 'codex') {
+                if (nativeMode !== 'FOCAL') {
                   const scanLimit = nativeMode === 'MAINTENANCE' ? 4 : 32
                   for (const [invocation, kinds] of observed) {
                     if (nativeMode === 'MAINTENANCE' && Date.now() >= nativeDeadline) { remainingNativeBacklog = true; targetRemainingScan = true; break }
                     let pending = false
+                    if (!hasManagedHostWitness(invocation)) {
+                      if (kinds.git) recordContextualOnly('GIT', invocation)
+                      if (kinds.artifact) recordContextualOnly('ARTIFACT', invocation)
+                      targetProgressed = true
+                      continue
+                    }
                     if (kinds.git) {
                       const res = await correlateNativeGit(store.registry, binding, invocation, new GitService(), assertRequest)
                       if (res === 'INVOCATION_INCOMPLETE' || res === 'RECEIPT_UNAVAILABLE') pending = true
@@ -242,9 +270,17 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
                       processedKeys++
                       const invocationId = store.registry.invocationFromKey(key)
                       if (observed.has(invocationId)) continue
+                      const existingSource = store.registry.source(`NATIVE_${kind}:` + invocationId)
+                      const isRetryableConflict = existingSource?.status === 'CONFLICT' && (existingSource.cursor === 'INVOCATION_INCOMPLETE' || existingSource.cursor === 'RECEIPT_UNAVAILABLE')
+                      if (existingSource?.status === 'UNSUPPORTED' || (existingSource?.status === 'CONFLICT' && !isRetryableConflict)) continue
+                      if (!hasManagedHostWitness(invocationId)) {
+                        recordContextualOnly(kind, invocationId)
+                        targetProgressed = true
+                        continue
+                      }
                       const session = store.registry.directEvidence({ kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, `NATIVE_${kind}_REQUEST`).find(edge => edge.relation === 'PreToolUse')?.to
                       const current = session && nativeInvocationWindow(store.registry, binding, { kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, session) === 'VERIFIED'
-                      if (store.registry.source(`NATIVE_${kind}:` + invocationId)?.status !== 'COMPLETE' || !current) {
+                      if (existingSource?.status !== 'COMPLETE' || !current) {
                         const res = kind === 'ARTIFACT'
                           ? await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
                           : await correlateNativeGit(store.registry, binding, invocationId, new GitService(), assertRequest)

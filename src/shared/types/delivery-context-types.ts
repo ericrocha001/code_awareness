@@ -24,7 +24,7 @@ export const authenticatedSessionWitness = z.object({
   channelId: identifier.optional()
 }).strict()
 export type AuthenticatedSessionWitness = z.infer<typeof authenticatedSessionWitness>
-export interface DeliveryObservation { receiptId: string; operationId: string; operation: 'commit_git_changes' | 'mutate_worktree' | 'CREATE_PULL_REQUEST' | 'PUBLISH_ARTIFACT' | 'UPDATE_ARTIFACT' | 'VALIDATION_PROOF'; argumentFingerprint: string; anchor: DeliveryAnchor;
+export interface DeliveryObservation { receiptId: string; operationId: string; operation: 'commit_git_changes' | 'mutate_worktree' | 'merge_git_branch' | 'revert_git_commit' | 'CREATE_PULL_REQUEST' | 'PUBLISH_ARTIFACT' | 'UPDATE_ARTIFACT' | 'VALIDATION_PROOF'; argumentFingerprint: string; anchor: DeliveryAnchor;
   commitSha?: string; pullRequest?: number; headSha?: string; repository?: string; artifactId?: string; artifactRevision?: number; proofId?: string }
 export interface DeliveryProjectionPage { observations: DeliveryObservation[]; nextCursor?: string }
 export type PrepareDelivery = (request: DeliveryContextRequest) => Promise<DeliveryAnchor>

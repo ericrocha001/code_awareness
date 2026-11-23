@@ -85,14 +85,32 @@ export class GitOperationReceipts {
       try {
         const after = await prepareDelivery()
         if (after) {
+          const isCommitOp = operation === 'commit_git_changes'
+            || (operation === 'mutate_worktree' && args.action === 'COMMIT')
+            || (operation === 'merge_git_branch' && args.action === 'MERGE' && value.result === 'MERGED')
+            || (operation === 'revert_git_commit' && value.result === 'REVERTED')
+          const commitSha = operation === 'commit_git_changes'
+            ? value.sha
+            : isCommitOp
+              ? value.head
+              : undefined
           const headMatches = operation === 'commit_git_changes'
-            ? after.snapshot.head === value.sha
+            ? after.snapshot.head === value.sha && value.parent === deliveryContext.snapshot.head
             : operation === 'mutate_worktree' && args.action === 'COMMIT'
-              ? after.snapshot.head === value.head
-              : operation === 'publish_worktree'
-                ? after.snapshot.head === value.pushedHead
-                : true
-          deliveryVerified = sameDeliveryScope(deliveryContext, after) && headMatches
+              ? after.snapshot.head === value.head && after.snapshot.head === value.sha && value.parent === deliveryContext.snapshot.head
+              : (operation === 'merge_git_branch' && args.action === 'MERGE' && value.result === 'MERGED') || (operation === 'revert_git_commit' && value.result === 'REVERTED')
+                ? after.snapshot.head === value.head && value.head !== deliveryContext.snapshot.head
+                : operation === 'publish_worktree'
+                  ? after.snapshot.head === value.pushedHead
+                  : true
+          let gitObjectVerified = true
+          if (isCommitOp && typeof commitSha === 'string' && /^[a-f0-9]{40}$/.test(commitSha) && typeof this.git.getCommitOperationObjects === 'function') {
+            const objects = await this.git.getCommitOperationObjects(this.root, [commitSha])
+            const obj = objects.find(item => item.sha === commitSha)
+            const singleParent = operation !== 'merge_git_branch'
+            gitObjectVerified = Boolean(obj && obj.parents.length >= 1 && (!singleParent || obj.parents.length === 1) && obj.parents[0] === deliveryContext.snapshot.head)
+          }
+          deliveryVerified = sameDeliveryScope(deliveryContext, after) && headMatches && gitObjectVerified
         }
       } catch {}
     }

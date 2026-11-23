@@ -158,9 +158,11 @@ export function registrySources(options: {
           if (!target) continue
           const freshness = service?.get(anchor.planArtifactId)?.revision === anchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE'
           const evidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: observation.receiptId, digest: digest(JSON.stringify(observation)), freshness }
-          const batch: Omit<RegistryBatch, 'repositoryId'> = { source: source + ':' + digest(observation.operationId), revision: digest(observation.receiptId + ':' + freshness), status: 'COMPLETE', entities: [from, target], edges: [
+          const scopedExecution: RegistryEntity = { kind: 'EXECUTION', id: anchor.executionId }
+          const batch: Omit<RegistryBatch, 'repositoryId'> = { source: source + ':' + digest(observation.operationId), revision: digest(observation.receiptId + ':' + freshness), status: 'COMPLETE', entities: [from, scopedExecution, target], edges: [
             { from: { kind: 'ARTIFACT', id: anchor.planArtifactId + ':' + anchor.planRevision }, relation: 'execution-context', to: from, ...evidence },
-            { from, relation: 'delivery-context', to: target, ...evidence }
+            { from, relation: 'delivery-context', to: target, ...evidence },
+            { from: scopedExecution, relation: 'delivery-context', to: target, ...evidence }
           ] }
           if (target.kind === 'PR') prDeliveries.push({ batch, number: Number(target.id), head: observation.headSha })
           else addBatch(batch)
