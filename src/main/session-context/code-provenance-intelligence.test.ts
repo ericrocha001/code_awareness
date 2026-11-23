@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it } from 'vitest'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { ArtifactStore } from '../continuum/artifact-store'
@@ -13,7 +15,11 @@ import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
+import { antigravityAppTranscriptPath } from './antigravity-app-locator'
 import { executeSessionTool, type SessionToolName } from './mcp'
+import { nativeObservationBatch } from './native-hook-ingestion'
+import { installNativeHooks } from './native-hook-installation'
+import { normalizeNativeHook, readNativeBinding } from './native-hooks'
 import { digest } from './privacy'
 import { registrySources } from './registry-sources'
 import { SessionStore, sessionStorePath } from './store'
@@ -149,6 +155,62 @@ describe('Code Provenance Intelligence — U1-U4 integrated MCP HTTP/AJV accepta
     const store = new SessionStore(storePath, repositoryId)
     cleanup.push(() => store.close())
 
+    // Seed authorized Antigravity native session + JSONL transcript linked to executionId
+    const convId = '019ba000-0000-7000-8000-000000000099'
+    const agProfile = join(base, 'ag-profile')
+    const txPath = antigravityAppTranscriptPath(agProfile, convId)
+    const literalRationale = 'Literal session rationale: verified selective delivery path and reversible provenance.'
+    mkdirSync(dirname(txPath), { recursive: true })
+    writeFileSync(txPath, [
+      { step_index: 0, type: 'USER_INPUT', source: 'USER', created_at: '2026-11-23T12:00:00Z', content: 'Implement selective delivery lookup' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', source: 'MODEL', created_at: '2026-11-23T12:00:05Z', content: literalRationale }
+    ].map(record => JSON.stringify(record)).join('\n') + '\n')
+    const summariesDb = new Database(join(agProfile, 'conversation_summaries.db'))
+    try {
+      summariesDb.exec('CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, workspace_uris TEXT, last_modified_time TEXT)')
+      summariesDb.prepare('INSERT OR REPLACE INTO conversation_summaries (conversation_id, workspace_uris, last_modified_time) VALUES (?, ?, ?)').run(
+        convId,
+        JSON.stringify([pathToFileURL(repoRoot).href]),
+        '2026-11-23 12:00:05+00:00'
+      )
+    } finally {
+      summariesDb.close()
+    }
+    const hookCommandPath = join(repoRoot, 'native-hook.cjs')
+    writeFileSync(hookCommandPath, '// test hook\n')
+    installNativeHooks({
+      repositoryId,
+      record: { path: repoRoot, worktreeId: snapshot.worktreeId, generation: snapshot.worktreeGeneration, branch: 'feat/cpi-e2e', head: governedSha, detached: false, locked: false, missing: false, prunable: false },
+      commandPath: hookCommandPath,
+      nodePath: process.execPath,
+      provider: 'antigravity',
+      authorized: true
+    })
+    const nativeBinding = { ...readNativeBinding(join(repoRoot, '.code-awareness/native-hooks/antigravity/binding.json')), provider: 'antigravity' as const }
+    const capturedSession = normalizeNativeHook(
+      { conversationId: convId, workspacePaths: [repoRoot], hookEventName: 'Stop', transcriptPath: txPath },
+      nativeBinding,
+      new Date('2026-11-23T12:00:05Z'),
+      {
+        activation: {
+          scope: 'CHECKOUT_OBSERVED',
+          executionId,
+          planArtifactId: plan.artifactId,
+          planRevision: plan.revision,
+          bindingArtifactId: binding.artifactId,
+          bindingRevision: binding.revision,
+          activationId: 'act-cpi-e2e-1',
+          revision: 1
+        }
+      }
+    )
+    store.registry.apply(nativeObservationBatch(capturedSession), undefined)
+    const providerConfigPath = join(dirname(storePath), 'session-context.provider.json')
+    writeFileSync(providerConfigPath, JSON.stringify({
+      repositoryId,
+      nativeSources: { antigravityApp: { profile: agProfile, sessionHash: capturedSession.sessionId } }
+    }))
+
     // Simulate global backlog cursor at tail on DELIVERY_CONTINUUM & DELIVERY_GIT
     store.registry.apply({
       repositoryId,
@@ -271,9 +333,10 @@ describe('Code Provenance Intelligence — U1-U4 integrated MCP HTTP/AJV accepta
 
     const discoverAll = async (selector: Record<string, unknown>) => {
       const nodes: any[] = []
+      const edges: any[] = []
       let firstPage: any
       let cursor: string | undefined
-      for (let page = 0; page < 5; page++) {
+      for (let page = 0; page < 20; page++) {
         const res = await mcpCall('discover_execution_context', {
           selector,
           mode: 'RELATION_DETAIL',
@@ -282,10 +345,11 @@ describe('Code Provenance Intelligence — U1-U4 integrated MCP HTTP/AJV accepta
         expect(res.isError).toBe(false)
         if (!firstPage) firstPage = res
         nodes.push(...res.data.nodes)
+        edges.push(...res.data.edges)
         cursor = res.data.nextCursor
         if (!cursor) break
       }
-      return { nodes, firstPage }
+      return { nodes, edges, firstPage }
     }
 
     // U2 Forward traversal: COMMIT -> EXECUTION -> PLAN/HANDOFF/PROOF
@@ -318,7 +382,78 @@ describe('Code Provenance Intelligence — U1-U4 integrated MCP HTTP/AJV accepta
     expect(literalPlan.isError).toBe(false)
     expect(literalPlan.data.rawMarkdown).toContain('Use selective delivery lookup without draining global backlog.')
 
+    // U3/U4 End-to-end: COMMIT -> EXECUTION -> SESSION -> EVENT -> literal content
+    const sessionNode = forwardNodes.find((n: any) => n.type === 'SESSION' && n.id === capturedSession.sessionId)
+    expect(sessionNode).toBeDefined()
+    expect(sessionNode.provider).toBe('antigravity-native')
+    expect(sessionNode.deepen?.tool).toBe('inspect_agent_session')
+
+    // Selector emitted by discover_execution_context reaches hook metadata without leaking raw sourceSessionId
+    const sessionHookOnly = await mcpCall(sessionNode.deepen.tool, sessionNode.deepen.arguments)
+    expect(sessionHookOnly.isError).toBe(false)
+    expect(sessionHookOnly.data.contentAvailability).toBe('SOURCE_UNAVAILABLE')
+
+    // Authorized literal selector via list_agent_sessions -> inspect_agent_session -> list_agent_session_events -> read_agent_session_event
+    const listedSessions = await mcpCall('list_agent_sessions', {
+      worktreeId: snapshot.worktreeId,
+      generation: snapshot.worktreeGeneration,
+      agent: 'antigravity'
+    })
+    expect(listedSessions.isError).toBe(false)
+    const grantedSession = listedSessions.data.sessions.find((s: any) => s.providerSessionId === sessionNode.id && s.sourceSessionId === convId)
+    expect(grantedSession?.deepen?.tool).toBe('inspect_agent_session')
+
+    const inspSession = await mcpCall(grantedSession.deepen.tool, grantedSession.deepen.arguments)
+    expect(inspSession.isError).toBe(false)
+    expect(inspSession.data.source).toBe('ANTIGRAVITY_APP_LOCAL_TRANSCRIPT_V1')
+    expect(inspSession.data.revision).toBeDefined()
+
+    const sessionEvents = await mcpCall(inspSession.data.events.tool, {
+      ...inspSession.data.events.arguments,
+      types: ['AGENT_UPDATE']
+    })
+    expect(sessionEvents.isError).toBe(false)
+    expect(sessionEvents.data.events).toHaveLength(1)
+    const eventReadArgs = {
+      ...grantedSession.deepen.arguments,
+      expectedRevision: inspSession.data.revision,
+      eventId: sessionEvents.data.events[0].eventId
+    }
+
+    const literalEvent = await mcpCall('read_agent_session_event', eventReadArgs)
+    expect(literalEvent.isError).toBe(false)
+    expect(literalEvent.data.content).toBe(literalRationale)
+    expect(literalEvent.data.transcriptImported).toBe(false)
+    expect(store.count()).toBe(0)
+
+    // Reverse traversal: SESSION -> EXECUTION -> COMMIT (preserving OBSERVED non-causal classification, Q27 INDETERMINADO)
+    const { nodes: sessionReverseNodes, edges: sessionReverseEdges, firstPage: sessionReverseFirst } = await discoverAll(sessionNode.selector)
+    expect(sessionReverseNodes.some((n: any) => n.type === 'COMMIT' && n.id === governedSha)).toBe(true)
+    expect(sessionReverseFirst.data.authorship).toBe('NOT_INFERRED')
+    expect(sessionReverseEdges.some((e: any) => e.evidenceKind === 'EXECUTION_CONTEXT_OBSERVED' && e.confidenceClass === 'OBSERVED')).toBe(true)
+    expect(sessionReverseEdges.some((e: any) => e.evidenceKind === 'NATIVE_GIT_CAUSAL' || e.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
+
+    // Negative discriminative: stale expectedRevision rejects without returning literal content
+    const staleEventRead = await mcpCall('read_agent_session_event', {
+      ...eventReadArgs,
+      expectedRevision: inspSession.data.revision + 1
+    })
+    expect(staleEventRead.isError).toBe(true)
+    expect(staleEventRead.data.code).toBe('REVISION_CONFLICT')
+    expect(JSON.stringify(staleEventRead.data)).not.toContain(literalRationale)
+
+    // Negative discriminative: revoking antigravityApp grant stops at SOURCE_UNAVAILABLE without returning literal content
+    writeFileSync(providerConfigPath, JSON.stringify({ repositoryId, nativeSources: {} }))
+    const revokedInspect = await mcpCall(grantedSession.deepen.tool, grantedSession.deepen.arguments)
+    expect(revokedInspect.isError).toBe(false)
+    expect(revokedInspect.data.contentAvailability).toBe('SOURCE_UNAVAILABLE')
+    expect(revokedInspect.data.sourceDiagnostic).toBe('PROFILE_UNAVAILABLE')
+    const revokedRead = await mcpCall('read_agent_session_event', eventReadArgs)
+    expect(revokedRead.isError).toBe(true)
+    expect(revokedRead.data.code).toBe('SOURCE_UNAVAILABLE')
+    expect(JSON.stringify(revokedRead.data)).not.toContain(literalRationale)
+
     // Cross-repo isolation check
     expect(() => new SessionStore(storePath, 'foreign-repo', true)).toThrow('REPOSITORY_MISMATCH')
-  }, 30_000)
+  }, 60_000)
 })
