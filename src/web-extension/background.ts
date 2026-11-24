@@ -1,3 +1,4 @@
+import { isPopupPickerRequest } from '../shared/web-activation/context-picker-contract'
 import { PickerRouter, type PickerMessage } from './context-picker-router'
 import { getChromeApi, type ChromeApi, type ChromeMessageSender, type ChromeNativePortLike } from './chrome-api'
 import {
@@ -406,7 +407,7 @@ export class ExtensionBackgroundRouter {
   constructor(
     private readonly sendNative: NativeMessageSender,
     private readonly runtimeId?: string,
-    chromeApi?: ChromeApi
+    private readonly chromeApi?: ChromeApi
   ) {
     const tabs = chromeApi?.tabs
     const deliver = (tab: number, documentId: string, message: unknown) => new Promise(resolve => {
@@ -434,6 +435,23 @@ export class ExtensionBackgroundRouter {
     }
 
     const type = (rawMessage as { type: string }).type
+    if (type === 'PICKER_POPUP_REQUEST') {
+      const request = (rawMessage as { request?: unknown }).request
+      const url = `chrome-extension://${this.runtimeId}/popup.html`
+      const getContexts = this.chromeApi?.runtime?.getContexts
+      const unauthorized = { ok: false, error: { code: 'PICKER_SENDER_NOT_AUTHORIZED', message: 'PICKER_SENDER_NOT_AUTHORIZED' } }
+      if (!this.runtimeId || sender.id !== this.runtimeId || sender.url !== url ||
+        sender.origin !== `chrome-extension://${this.runtimeId}` || !sender.documentId ||
+        sender.tab || (sender.frameId !== undefined && sender.frameId !== 0) ||
+        !getContexts || !isPopupPickerRequest(request)) return unauthorized
+      const contexts = await getContexts.call(this.chromeApi?.runtime, {
+        contextTypes: ['POPUP'], documentIds: [sender.documentId], documentUrls: [url]
+      }).catch(() => [])
+      if (!contexts.some(context => context.contextType === 'POPUP' &&
+        context.documentId === sender.documentId && context.documentUrl === url)) return unauthorized
+      return this.sendNative({ id: this.nextId(), action: 'context_picker', surface: 'extension-ui', request })
+    }
+
     if (type === 'PICKER_BIND' || type === 'PICKER_CLOSE' || type === 'PICKER_REQUEST') {
       return this.picker.handle(rawMessage as PickerMessage, sender)
     }

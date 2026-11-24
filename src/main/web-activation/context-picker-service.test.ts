@@ -129,3 +129,40 @@ it('gives distinct safe names to Markdown with colliding titles and refuses an o
   source.text.contentHash = hash(source.text.rawMarkdown)
   await expect(execute(request)).rejects.toThrow('PICKER_FILES_TOO_LARGE')
 })
+
+it('limits enrolled extension UI to manual context and revalidates the project and enrollment', async () => {
+  const first = project('first')
+  const second = project('second')
+  let active = first.current
+  let enrolled = true
+  const extensionOrigin = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/'
+  downloads = mkdtempSync(join(tmpdir(), 'picker-popup-downloads-'))
+  desktop.getPath.mockReturnValue(downloads)
+  const picker = new ContextPickerService(() => active, origin => enrolled && origin === extensionOrigin)
+  const request = (input: unknown, origin = extensionOrigin) => picker.execute({
+    surface: 'extension-ui', extensionOrigin: origin, request: input
+  }, connected)
+  const page = await request({ action: 'catalog', filters: {} }) as PickerCatalog
+  const selection = {
+    scope: page.scope,
+    selected: [{ artifactId: first.text.artifactId, expectedRevision: 1 }]
+  }
+  await expect(request({ action: 'preview', ...selection })).resolves.toHaveProperty('tokenCount')
+  await expect(request({ action: 'copy', ...selection })).resolves.toEqual({ outcome: 'copied' })
+  const files = await request({
+    action: 'download',
+    scope: page.scope,
+    selected: [{ artifactId: first.visual.artifactId, expectedRevision: 1 }, ...selection.selected]
+  })
+  expect(files).toMatchObject({ outcome: 'downloaded', names: ['Image.md', 'Image.webp', 'first.md'] })
+  expect(readFileSync(join(downloads, readdirSync(downloads)[0], 'Image.webp'))).toEqual(webp)
+  await expect(request({ action: 'text', ...selection })).rejects.toThrow('ORIGIN_NOT_ALLOWED')
+  await expect(request({ action: 'attach', ...selection })).rejects.toThrow('ORIGIN_NOT_ALLOWED')
+  await expect(request({ action: 'catalog', filters: {} }, 'chrome-extension://other/')).rejects.toThrow('ORIGIN_NOT_ALLOWED')
+  first.text.revision += 1
+  await expect(request({ action: 'copy', ...selection })).rejects.toThrow('REVISION_CONFLICT')
+  active = second.current
+  await expect(request({ action: 'preview', ...selection })).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
+  enrolled = false
+  await expect(request({ action: 'catalog', filters: {} })).rejects.toThrow('ORIGIN_NOT_ALLOWED')
+})

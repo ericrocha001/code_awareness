@@ -10,6 +10,7 @@ export { contextPickerSite as detectChatSite } from '../shared/web-activation/co
 export const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const
 type Position = typeof positions[number]
 export const defaultPosition: Position = 'bottom-right'
+export const floatingBarVisibleKey = 'floatingBarVisible'
 
 export function positionKey(site?: ChatSite): string {
   return site ? `floatingBarPosition.${site}` : 'floatingBarPosition'
@@ -24,6 +25,8 @@ export class FloatingBar {
   private readonly controls: HTMLElement
   private readonly onStorageChanged: ChromeStorageChangeListener
   private disposed = false
+  private visible = false
+  private preferencesVersion = 0
   private readonly activation: HTMLElement
   private panel?: HTMLIFrameElement
   private panelResize?: ResizeObserver
@@ -35,7 +38,7 @@ export class FloatingBar {
     private readonly doc: Document,
     private readonly site: ChatSite,
     private readonly storage?: ChromeApi['storage'],
-    runtime?: ChromeRuntimeApi
+    private readonly runtime?: ChromeRuntimeApi
   ) {
     const host = doc.createElement('div')
     host.id = 'code-awareness-activation-pill'
@@ -105,15 +108,14 @@ export class FloatingBar {
     brand.append(icon)
     this.controls.append(brand, this.activation)
     root.append(style, this.controls)
-    if (runtime?.getURL && runtime.sendMessage) this.mountPicker(runtime)
     this.setPosition(defaultPosition)
     this.onStorageChanged = (changes, area) => {
-      if (area === 'local' && (positionKey() in changes || positionKey(site) in changes)) {
-        this.refreshPosition()
+      if (area === 'local' && (positionKey() in changes || positionKey(site) in changes || floatingBarVisibleKey in changes)) {
+        this.refreshPreferences()
       }
     }
     storage?.onChanged?.addListener(this.onStorageChanged)
-    this.refreshPosition()
+    this.refreshPreferences()
     doc.body?.append(host)
   }
 
@@ -126,12 +128,30 @@ export class FloatingBar {
     this.positionPanel()
   }
 
-  private refreshPosition(): void {
-    const keys = [positionKey(), positionKey(this.site)]
-    this.storage?.local?.get(keys, (items) => {
-      if (this.disposed) return
+  private refreshPreferences(): void {
+    const local = this.storage?.local
+    if (!local) {
+      this.setVisible(true)
+      return
+    }
+    const keys = [positionKey(), positionKey(this.site), floatingBarVisibleKey]
+    const version = ++this.preferencesVersion
+    local.get(keys, (items) => {
+      if (this.disposed || version !== this.preferencesVersion) return
       this.setPosition(readPosition(items[keys[1]]) ?? readPosition(items[keys[0]]) ?? defaultPosition)
+      this.setVisible(items[floatingBarVisibleKey] !== false)
     })
+  }
+
+  private setVisible(visible: boolean): void {
+    this.visible = visible
+    if (!visible) {
+      this.pickerCleanup?.()
+      this.pickerCleanup = undefined
+    } else if (!this.pickerCleanup && this.runtime?.getURL && this.runtime.sendMessage) {
+      this.mountPicker(this.runtime)
+    }
+    this.host.hidden = !visible || (!this.pickerCleanup && !this.activation.hasChildNodes())
   }
 
   renderActivation(model: {
@@ -142,7 +162,7 @@ export class FloatingBar {
     action: () => void
   }): void {
     if (!this.host.isConnected) this.doc.body?.append(this.host)
-    this.host.hidden = false
+    this.host.hidden = !this.visible
     this.host.dataset.caState = model.state
     const label = this.doc.createElement('span')
     label.className = 'identity'
@@ -188,7 +208,6 @@ export class FloatingBar {
     trigger.setAttribute('aria-expanded', 'false')
     trigger.setAttribute('aria-haspopup', 'dialog')
     this.controls.append(trigger)
-    this.host.hidden = false
 
     const close = (restoreFocus = false) => {
       if (!this.panel) return
@@ -281,6 +300,7 @@ export class FloatingBar {
     win.addEventListener('pagehide', closeOnNavigation)
     this.pickerCleanup = () => {
       close()
+      trigger.remove()
       runtime.onMessage?.removeListener?.(insert)
       win.removeEventListener('message', receive)
       this.doc.removeEventListener('pointerdown', outside, true)

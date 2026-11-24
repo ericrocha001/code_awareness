@@ -1,3 +1,4 @@
+import { isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
 import { randomUUID } from 'node:crypto'
 import { contextPickerSite } from '../../shared/web-activation/context-picker-sites'
 import type {
@@ -18,7 +19,10 @@ interface PickerProject {
 export class ContextPickerService {
   private binding?: { project: PickerProject; scope: PickerScope }
 
-  constructor(private readonly activeProject: () => PickerProject | null) {}
+  constructor(
+    private readonly activeProject: () => PickerProject | null,
+    private readonly isEnrolledExtension: (origin: string) => boolean = () => false
+  ) {}
 
   private current() {
     const project = this.activeProject()
@@ -37,15 +41,27 @@ export class ContextPickerService {
   }
 
   async execute(input: unknown, connected: () => boolean): Promise<PickerResult> {
-    const args = object(input, ['webOrigin', 'request'])
-    const webOrigin = text(args.webOrigin)
-    if (!contextPickerSite(webOrigin) || new URL(webOrigin).origin !== webOrigin) {
-      throw new Error('ORIGIN_NOT_ALLOWED')
+    const surface = object(input).surface
+    const args = surface === 'extension-ui'
+      ? object(input, ['surface', 'extensionOrigin', 'request'])
+      : object(input, ['webOrigin', 'request'])
+    if (surface === 'extension-ui') {
+      if (!isPopupPickerRequest(args.request) || !this.isEnrolledExtension(text(args.extensionOrigin))) {
+        throw new Error('ORIGIN_NOT_ALLOWED')
+      }
+    } else {
+      const webOrigin = text(args.webOrigin)
+      if (!contextPickerSite(webOrigin) || new URL(webOrigin).origin !== webOrigin) {
+        throw new Error('ORIGIN_NOT_ALLOWED')
+      }
     }
     const request = parseRequest(args.request)
     const { project, scope } = this.current()
     const assertCurrent = () => {
       if (!connected()) throw new Error('PICKER_SESSION_EXPIRED')
+      if (surface === 'extension-ui' && !this.isEnrolledExtension(text(args.extensionOrigin))) {
+        throw new Error('ORIGIN_NOT_ALLOWED')
+      }
       if (this.current().scope !== scope) throw new Error('PROJECT_CONTEXT_CHANGED')
     }
     if (request.scope && (

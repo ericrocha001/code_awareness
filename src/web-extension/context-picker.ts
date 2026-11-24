@@ -33,6 +33,9 @@ const selected = new Map<string, PickerArtifact>()
 const visible = new Map<string, PickerArtifact>()
 let catalog: PickerCatalog | undefined
 let ready = false
+let popupHost = false
+let popupRequestId = 0
+const popupPending = new Map<number, (response: unknown) => void>()
 let actionPending = false
 let textAttempted = false
 let attachmentFallback = false
@@ -47,7 +50,7 @@ const selection = () => Array.from(selected.values(), ({ artifactId, revision })
   artifactId, expectedRevision: revision
 }))
 
-const shouldDownload = () => site !== 'chatgpt' || attachmentFallback || [...selected.values()].some(item => item.kind === 'VISUAL_REFERENCE')
+const shouldDownload = () => popupHost || site !== 'chatgpt' || attachmentFallback || [...selected.values()].some(item => item.kind === 'VISUAL_REFERENCE')
 
 function renderActions() {
   const disabled = actionPending || !catalog || selected.size === 0
@@ -139,15 +142,25 @@ function closePanel() {
 
 function request<T>(payload: PickerRequest): Promise<T> {
   return new Promise((resolve, reject) => {
-    if (!runtime?.sendMessage) {
-      reject(new Error('APP_UNAVAILABLE'))
-      return
-    }
-    runtime.sendMessage({ type: 'PICKER_REQUEST', challenge, request: payload }, raw => {
+    const receive = (raw: unknown) => {
       const response = raw as PickerResponse | undefined
       if (response?.ok) resolve(response.result as T)
       else reject(new Error(response?.error.message?.split(':')[0] ?? 'APP_UNAVAILABLE'))
-    })
+    }
+    if (popupHost) {
+      const id = ++popupRequestId
+      const timeout = setTimeout(() => {
+        popupPending.delete(id)
+        reject(new Error('APP_UNAVAILABLE'))
+      }, 25_000)
+      popupPending.set(id, response => {
+        clearTimeout(timeout)
+        receive(response)
+      })
+      window.parent.postMessage({ type: 'PICKER_POPUP_REQUEST', id, request: payload }, location.origin)
+    } else if (runtime?.sendMessage) {
+      runtime.sendMessage({ type: 'PICKER_REQUEST', challenge, request: payload }, receive)
+    } else reject(new Error('APP_UNAVAILABLE'))
   })
 }
 
@@ -351,7 +364,22 @@ close.addEventListener('click', closePanel)
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closePanel() })
 renderSelection()
 window.addEventListener('message', event => {
-  if (event.source !== window.parent || event.data?.type !== 'PICKER_PANEL_READY' || ready) return
+  if (event.source !== window.parent) return
+  const extensionParent = window.parent !== window && location.protocol === 'chrome-extension:' && event.origin === location.origin
+  if (popupHost && extensionParent && event.data?.type === 'PICKER_POPUP_RESPONSE') {
+    const receive = popupPending.get(event.data.id)
+    popupPending.delete(event.data.id)
+    receive?.(event.data.response)
+    return
+  }
+  if (ready) return
+  if (extensionParent && event.data?.type === 'PICKER_POPUP_READY') {
+    popupHost = true
+    close.hidden = true
+    insert.hidden = true
+    destination.textContent = pt.manualUse
+    renderActions()
+  } else if (event.data?.type !== 'PICKER_PANEL_READY') return
   ready = true
   search()
   form.querySelector('input')?.focus({ preventScroll: true })

@@ -1,3 +1,4 @@
+import { isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
 import { contextPickerSite } from '../../shared/web-activation/context-picker-sites'
 import { existsSync, readFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
@@ -399,14 +400,21 @@ export class NativeMessagingBridge {
 
     switch (command.action) {
       case 'context_picker': {
-        if (!this.callerOrigin || !contextPickerSite(command.webOrigin) ||
-          normalizeWebOrigin(command.webOrigin) !== command.webOrigin) {
-          return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker origin is not authorized')
+        if (!this.callerOrigin) return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker caller is not authorized')
+        let origin: Record<string, string>
+        if (command.surface === 'extension-ui') {
+          if ('webOrigin' in command || !isPopupPickerRequest(command.request)) {
+            return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker action is not authorized in extension UI')
+          }
+          origin = { surface: 'extension-ui', extensionOrigin: this.callerOrigin }
+        } else {
+          if ((command.surface !== undefined && command.surface !== 'web') ||
+            !contextPickerSite(command.webOrigin) || normalizeWebOrigin(command.webOrigin) !== command.webOrigin) {
+            return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker origin is not authorized')
+          }
+          origin = { webOrigin: command.webOrigin }
         }
-        const response = await this.dispatchLocalAction('context_picker', {
-          request: command.request,
-          webOrigin: command.webOrigin
-        })
+        const response = await this.dispatchLocalAction('context_picker', { ...origin, request: command.request })
         if (!response.ok) {
           return this.error(rawId, response.code === 'TIMEOUT' ? 'TIMEOUT' : 'INVALID_REQUEST', response.message)
         }

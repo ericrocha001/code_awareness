@@ -219,6 +219,9 @@ const localAgentChannel = new LocalChannelHost(
         if (!active || !project || !service || session?.repositoryPath !== project.path ||
           active.context?.identity !== 'IDENTITY_BOUND' || active.context.repositoryId !== session.repositoryId) return null
         return { repositoryId: session.repositoryId, revision: active.revision, name: project.name, service }
+      }, origin => {
+        const enrollment = extensionManagerService.getEnrollment()
+        return Boolean(enrollment?.enabled && !enrollment.revokedAt && enrollment.allowedOrigin === origin)
       })
     )
   ],

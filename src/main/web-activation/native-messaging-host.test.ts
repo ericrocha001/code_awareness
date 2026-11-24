@@ -129,6 +129,26 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
     expect(dispatchLocalAction).toHaveBeenCalledExactlyOnceWith('context_picker', { webOrigin: read.webOrigin, request })
   })
 
+  it('authorizes the picker extension UI only for manual operations and binds its caller origin', async () => {
+    const consentStore = new ConsentStore(makeTempDir('popup-consent-'))
+    const dispatchLocalAction = vi.fn(async () => ({ ok: true as const, result: { scope: 'fixture' } }))
+    const bridge = new NativeMessagingBridge({
+      consentStore, callerOrigin: VALID_EXT_ORIGIN, allowedExtensionOrigins: [VALID_EXT_ORIGIN], dispatchLocalAction
+    })
+    const request = { action: 'catalog', filters: {} }
+    const command = { id: 'popup', action: 'context_picker', surface: 'extension-ui', request }
+    expect(await bridge.handle(command)).toMatchObject({ ok: true })
+    expect(dispatchLocalAction).toHaveBeenCalledExactlyOnceWith('context_picker', {
+      surface: 'extension-ui', extensionOrigin: VALID_EXT_ORIGIN, request
+    })
+    for (const action of ['attach', 'text', 'mcp_request', 'publish']) {
+      expect(await bridge.handle({ ...command, request: { action } })).toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } })
+    }
+    expect(await bridge.handle({ ...command, webOrigin: 'https://chatgpt.com' }))
+      .toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } })
+    expect(dispatchLocalAction).toHaveBeenCalledOnce()
+  })
+
   it('validates caller/web origins, read-only allowlists, URI confinement, and revocable consent by site + projectId + dataClass', async () => {
     const dataDir = makeTempDir('web-consent-')
     const store = new ConsentStore(dataDir)
