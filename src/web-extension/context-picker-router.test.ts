@@ -43,3 +43,30 @@ it('returns only the draft outcome, and declines repetitions after uncertain del
   expect(await router.handle(action, frame)).toMatchObject({ ok: false })
   expect(native).toHaveBeenCalledOnce()
 })
+
+it('only delivers a file batch to the bound document and holds ambiguous items against overlapping retry', async () => {
+  const files = [{ name: 'primeiro.md', type: 'text/markdown' as const, encoded: 'IyBB' },
+    { name: 'segundo.md', type: 'text/markdown' as const, encoded: 'IyBC' }]
+  const native = vi.fn(async () => ({ ok: true, result: { files } }))
+  const attach = vi.fn(async () => ({
+    outcome: 'partial', confirmed: ['primeiro.md'], pending: ['segundo.md']
+  }))
+  const router = new PickerRouter(id, native, undefined, attach)
+  await router.handle({ type: 'PICKER_BIND', challenge }, { ...top, documentId: 'top' })
+  const message = {
+    type: 'PICKER_REQUEST' as const, challenge,
+    request: {
+      action: 'attach' as const, scope: { repositoryId: 'repo', binding: 'project' },
+      selected: [{ artifactId: 'a', expectedRevision: 1 }, { artifactId: 'b', expectedRevision: 2 }]
+    }
+  }
+  expect(await router.handle(message, { ...frame, tab: { ...tab, url: 'https://chatgpt.com/c/other' } }))
+    .toMatchObject({ ok: false })
+  expect(await router.handle(message, frame)).toEqual({
+    ok: true, result: { outcome: 'partial', confirmed: ['primeiro.md'], pending: ['segundo.md'] }
+  })
+  expect(attach).toHaveBeenCalledExactlyOnceWith(1, 'top', href, challenge, files)
+  expect(await router.handle({ ...message, request: { ...message.request, selected: [message.request.selected[1]] } }, frame))
+    .toMatchObject({ ok: false, error: { code: 'PICKER_ATTACH_ALREADY_ATTEMPTED' } })
+  expect(native).toHaveBeenCalledOnce()
+})

@@ -1,3 +1,4 @@
+import { labelFor, localize, messages as pt } from './locale'
 import { defaultPosition, detectChatSite, positionKey, positions, readPosition } from './floating-bar'
 import { getChromeApi } from './chrome-api'
 
@@ -58,7 +59,9 @@ function sendTab<T>(tabId: number, msg: Record<string, unknown>): Promise<T | nu
 export async function initPopup(): Promise<void> {
   const doc = (globalThis as unknown as { document?: Document }).document
   const chromeApi = getChromeApi()
-  if (!doc || !chromeApi?.tabs) return
+  if (!doc) return
+  localize(doc)
+  if (!chromeApi?.tabs) return
 
   const desktopBadge = doc.getElementById('desktop-status')!
   const scopeLabel = doc.getElementById('scope-label')!
@@ -80,7 +83,7 @@ export async function initPopup(): Promise<void> {
   const globalPosition = doc.querySelector<HTMLSelectElement>('#floating-bar-global')
   const sitePosition = doc.querySelector<HTMLSelectElement>('#floating-bar-site')
   if (storage && globalPosition && sitePosition) {
-    const labels = ['Top left', 'Top right', 'Bottom left', 'Bottom right']
+    const labels = [pt.topLeft, pt.topRight, pt.bottomLeft, pt.bottomRight]
     const options = () => positions.map((position, index) => new Option(labels[index], position))
     globalPosition.replaceChildren(...options())
     globalPosition.addEventListener('change', () => storage.set({ [positionKey()]: globalPosition.value }))
@@ -93,7 +96,7 @@ export async function initPopup(): Promise<void> {
         ? new URL(activeTab.url).hostname
         : floatingBarSite
       doc.getElementById('floating-bar-site-row')!.hidden = false
-      sitePosition.replaceChildren(new Option('Use global position', ''), ...options())
+      sitePosition.replaceChildren(new Option(pt.inherit, ''), ...options())
       storage.get(key, (items) => { sitePosition.value = readPosition(items[key]) ?? '' })
       sitePosition.addEventListener('change', () => storage.set({ [key]: sitePosition.value || null }))
     }
@@ -105,7 +108,8 @@ export async function initPopup(): Promise<void> {
 
   async function refresh(): Promise<void> {
     errorBox.textContent = ''
-    siteLabel.textContent = detected ? detected.site : 'Unsupported tab'
+    errorBox.title = ''
+    siteLabel.textContent = detected ? detected.site : pt.unsupportedTab
 
     const statusRes = await sendRuntime<{ ok: boolean; result?: StatusResult; error?: { message?: string } }>({
       type: 'GET_STATUS',
@@ -113,10 +117,11 @@ export async function initPopup(): Promise<void> {
     })
 
     if (!statusRes.ok || !statusRes.result?.available) {
-      desktopBadge.textContent = 'Offline'
+      desktopBadge.textContent = pt.offline
       desktopBadge.className = 'badge warn'
-      scopeLabel.textContent = 'Unavailable'
-      errorBox.textContent = statusRes.error?.message ?? 'Open Code Awareness Desktop to connect.'
+      scopeLabel.textContent = pt.unavailable
+      errorBox.textContent = pt.openDesktop
+      errorBox.title = statusRes.error?.message ?? ''
       metaToggle.disabled = true
       literalToggle.disabled = true
       btnActivate.disabled = true
@@ -127,9 +132,9 @@ export async function initPopup(): Promise<void> {
 
     const info = statusRes.result
     currentProjectId = info.projectId ?? null
-    desktopBadge.textContent = 'Connected'
+    desktopBadge.textContent = pt.online
     desktopBadge.className = 'badge ok'
-    scopeLabel.textContent = info.mode === 'PROJECT' && info.projectId ? `PROJECT (${info.projectId})` : 'GLOBAL_ONLY'
+    scopeLabel.textContent = info.mode === 'PROJECT' && info.projectId ? `${pt.project} (${info.projectId})` : pt.global
 
     if (detected && info.consents) {
       metaToggle.checked = info.consents.metadata
@@ -150,7 +155,7 @@ export async function initPopup(): Promise<void> {
       }>(tabId, {
         type: 'CONTENT_GET_STATE'
       })
-      stateBadge.textContent = tabState?.state ?? 'INACTIVE'
+      stateBadge.textContent = labelFor(tabState?.state ?? 'INACTIVE')
       btnActivate.disabled = false
       btnNewChat.disabled = false
       btnRevoke.disabled = false
@@ -160,18 +165,20 @@ export async function initPopup(): Promise<void> {
         const req = d.requestId ? ` (${d.requestId})` : ''
         const actionHint =
           d.code === 'SESSION_INVALIDATED' || d.code === 'SESSION_REVOKED'
-            ? ' Re-activate when ready.'
+            ? pt.reactivate
             : d.code === 'DELIVERY_UNKNOWN' || d.code === 'DELIVERY_RECOVERY_EXPIRED'
-              ? ' Verify the chat conversation before continuing.'
+              ? pt.verifyDraft
               : ''
-        errorBox.textContent = `${phase}${d.code ?? 'DIAGNOSTIC'}${req}: ${d.message ?? tabState.lastError ?? ''}${actionHint}`
+        errorBox.textContent = actionHint || pt.sessionProblem
+        errorBox.title = `${phase}${d.code ?? 'DIAGNOSTIC'}${req}: ${d.message ?? tabState.lastError ?? ''}${actionHint}`
       } else if (tabState?.lastError) {
-        errorBox.textContent = tabState.lastError
+        errorBox.textContent = pt.sessionProblem
+        errorBox.title = tabState.lastError
       } else if (tabState?.lastDelivery && !tabState.lastDelivery.reason && tabState.lastDelivery.status === 'AWAITING_DELIVERY_ACK') {
-        errorBox.textContent = 'Awaiting chat delivery confirmation...'
+        errorBox.textContent = pt.awaitDelivery
       }
     } else {
-      stateBadge.textContent = 'INACTIVE'
+      stateBadge.textContent = labelFor('INACTIVE')
       btnActivate.disabled = true
       btnNewChat.disabled = true
       btnRevoke.disabled = true
@@ -211,7 +218,8 @@ export async function initPopup(): Promise<void> {
       sendBootstrap: true
     })
     if (res && !res.ok && res.error?.message) {
-      errorBox.textContent = res.error.message
+      errorBox.textContent = pt.sessionProblem
+      errorBox.title = res.error.message
     }
     await refresh()
   })

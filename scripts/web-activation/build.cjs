@@ -72,12 +72,9 @@ function computeWebActivationInputsFingerprint(repoRoot) {
 function hashDirectoryFiles(dir) {
   const result = {}
   if (!existsSync(dir)) return result
-  const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))
-  for (const entry of entries) {
-    if (!entry.isFile()) continue
-    const full = join(dir, entry.name)
-    const buf = readFileSync(full)
-    result[entry.name] = {
+  for (const file of walkFiles(dir, () => true)) {
+    const buf = readFileSync(file)
+    result[relative(dir, file).replaceAll('\\', '/')] = {
       sha256: hashBufferSha256(buf),
       bytes: buf.length
     }
@@ -158,6 +155,9 @@ async function buildWebActivationArtifacts(options = {}) {
     define
   })
 
+  const localePath = '_locales/pt_BR/messages.json'
+  mkdirSync(join(extOutDir, '_locales', 'pt_BR'), { recursive: true })
+  copyFileSync(join(extDir, localePath), join(extOutDir, localePath))
   copyFileSync(join(extDir, 'manifest.json'), join(extOutDir, 'manifest.json'))
   copyFileSync(join(extDir, 'popup.html'), join(extOutDir, 'popup.html'))
   copyFileSync(join(extDir, 'context-picker.html'), join(extOutDir, 'context-picker.html'))

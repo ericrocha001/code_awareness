@@ -1,3 +1,4 @@
+import { labelFor, messages as pt } from './locale'
 import { detectChatSite, FloatingBar } from './floating-bar'
 import {
   ACTIVATION_CONTRACT_PROTOCOL,
@@ -1480,22 +1481,22 @@ export class ContentSessionController {
     const state = this.session.getState()
     const binding = this.session.getBinding()
 
-    const scopeTag = binding.mode === 'PROJECT' && binding.projectId ? `Project` : 'Global'
+    const scopeTag = binding.mode === 'PROJECT' && binding.projectId ? pt.project : pt.global
     let statusSuffix = ''
     if (state === 'READY' || state === 'RESUMING' || state === 'WAITING_TOOL') {
       if (this.lastDelivery?.status === 'PENDING_RECOVERY') {
-        statusSuffix = ' · Pending send'
+        statusSuffix = ` · ${pt.pendingSend}`
       } else if (this.lastDelivery?.status === 'AWAITING_DELIVERY_ACK') {
-        statusSuffix = ' · Confirming send'
+        statusSuffix = ` · ${pt.confirming}`
       } else if (this.lastDelivery?.status === 'DELIVERY_UNKNOWN') {
-        statusSuffix = ' · Delivery unconfirmed'
+        statusSuffix = ` · ${pt.unknownSend}`
       } else if (this.lastDelivery?.status === 'FAILED') {
-        statusSuffix = ` · Send failed`
+        statusSuffix = ` · ${pt.sendFailed}`
       } else if (this.lastDiagnostic?.phase === 'execution' || this.lastDiagnostic?.phase === 'parse') {
-        statusSuffix = ` · ${this.lastDiagnostic.code}`
+        statusSuffix = ` · ${pt.handlingFailed}`
       }
     }
-    const label = `Code Awareness · ${state}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}${statusSuffix}`
+    const label = `${labelFor(state)}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}${statusSuffix}`
     let title = ''
     if (this.lastDiagnostic) {
       const reqInfo = this.lastDiagnostic.requestId ? ` [${this.lastDiagnostic.requestId}]` : ''

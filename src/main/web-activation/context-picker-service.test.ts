@@ -31,6 +31,7 @@ function project(repositoryId: string) {
   const service = {
     assertRepository: (id: string) => { if (id !== repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED') },
     assertActive: vi.fn(),
+    assertSelection: vi.fn(),
     assertBuilderSelection: (selection: { artifactId: string; expectedRevision: number }[]) => {
       if (selection.some(({ artifactId, expectedRevision }) =>
         records.find(item => item.artifactId === artifactId)?.revision !== expectedRevision)) {
@@ -42,6 +43,7 @@ function project(repositoryId: string) {
     })) })),
     tags: () => [{ slug: 'architecture', name: 'Architecture' }],
     facets: () => [{ key: 'executionId', values: [] }, { key: 'kind', values: [] }],
+    selectionTokens: async (items: { artifactId: string }[]) => items.map(({ artifactId }) => ({ artifactId, rawMarkdownTokenCount: 12 })),
     get: vi.fn((id: string) => records.find(item => item.artifactId === id)),
     getVisual: vi.fn(() => ({ data: webp, media: { sha256: hash(webp), bytes: webp.length } }))
   }
@@ -77,7 +79,7 @@ it('lists metadata in the active project and rejects stale selection across scop
   expect(desktop.writeText).not.toHaveBeenCalled()
 })
 
-it('previews mixed documents without media bytes and sends literal text and original ZIP to explicit fallbacks', async () => {
+it('previews mixed documents without media bytes and sends literal text and individual originals to explicit fallbacks', async () => {
   const source = project('source')
   downloads = mkdtempSync(join(tmpdir(), 'picker-downloads-'))
   desktop.getPath.mockReturnValue(downloads)
@@ -86,6 +88,7 @@ it('previews mixed documents without media bytes and sends literal text and orig
   const page = await execute({ action: 'catalog', filters: {} }) as PickerCatalog
   const selected = [source.visual, source.text].map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision }))
   const preview = await execute({ action: 'preview', scope: page.scope, selected }) as PickerPreview
+  expect(preview.artifactTokens).toEqual(selected.map(({ artifactId }) => ({ artifactId, rawMarkdownTokenCount: 12 })))
   expect(preview.hasVisuals).toBe(true)
   expect(preview.tokenCount).toBeGreaterThan(0)
   expect(preview.members.map(item => item.artifactId)).toEqual(selected.map(item => item.artifactId))
@@ -94,14 +97,35 @@ it('previews mixed documents without media bytes and sends literal text and orig
 
   await expect(execute({ action: 'copy', scope: page.scope, selected: [selected[1]] })).resolves.toEqual({ outcome: 'copied' })
   expect(desktop.writeText).toHaveBeenCalledWith(source.text.rawMarkdown)
-  await expect(execute({ action: 'export', scope: page.scope, selected })).resolves.toEqual({ outcome: 'saved' })
-  const files = readdirSync(downloads)
-  expect(files).toHaveLength(1)
-  const archive = readFileSync(join(downloads, files[0]))
-  expect(archive.includes(webp)).toBe(true)
-  expect(archive.includes(Buffer.from(source.text.rawMarkdown))).toBe(true)
+  const attached = await execute({ action: 'attach', scope: page.scope, selected: [selected[1]] })
+  expect(attached).toEqual({ files: [{ name: 'source.md', type: 'text/markdown', encoded: Buffer.from(source.text.rawMarkdown).toString('base64') }] })
+  const downloaded = await execute({ action: 'download', scope: page.scope, selected })
+  expect(downloaded).toMatchObject({ outcome: 'downloaded', names: ['Image.md', 'Image.webp', 'source.md'] })
+  const subdir = readdirSync(downloads)
+  expect(subdir).toHaveLength(1)
+  expect(readFileSync(join(downloads, subdir[0], 'Image.webp'))).toEqual(webp)
+  expect(readFileSync(join(downloads, subdir[0], 'source.md'))).toEqual(Buffer.from(source.text.rawMarkdown))
 
   await expect(picker.execute({ webOrigin: origin, request: { action: 'copy', scope: page.scope, selected } }, () => false))
     .rejects.toThrow('PICKER_SESSION_EXPIRED')
   expect(desktop.writeText).toHaveBeenCalledTimes(1)
+})
+
+it('gives distinct safe names to Markdown with colliding titles and refuses an oversized native batch', async () => {
+  const source = project('source')
+  source.text.metadata.name = 'CON: bases'
+  source.visual.metadata.name = 'con_ bases'
+  source.visual.metadata.kind = 'DOCUMENT'
+  const picker = new ContextPickerService(() => source.current)
+  const execute = (request: unknown) => picker.execute({ webOrigin: origin, request }, connected)
+  const page = await execute({ action: 'catalog', filters: {} }) as PickerCatalog
+  const request = {
+    action: 'attach', scope: page.scope,
+    selected: [source.text, source.visual].map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision }))
+  }
+  const materialized = await execute(request)
+  expect(materialized).toMatchObject({ files: [{ name: 'CON_ bases.md' }, { name: 'con_ bases-2.md' }] })
+  source.text.rawMarkdown = 'doc\n'.repeat(180_000)
+  source.text.contentHash = hash(source.text.rawMarkdown)
+  await expect(execute(request)).rejects.toThrow('PICKER_FILES_TOO_LARGE')
 })

@@ -966,7 +966,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
         reason: 'DELIVERY_UNKNOWN',
         requestIds: ['req-ack-timeout']
       })
-      expect(dsAck.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Delivery unconfirmed')
+      expect(dsAck.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Envio sem confirmação')
       expect(ctrlAck.checkMaintenanceReadiness(false).ready).toBe(true)
       expect(dsAck.sent).toHaveLength(3)
       expect(fixtureAck.callCounts.listArtifacts).toBe(3)
@@ -989,7 +989,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
       })
       await ctrlExp.handleDomMutation()
       expect(ctrlExp.getStatusSnapshot().lastDelivery?.status).toBe('PENDING_RECOVERY')
-      expect(dsExp.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Pending send')
+      expect(dsExp.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Envio pendente')
 
       await vi.advanceTimersByTimeAsync(60_000)
       expect(ctrlExp.getStatusSnapshot().lastDelivery).toMatchObject({
@@ -1244,10 +1244,11 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
         }
         await initPopup()
         const msg1 = popupDom.window.document.getElementById('status-message')?.textContent ?? ''
-        expect(msg1).toContain('[runtime_message]')
-        expect(msg1).toContain('DELIVERY_UNKNOWN')
-        expect(msg1).toContain('(req-t1)')
-        expect(msg1).toContain('Verify the chat conversation before continuing.')
+        const diagnostic = popupDom.window.document.getElementById('status-message')?.title ?? ''
+        expect(diagnostic).toContain('[runtime_message]')
+        expect(diagnostic).toContain('DELIVERY_UNKNOWN')
+        expect(diagnostic).toContain('(req-t1)')
+        expect(msg1).toContain('Confira o rascunho antes de tentar novamente.')
         expect(msg1).not.toContain('Bearer')
 
         tabDiagnosticState = {
@@ -1258,7 +1259,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
         }
         await initPopup()
         const msg2 = popupDom.window.document.getElementById('status-message')?.textContent ?? ''
-        expect(msg2).toBe('Awaiting chat delivery confirmation...')
+        expect(msg2).toBe('Aguardando confirmação do chat.')
       } finally {
         ;(globalThis as { document?: unknown }).document = prevDoc
         ;(globalThis as { chrome?: unknown }).chrome = prevChrome

@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="en">
+<html lang="pt-BR">
   <head>
     <meta charset="utf-8" />
-    <title>Code Awareness Web Activation</title>
+    <title data-label="settings"></title>
     <style>
       body {
         margin: 0;
@@ -72,36 +72,36 @@
     </style>
   </head>
   <body>
-    <h1>Code Awareness · Local MCP</h1>
+    <h1 data-label="settings"></h1>
     <div class="card">
-      <div class="row"><span>Desktop Bridge</span><span id="desktop-status" class="badge">Checking…</span></div>
-      <div class="row"><span>Active Scope</span><span id="scope-label">-</span></div>
-      <div class="row"><span>Active Chat</span><span id="site-label">-</span></div>
-      <div class="row"><span>Session State</span><span id="session-state" class="badge">INACTIVE</span></div>
+      <div class="row"><span data-label="bridge"></span><span id="desktop-status" class="badge" data-label="checking"></span></div>
+      <div class="row"><span data-label="scope"></span><span id="scope-label">-</span></div>
+      <div class="row"><span data-label="activeChat"></span><span id="site-label">-</span></div>
+      <div class="row"><span data-label="session"></span><span id="session-state" class="badge"></span></div>
     </div>
 
     <div class="card">
-      <strong style="font-size:12px;">Read-Only Egress Consent</strong>
+      <strong style="font-size:12px;" data-label="consent"></strong>
       <label class="toggle">
-        <span>Skills &amp; Repo Metadata</span>
+        <span data-label="metadata"></span>
         <input id="consent-metadata" type="checkbox" disabled />
       </label>
       <label class="toggle">
-        <span>Literal Source &amp; Skill Files</span>
+        <span data-label="literal"></span>
         <input id="consent-literal" type="checkbox" disabled />
       </label>
-      <div class="hint">Scoped per site + project. Mutations, writes, and CLI tools remain blocked.</div>
+      <div class="hint" data-label="policy"></div>
     </div>
 
     <div class="actions">
-      <button id="btn-activate" disabled>Activate Chat</button>
-      <button id="btn-new-chat" class="secondary" disabled>New Chat</button>
-      <button id="btn-revoke" class="danger" disabled>Revoke</button>
+      <button id="btn-activate" disabled data-label="activate"></button>
+      <button id="btn-new-chat" class="secondary" disabled data-label="newChat"></button>
+      <button id="btn-revoke" class="danger" disabled data-label="revoke"></button>
     </div>
     <div id="status-message" class="error"></div>
 
     <div class="card">
-      <label class="row">Floating Bar position <select id="floating-bar-global"></select></label>
+      <label class="row"><span data-label="barPosition"></span><select id="floating-bar-global"></select></label>
       <label class="row" id="floating-bar-site-row" hidden>
         <span id="floating-bar-site-label"></span>
         <select id="floating-bar-site"></select>
