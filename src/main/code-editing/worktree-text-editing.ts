@@ -177,9 +177,12 @@ export async function editWorktreeText(
         let state = batch.state
         let code = batch.code
         let finalCheckFailed = false
-        if (batch.state !== 'REJECTED' && batch.state !== 'NO_CHANGE') {
+        let snapshotAfter: WorktreeSnapshot | undefined
+        if (batch.state === 'REJECTED' || batch.state === 'NO_CHANGE') {
+          try { snapshotAfter = await ctx.observeSnapshot() } catch {}
+        } else {
           try {
-            await ctx.finalCheck()
+            snapshotAfter = await ctx.finalCheck()
           } catch {
             finalCheckFailed = true
             if (state === 'APPLIED') {
@@ -189,8 +192,6 @@ export async function editWorktreeText(
           }
         }
         if (batch.previews.length) pendingDiff = focalDiff(batch.previews)
-        let snapshotAfter: WorktreeSnapshot | undefined
-        try { snapshotAfter = await ctx.observeSnapshot() } catch {}
         const value: Record<string, unknown> = {
           state,
           ...(code ? { code } : {}),

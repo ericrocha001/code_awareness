@@ -441,29 +441,30 @@ describe('autonomous worktree text editing through real MCP HTTP', () => {
       expect(lostReplay.isError).toBe(true)
       expect(lostReplay.data).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
 
-      // Mid-batch external drift -> PARTIAL without rollback
+      // Mid-batch external drift -> PARTIAL without rollback (content change with identical porcelain status '?? foreign.txt')
+      writeFileSync(join(f.a, 'foreign.txt'), 'external-v1')
       const inspectedAfterOnce = (await f.call('inspect_worktree', { worktreeId: wtA.worktreeId })).data
-      const origExcluding = f.git.getWorktreeRevisionExcluding.bind(f.git)
-      let excludingCalls = 0
-      const excludingSpy = vi.spyOn(f.git, 'getWorktreeRevisionExcluding').mockImplementation(async (dir, excluded) => {
-        excludingCalls++
-        if (excludingCalls === 3) {
-          writeFileSync(join(f.a, 'foreign.txt'), 'external-change')
+      const origCaptureEdit = f.git.captureWorktreeEditObservation.bind(f.git)
+      let captureCalls = 0
+      const captureSpy = vi.spyOn(f.git, 'captureWorktreeEditObservation').mockImplementation(async (dir, excluded, opts) => {
+        captureCalls++
+        if (captureCalls === 3) {
+          writeFileSync(join(f.a, 'foreign.txt'), 'external-v2')
         }
-        return origExcluding(dir, excluded)
+        return origCaptureEdit(dir, excluded, opts)
       })
       const partial = await f.call('edit_worktree_text', {
         worktreeId: wtA.worktreeId,
         generation: wtA.generation,
         snapshot: snap(inspectedAfterOnce),
         operationId: 'op-mid-batch-external',
-        intent: { description: 'Detect external change mid-batch' },
+        intent: { description: 'Detect external content change mid-batch' },
         changes: [
           { operation: 'EDIT', path: 'src/alpha.ts', expectedSha256: readAlpha.fileRevision, replacements: [{ oldText: 'ação 😀', newText: 'first-done' }] },
           { operation: 'EDIT', path: 'src/beta.ts', expectedSha256: sha(betaOnce), replacements: [{ oldText: 'once', newText: 'second-blocked' }] }
         ]
       })
-      excludingSpy.mockRestore()
+      captureSpy.mockRestore()
       expect(partial.isError).toBe(true)
       expect(partial.data.state).toBe('PARTIAL')
       expect(partial.data.code).toBe('EDIT_PARTIAL')
@@ -471,7 +472,7 @@ describe('autonomous worktree text editing through real MCP HTTP', () => {
       expect(partial.data.files[1]).toMatchObject({ path: 'src/beta.ts', state: 'CONFLICT', code: 'GIT_STATE_CHANGED' })
       expect(readFileSync(join(f.a, 'src/alpha.ts'), 'utf8')).toContain('first-done')
       expect(readFileSync(join(f.a, 'src/beta.ts'), 'utf8')).toBe(betaOnce)
-      expect(readFileSync(join(f.a, 'foreign.txt'), 'utf8')).toBe('external-change')
+      expect(readFileSync(join(f.a, 'foreign.txt'), 'utf8')).toBe('external-v2')
 
       // Protected branch refusal on secondary worktree checked out to main
       await gitExec(f.b, ['checkout', '-b', 'main'])
