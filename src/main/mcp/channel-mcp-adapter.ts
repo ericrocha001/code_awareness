@@ -15,6 +15,7 @@ import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import { GIT_OPERATIONS_TOOLS, executeGitOperationsTool } from '../git-operations/git-operations-mcp'
+import { WORKTREE_TEXT_EDITING_TOOLS, executeWorktreeTextEditing } from '../code-editing/worktree-text-editing-mcp'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
 import { bindProjectNavigation, type ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { CODE_NAVIGATION_MCP_TOOLS, executeCodeNavigationTool } from './code-navigation-mcp'
@@ -484,7 +485,7 @@ export class ChannelMcpAdapter {
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.devUpdateService) tools.push(REQUEST_DEV_UPDATE_TOOL)
-    if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
+    if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS, ...WORKTREE_TEXT_EDITING_TOOLS)
     if (this.githubContext?.githubIntegration) tools.push(INSPECT_PULL_REQUEST_MERGEABILITY_TOOL)
     if (this.githubContext?.githubIntegration) tools.push(...GITHUB_PR_TOOLS.filter(tool => tool.name === 'create_pull_request' ? this.githubContext!.githubIntegration!.canCreatePullRequests?.() && !!this.githubContext!.githubPrIsActive : ['merge_pull_request', 'close_pull_request'].includes(tool.name) ? this.githubContext!.githubIntegration!.canIntegratePullRequests?.() && !!this.githubContext!.githubPrIsActive : true))
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
@@ -582,6 +583,7 @@ export class ChannelMcpAdapter {
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
     if (CODE_NAVIGATION_MCP_TOOLS.some(tool => tool.name === name)) return 'Code Navigation'
+    if (WORKTREE_TEXT_EDITING_TOOLS.some(tool => tool.name === name)) return 'Code Editing'
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
@@ -734,6 +736,11 @@ export class ChannelMcpAdapter {
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) {
       return this.repositoryFileIngress ? executeImportRepositoryFile(this.repositoryFileIngress, args)
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }
+    }
+    if (WORKTREE_TEXT_EDITING_TOOLS.some(tool => tool.name === name)) {
+      return this.gitOperations
+        ? executeWorktreeTextEditing(this.gitOperations, args, authority)
+        : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
       return this.gitOperations ? executeGitOperationsTool(

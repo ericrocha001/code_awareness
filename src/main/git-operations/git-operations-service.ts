@@ -339,7 +339,7 @@ export class GitOperationsService {
       const { service } = await this.selectWorktree(request.worktreeId!)
       if (scope.paths.length) scope.paths = service.paths(scope.paths)
       for (const branch of scope.branches) await service.branch(branch)
-      if ((scope.operations.includes('STAGE') || scope.operations.includes('UNSTAGE') || scope.operations.includes('COMMIT')) && !scope.paths.length) fail('INVALID_ARGUMENT')
+      if ((scope.operations.includes('STAGE') || scope.operations.includes('UNSTAGE') || scope.operations.includes('COMMIT') || scope.operations.includes('EDIT_TEXT')) && !scope.paths.length) fail('INVALID_ARGUMENT')
       return await this.ownership!.request(request.worktreeId!, request.snapshot!, scope, request.durationSeconds!, request.action === 'RECOVER')
     } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_APPROVAL_FAILED') }
   }
@@ -427,6 +427,78 @@ export class GitOperationsService {
       }
       return out
     } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED') }
+  }
+
+  async executeWorktreeEdit(
+    request: { worktreeId: string; generation: string; leaseId: string; leaseCredential: string; operationId: string; snapshot: WorktreeSnapshot; paths: string[] },
+    fingerprintArgs: Record<string, unknown>,
+    effect: (ctx: { root: string; repositoryId: string; isActive: () => boolean; beforePublish: () => Promise<void>; finalCheck: () => Promise<void>; observeSnapshot: () => Promise<WorktreeSnapshot> }) => Promise<GitOperationalResult & { preserveGrant?: boolean }>,
+    options?: { sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness }
+  ): Promise<GitOperationalResult> {
+    if (!this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
+    if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    const existing = await this.git.readOperationReceipt(this.repoRoot, request.operationId)
+    const common = realpathSync(await this.git.getCommonDirectory(this.repoRoot))
+    const discovery = await this.worktrees.discover()
+    const record = discovery.worktrees.find(w => w.worktreeId === request.worktreeId)
+    const generation = record?.generation ?? request.generation
+    const receiptArgs = { ...fingerprintArgs, credentialHash: ownershipDigest(request.leaseCredential), repositoryId: this.worktreeRepositoryId, generation, commonDirectory: common }
+    const receipts = new GitOperationReceipts(this.repoRoot, this.git)
+    if (existing) {
+      return receipts.executeResult(request.operationId, 'edit_worktree_text', receiptArgs, async () => { throw new Error('RECEIPT_REPLAY_REQUIRED') }, undefined, options)
+    }
+    if (!record || record.missing || record.prunable || record.generation !== request.generation) fail('WORKTREE_STALE')
+    try {
+      return await this.ownership.execute(request.worktreeId, request.leaseId, request.leaseCredential, 'EDIT_TEXT', async (observed, scope, _assertCurrent, assertGrant) => {
+        return receipts.executeResult(request.operationId, 'edit_worktree_text', receiptArgs, async () => {
+          try {
+            if (ownershipDigest(request.snapshot) !== ownershipDigest(observed.snapshot)) fail('GIT_STATE_CHANGED')
+            if (this.worktrees!.isReference(request.worktreeId)) fail('WORKTREE_PRIMARY_PROTECTED')
+            if (!observed.snapshot.branch) fail('WORKTREE_BRANCH_REQUIRED')
+            if (['main', 'master'].includes(observed.snapshot.branch)) fail('WORKTREE_BRANCH_PROTECTED')
+            if (this.worktreeValidation && new GitWorktreeLifecycle(observed.commonDirectory).get(record) && await this.worktreeValidation.busy(request.worktreeId)) fail('WORKTREE_VALIDATION_BUSY')
+            if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+            const selected = await this.selectWorktree(request.worktreeId)
+            const normalizedPaths = selected.service.paths(request.paths, 16)
+            if (normalizedPaths.some(item => !scope.paths.includes(item))) fail('WORKTREE_PATH_NOT_GRANTED')
+            const foreign0 = await this.git.getWorktreeRevisionExcluding(observed.path, normalizedPaths)
+            const assertBatchCurrent = async () => {
+              assertGrant()
+              if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+              const current = await this.selectWorktree(request.worktreeId)
+              const state = await current.service.getState()
+              if (
+                current.record.generation !== observed.generation ||
+                current.record.path !== observed.path ||
+                state.branch !== observed.snapshot.branch ||
+                state.head !== observed.snapshot.head ||
+                state.indexRevision !== observed.snapshot.indexRevision ||
+                state.operation !== observed.snapshot.operation
+              ) fail('GIT_STATE_CHANGED')
+              if (await this.git.getWorktreeRevisionExcluding(observed.path, normalizedPaths) !== foreign0) fail('GIT_STATE_CHANGED')
+              assertGrant()
+            }
+            const observeSnapshot = async (): Promise<WorktreeSnapshot> => {
+              const current = await this.selectWorktree(request.worktreeId)
+              const state = await current.service.getState()
+              return { branch: state.branch, head: state.head, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision, operation: state.operation }
+            }
+            return await effect({
+              root: observed.path,
+              repositoryId: this.worktreeRepositoryId!,
+              isActive: () => !this.coordinationIdentity || this.coordinationIdentity.isActive(),
+              beforePublish: assertBatchCurrent,
+              finalCheck: assertBatchCurrent,
+              observeSnapshot
+            })
+          } catch (error) {
+            return { value: { code: error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED' }, isError: true }
+          }
+        }, undefined, options)
+      }, { preserveGrant: result => !result.isError || result.value?.state === 'REJECTED' })
+    } catch (error) {
+      throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED')
+    }
   }
 
   async manageWorktree(request: ScopedWorktreeRequest & ({ action: 'CREATE'; branch: string; startPoint: string } | { action: 'CLOSE'; preservedBranch: string })) {

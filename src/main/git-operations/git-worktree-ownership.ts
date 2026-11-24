@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-export type WorktreeIntent = 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH' | 'CREATE_WORKTREE' | 'PUSH' | 'INTEGRATE' | 'CLOSE'
+export type WorktreeIntent = 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH' | 'CREATE_WORKTREE' | 'PUSH' | 'INTEGRATE' | 'CLOSE' | 'EDIT_TEXT'
 export interface WorktreeSnapshot {
   branch: string | null
   head: string | null
@@ -212,14 +212,24 @@ export class GitWorktreeOwnership {
     return 'KNOWN_GRANTED'
   }
 
-  async execute<T>(worktreeId: string, leaseId: string, credential: string, intent: WorktreeIntent | 'RELEASE',
-    effect: (observation: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>) => Promise<T>): Promise<T> {
+  async execute<T>(
+    worktreeId: string,
+    leaseId: string,
+    credential: string,
+    intent: WorktreeIntent | 'RELEASE',
+    effect: (observation: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>, assertGrant: () => void) => Promise<T>,
+    options?: { preserveGrant?: (result: T) => boolean }
+  ): Promise<T> {
     const observed = await this.observe(worktreeId)
     return this.locked(observed, async () => {
-      const grant = this.read(observed)
-      if (!grant || grant.requestId !== leaseId || grant.credentialHash !== ownershipDigest(credential)) fail('WORKTREE_OWNERSHIP_REQUIRED')
-      if (grant.instanceId !== this.instanceId || grant.state !== 'GRANTED') fail('WORKTREE_RECOVERY_REQUIRED')
-      if (Date.parse(grant.expiresAt) <= this.now()) fail('WORKTREE_GRANT_EXPIRED')
+      const assertGrant = () => {
+        const current = this.read(observed)
+        if (!current || current.requestId !== leaseId || current.credentialHash !== ownershipDigest(credential)) fail('WORKTREE_OWNERSHIP_REQUIRED')
+        if (current.instanceId !== this.instanceId || current.state !== 'GRANTED') fail('WORKTREE_RECOVERY_REQUIRED')
+        if (Date.parse(current.expiresAt) <= this.now()) fail('WORKTREE_GRANT_EXPIRED')
+        return current
+      }
+      const grant = assertGrant()
       if (intent !== 'RELEASE' && !grant.scope.operations.includes(intent)) fail('WORKTREE_INTENT_NOT_GRANTED')
       this.coherent(grant.observation, await this.observe(worktreeId))
       const assertCurrent = async () => {
@@ -230,14 +240,19 @@ export class GitWorktreeOwnership {
       try {
         if (intent === 'CLOSE') { grant.state = 'RELEASED'; this.write(grant) }
         await assertCurrent()
-        const result = await effect(observed, grant.scope, assertCurrent)
+        const result = await effect(observed, grant.scope, assertCurrent, () => { assertGrant() })
         if (intent !== 'CLOSE') grant.observation = await this.observe(worktreeId)
-        grant.state = intent === 'RELEASE' || intent === 'CLOSE' ? 'RELEASED' : result && typeof result === 'object' && 'isError' in result && result.isError ? 'RECOVERY_PENDING' : 'GRANTED'
+        const isErrorResult = result && typeof result === 'object' && 'isError' in result && Boolean(result.isError)
+        const preserve = isErrorResult && Boolean(options?.preserveGrant?.(result))
+        grant.state = intent === 'RELEASE' || intent === 'CLOSE' ? 'RELEASED' : isErrorResult && !preserve ? 'RECOVERY_PENDING' : 'GRANTED'
         this.write(grant)
         return result
       } catch (error) {
-        grant.state = 'RECOVERY_PENDING'
-        this.write(grant)
+        const current = this.read(observed)
+        if (current && current.requestId === leaseId && current.instanceId === this.instanceId) {
+          grant.state = 'RECOVERY_PENDING'
+          this.write(grant)
+        }
         throw error
       }
     })

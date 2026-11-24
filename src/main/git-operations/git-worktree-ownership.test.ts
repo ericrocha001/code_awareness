@@ -115,4 +115,48 @@ describe('local worktree ownership authority', () => {
     await expect(withWorktreeTransaction(f.common, f.administrative, async () => {})).rejects.toThrow('WORKTREE_TRANSACTION_BUSY')
     expect(readFileSync(stale, 'utf8')).toBe('crashed transaction')
   })
+
+  it('enforces EDIT_TEXT intent, mid-effect expiration via assertGrant, and preserveGrant on recoverable error', async () => {
+    const f = fixture(async () => true)
+    const stageOnly = await f.manager.request(f.observed.worktreeId, f.observed.snapshot, f.scope, 300)
+    await accept(f.manager, stageOnly)
+    await expect(f.manager.execute(f.observed.worktreeId, stageOnly.requestId, stageOnly.requestCredential, 'EDIT_TEXT', async () => ({}))).rejects.toThrow('WORKTREE_INTENT_NOT_GRANTED')
+    await f.manager.execute(f.observed.worktreeId, stageOnly.requestId, stageOnly.requestCredential, 'RELEASE', async () => {})
+
+    const editScope = { operations: ['EDIT_TEXT' as const], paths: ['selected.txt'], branches: [] }
+    const editGrant = await f.manager.request(f.observed.worktreeId, f.observed.snapshot, editScope, 300)
+    await accept(f.manager, editGrant)
+
+    const preserved = await f.manager.execute(
+      f.observed.worktreeId,
+      editGrant.requestId,
+      editGrant.requestCredential,
+      'EDIT_TEXT',
+      async () => ({ isError: true, value: { state: 'REJECTED' } }),
+      { preserveGrant: result => result.value.state === 'REJECTED' }
+    )
+    expect(preserved.isError).toBe(true)
+    expect(await f.manager.state(f.observed.worktreeId)).toBe('KNOWN_GRANTED')
+
+    await expect(f.manager.execute(
+      f.observed.worktreeId,
+      editGrant.requestId,
+      editGrant.requestCredential,
+      'EDIT_TEXT',
+      async (_obs, _scope, _assertCurrent, assertGrant) => {
+        assertGrant()
+        f.advance()
+        assertGrant()
+        return {}
+      }
+    )).rejects.toThrow('WORKTREE_GRANT_EXPIRED')
+
+    await expect(f.manager.execute(
+      f.observed.worktreeId,
+      editGrant.requestId,
+      editGrant.requestCredential,
+      'EDIT_TEXT',
+      async () => ({})
+    )).rejects.toThrow('WORKTREE_RECOVERY_REQUIRED')
+  })
 })

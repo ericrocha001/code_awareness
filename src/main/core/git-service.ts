@@ -467,6 +467,46 @@ export class GitService implements FileListingPort {
     return revision
   }
 
+  async getWorktreeRevisionExcluding(dirPath: string, excludedPaths: string[]): Promise<string> {
+    const head = await this.getCurrentCommitHash(dirPath)
+    const index = await this.getIndexRevision(dirPath)
+    const rawStatus = await this.getOperationsStatus(dirPath, true)
+    const status = this.filterPorcelainStatus(rawStatus, excludedPaths)
+    const revision = this.worktreeRevision(dirPath, head, index, status, false)
+    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || rawStatus !== await this.getOperationsStatus(dirPath, true)) throw new Error('GIT_STATE_CHANGED')
+    return revision
+  }
+
+  private filterPorcelainStatus(status: string, excludedPaths: string[]): string {
+    const normalize = (value: string) => {
+      const slash = value.replace(/\\/g, '/')
+      return process.platform === 'win32' ? slash.toLowerCase() : slash
+    }
+    const excluded = new Set(excludedPaths.map(normalize))
+    const isExcluded = (entryPath: string) => {
+      const normalized = normalize(entryPath)
+      if (excluded.has(normalized)) return true
+      if (normalized.endsWith('/')) {
+        for (const item of excluded) if (item.startsWith(normalized)) return true
+      }
+      return false
+    }
+    const entries = status.split('\0')
+    const kept: string[] = []
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]
+      if (!entry) continue
+      const xy = entry.slice(0, 2)
+      const targetPath = entry.slice(3)
+      const hasSource = /[RC]/.test(xy)
+      const sourcePath = hasSource ? entries[++i] : undefined
+      if (isExcluded(targetPath) || (sourcePath !== undefined && isExcluded(sourcePath))) continue
+      kept.push(entry)
+      if (sourcePath !== undefined) kept.push(sourcePath)
+    }
+    return kept.length ? kept.join('\0') + '\0' : ''
+  }
+
   async captureWorktreeReadSnapshot(dirPath: string): Promise<GitWorktreeReadSnapshot> {
     // A read must match two captures bracketing its effect; this is not a mutation precondition.
     const [identity, indexRevision, status] = await Promise.all([
