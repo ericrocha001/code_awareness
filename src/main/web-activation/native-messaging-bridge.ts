@@ -1,3 +1,4 @@
+import { contextPickerSite } from '../../shared/web-activation/context-picker-sites'
 import { existsSync, readFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
 import { join } from 'node:path'
@@ -311,7 +312,7 @@ export class NativeMessagingBridge {
     this.dispatchLocalAction =
       options.dispatchLocalAction ??
       (options.userDataPath
-        ? (action, args) => invokeDesktopWebActivationAction(options.userDataPath!, action, args, pipeTimeout)
+        ? (action, args) => invokeDesktopWebActivationAction(options.userDataPath!, action, args, action === 'context_picker' ? 15_000 : pipeTimeout)
         : async () => ({ ok: false, code: 'APP_UNAVAILABLE', message: 'Local channel path not configured' }))
     this.mcpTransport = options.mcpTransport ?? defaultMcpTransport
     this.maxOutboundBytes = options.maxOutboundBytes ?? MAX_NATIVE_OUTBOUND_BYTES
@@ -397,6 +398,24 @@ export class NativeMessagingBridge {
     const command = rawCommand as NativeBridgeCommand
 
     switch (command.action) {
+      case 'context_picker': {
+        if (!this.callerOrigin || !contextPickerSite(command.webOrigin) ||
+          normalizeWebOrigin(command.webOrigin) !== command.webOrigin) {
+          return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker origin is not authorized')
+        }
+        const response = await this.dispatchLocalAction('context_picker', {
+          request: command.request,
+          webOrigin: command.webOrigin
+        })
+        if (!response.ok) {
+          return this.error(rawId, response.code === 'TIMEOUT' ? 'TIMEOUT' : 'INVALID_REQUEST', response.message)
+        }
+        if (Buffer.byteLength(JSON.stringify(response.result ?? null)) > this.maxOutboundBytes - 1024) {
+          return this.error(rawId, 'INVALID_REQUEST', 'PICKER_RESPONSE_TOO_LARGE')
+        }
+        return this.ok(rawId, response.result)
+      }
+
       case 'ping':
         return this.ok(rawId, {
           available: true,

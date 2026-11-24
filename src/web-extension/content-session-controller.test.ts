@@ -966,7 +966,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
         reason: 'DELIVERY_UNKNOWN',
         requestIds: ['req-ack-timeout']
       })
-      expect(dsAck.doc.querySelector('#code-awareness-activation-pill')?.textContent).toContain('Delivery unconfirmed')
+      expect(dsAck.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Delivery unconfirmed')
       expect(ctrlAck.checkMaintenanceReadiness(false).ready).toBe(true)
       expect(dsAck.sent).toHaveLength(3)
       expect(fixtureAck.callCounts.listArtifacts).toBe(3)
@@ -989,7 +989,7 @@ describe('ContentSessionController turn identity, consumption, and requestId cor
       })
       await ctrlExp.handleDomMutation()
       expect(ctrlExp.getStatusSnapshot().lastDelivery?.status).toBe('PENDING_RECOVERY')
-      expect(dsExp.doc.querySelector('#code-awareness-activation-pill')?.textContent).toContain('Pending send')
+      expect(dsExp.doc.querySelector('#code-awareness-activation-pill')?.shadowRoot?.textContent).toContain('Pending send')
 
       await vi.advanceTimersByTimeAsync(60_000)
       expect(ctrlExp.getStatusSnapshot().lastDelivery).toMatchObject({

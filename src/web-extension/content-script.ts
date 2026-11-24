@@ -1,3 +1,4 @@
+import { detectChatSite, FloatingBar } from './floating-bar'
 import {
   ACTIVATION_CONTRACT_PROTOCOL,
   extractActivationResultEnvelopes,
@@ -190,7 +191,7 @@ export class ContentSessionController {
   private continuationTimer: unknown = null
   private processing = false
   private pendingMutationCheck = false
-  private pillEl: HTMLElement | null = null
+  private floatingBar?: FloatingBar
   private lastComposerInputAt = 0
   private programmaticComposerWrite = false
   private maintenanceDrainUntil = 0
@@ -202,7 +203,8 @@ export class ContentSessionController {
     readonly rootDocument: Document,
     private readonly transport: WebActivationTransport,
     private readonly mountUi = true,
-    options: ContentControllerOptions = {}
+    options: ContentControllerOptions = {},
+    private readonly chromeApi = getChromeApi()
   ) {
     this.clock = options.clock ?? {
       now: () => Date.now(),
@@ -229,7 +231,7 @@ export class ContentSessionController {
     this.rootDocument.addEventListener?.('input', this.inputListener, true)
     if (this.mountUi) {
       this.rootDocument.getElementById('code-awareness-activation-pill')?.remove()
-      this.renderPill()
+      this.updateFloatingBar()
     }
   }
 
@@ -293,7 +295,7 @@ export class ContentSessionController {
     this.lastDiagnostic = null
     this.lastDelivery = null
     if (!this.adapter.isAuthenticatedChatReady(this.rootDocument)) {
-      this.renderPill()
+      this.updateFloatingBar()
       return {
         ok: false,
         state: this.session.getState(),
@@ -307,7 +309,7 @@ export class ContentSessionController {
     const res = await this.session.activate()
     if (res.state !== 'READY' || !res.bootstrapPrompt) {
       this.lastErrorMessage = res.error?.message ?? res.state
-      this.renderPill()
+      this.updateFloatingBar()
       return {
         ok: false,
         state: res.state,
@@ -344,7 +346,7 @@ export class ContentSessionController {
       }
     }
 
-    this.renderPill()
+    this.updateFloatingBar()
     return {
       ok: true,
       state: res.state,
@@ -365,7 +367,7 @@ export class ContentSessionController {
     const turns = this.adapter.readTurns(this.rootDocument)
     this.recordBaseline(turns)
     this.awaitingPostSwitchHydration = turns.length === 0
-    this.renderPill()
+    this.updateFloatingBar()
   }
 
   revoke(): void {
@@ -385,7 +387,7 @@ export class ContentSessionController {
     }
     this.session.revoke()
     this.stopObserving()
-    this.renderPill()
+    this.updateFloatingBar()
   }
 
   setOnDispose(callback: () => void): void {
@@ -424,8 +426,7 @@ export class ContentSessionController {
     this.maintenanceDrainUntil = 0
     this.stopObserving()
     this.rootDocument.removeEventListener?.('input', this.inputListener, true)
-    this.pillEl?.remove()
-    this.pillEl = null
+    this.floatingBar?.dispose()
     this.onDisposeCallback?.()
   }
 
@@ -691,7 +692,7 @@ export class ContentSessionController {
       }
     } finally {
       this.processing = false
-      this.renderPill()
+      this.updateFloatingBar()
       if (
         cappedWithPending &&
         startEpoch === this.activationEpoch &&
@@ -1073,7 +1074,7 @@ export class ContentSessionController {
         if (this.lastDiagnostic?.phase === 'delivery' || this.lastDiagnostic?.code === 'CONVERSATION_SWITCHED') {
           this.lastDiagnostic = null
         }
-        this.renderPill()
+        this.updateFloatingBar()
         return true
       }
     }
@@ -1190,7 +1191,7 @@ export class ContentSessionController {
               turnMessageId: active.turnMessageId,
               recoverable: false
             }
-            this.renderPill()
+            this.updateFloatingBar()
           }, Math.max(1, expiresAt - nowMs))
         }
 
@@ -1212,7 +1213,7 @@ export class ContentSessionController {
           turnMessageId: params.turnMessageId,
           recoverable: true
         }
-        this.renderPill()
+        this.updateFloatingBar()
         return { dispatched: false, reason }
       }
 
@@ -1235,7 +1236,7 @@ export class ContentSessionController {
         turnMessageId: params.turnMessageId,
         recoverable: false
       }
-      this.renderPill()
+      this.updateFloatingBar()
       return { dispatched: false, reason }
     }
 
@@ -1332,10 +1333,10 @@ export class ContentSessionController {
         turnMessageId: active.turnMessageId,
         recoverable: false
       }
-      this.renderPill()
+      this.updateFloatingBar()
     }, this.deliveryAckTimeoutMs)
 
-    this.renderPill()
+    this.updateFloatingBar()
     return { dispatched: true }
   }
 
@@ -1374,7 +1375,7 @@ export class ContentSessionController {
         turnMessageId: pending.turnMessageId,
         recoverable: false
       }
-      this.renderPill()
+      this.updateFloatingBar()
       return
     }
 
@@ -1406,7 +1407,7 @@ export class ContentSessionController {
           epoch: pending.epoch
         }
         this.lastErrorMessage = freshStatus.errorCode ?? 'APP_UNAVAILABLE'
-        this.renderPill()
+        this.updateFloatingBar()
         return
       }
 
@@ -1435,7 +1436,7 @@ export class ContentSessionController {
           conversationKey: pending.conversationKey,
           recoverable: false
         }
-        this.renderPill()
+        this.updateFloatingBar()
         return
       }
 
@@ -1453,7 +1454,7 @@ export class ContentSessionController {
           epoch: pending.epoch
         }
         this.lastErrorMessage = 'CONSENT_REQUIRED'
-        this.renderPill()
+        this.updateFloatingBar()
         return
       }
 
@@ -1472,44 +1473,14 @@ export class ContentSessionController {
     }
   }
 
-  private renderPill(): void {
+  private updateFloatingBar(): void {
     if (!this.mountUi) return
-    const body = this.rootDocument.body
-    if (!body) return
-
-    if (!this.pillEl) {
-      const el = this.rootDocument.createElement('div')
-      el.id = 'code-awareness-activation-pill'
-      el.setAttribute(
-        'style',
-        [
-          'position:fixed',
-          'bottom:16px',
-          'right:16px',
-          'z-index:2147483000',
-          'display:flex',
-          'align-items:center',
-          'gap:8px',
-          'padding:6px 10px',
-          'border-radius:9999px',
-          'background:#111827',
-          'color:#f9fafb',
-          'border:1px solid #374151',
-          'font:12px/1.2 system-ui,-apple-system,sans-serif',
-          'box-shadow:0 4px 12px rgba(0,0,0,0.35)'
-        ].join(';')
-      )
-      body.appendChild(el)
-      this.pillEl = el
-    }
-
+    if (!this.rootDocument.body) return
+    this.floatingBar ??= new FloatingBar(this.rootDocument, this.adapter.site, this.chromeApi?.storage, this.chromeApi?.runtime)
     const state = this.session.getState()
     const binding = this.session.getBinding()
-    this.pillEl.setAttribute('data-ca-state', state)
-    this.pillEl.setAttribute('data-ca-site', this.adapter.site)
 
     const scopeTag = binding.mode === 'PROJECT' && binding.projectId ? `Project` : 'Global'
-    const label = this.rootDocument.createElement('span')
     let statusSuffix = ''
     if (state === 'READY' || state === 'RESUMING' || state === 'WAITING_TOOL') {
       if (this.lastDelivery?.status === 'PENDING_RECOVERY') {
@@ -1524,42 +1495,28 @@ export class ContentSessionController {
         statusSuffix = ` · ${this.lastDiagnostic.code}`
       }
     }
-    label.textContent = `Code Awareness · ${state}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}${statusSuffix}`
+    const label = `Code Awareness · ${state}${state === 'READY' || state === 'RESUMING' ? ` (${scopeTag})` : ''}${statusSuffix}`
+    let title = ''
     if (this.lastDiagnostic) {
       const reqInfo = this.lastDiagnostic.requestId ? ` [${this.lastDiagnostic.requestId}]` : ''
       const phaseInfo = this.lastDiagnostic.phase ? `${this.lastDiagnostic.phase}: ` : ''
-      label.title = `${phaseInfo}${this.lastDiagnostic.code}${reqInfo} — ${this.lastDiagnostic.message}`
+      title = `${phaseInfo}${this.lastDiagnostic.code}${reqInfo} — ${this.lastDiagnostic.message}`
     } else {
-      label.title = ''
+      title = ''
     }
     const trace = this.getStatusSnapshot().requestTrace
     if (trace.length) {
-      label.title = [label.title, ...trace.map(({ requestId, stage }) => `${requestId} ${stage}`)].filter(Boolean).join('\n')
+      title = [title, ...trace.map(({ requestId, stage }) => `${requestId} ${stage}`)].filter(Boolean).join('\n')
     }
 
-    const btn = this.rootDocument.createElement('button')
-    btn.type = 'button'
-    btn.setAttribute(
-      'style',
-      'border:0;border-radius:9999px;padding:3px 8px;background:#2563eb;color:#fff;cursor:pointer;font-size:11px;'
-    )
-    if (state === 'INACTIVE' || state === 'REVOKED' || state === 'UNAVAILABLE') {
-      btn.textContent = 'Activate'
-      btn.addEventListener('click', () => {
-        void this.activate(true)
-      })
-    } else {
-      btn.textContent = 'Revoke'
-      btn.setAttribute(
-        'style',
-        'border:0;border-radius:9999px;padding:3px 8px;background:#dc2626;color:#fff;cursor:pointer;font-size:11px;'
-      )
-      btn.addEventListener('click', () => {
-        this.revoke()
-      })
-    }
-
-    this.pillEl.replaceChildren(label, btn)
+    const revoke = state !== 'INACTIVE' && state !== 'REVOKED' && state !== 'UNAVAILABLE'
+    this.floatingBar.renderActivation({
+      state, label, title, revoke,
+      action: () => {
+        if (revoke) this.revoke()
+        else void this.activate(true)
+      }
+    })
   }
 }
 
@@ -1569,8 +1526,17 @@ export function bootstrapContentScript(
   href: string | undefined = (globalThis as unknown as { location?: { href?: string } }).location?.href
 ): ContentSessionController | null {
   if (!chromeApi || !doc || !href) return null
+  if (doc.defaultView && doc.defaultView !== doc.defaultView.top) return null
+  const site = detectChatSite(href)
+  if (!site) return null
   const adapter = selectWebChatAdapter(href)
-  if (!adapter) return null
+  if (!adapter) {
+    const key = '__codeAwarenessFloatingBar'
+    const registry = globalThis as unknown as Record<string, FloatingBar | undefined>
+    registry[key]?.dispose()
+    registry[key] = new FloatingBar(doc, site, chromeApi.storage, chromeApi.runtime)
+    return null
+  }
 
   const globalRegistry = globalThis as unknown as Record<string, ContentSessionController | undefined>
   if (globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY]) {
@@ -1585,7 +1551,9 @@ export function bootstrapContentScript(
     adapter,
     doc,
     createRuntimeMessageTransport(chromeApi, adapter.site, adapter.allowedOrigin),
-    true
+    true,
+    {},
+    chromeApi
   )
   globalRegistry[GLOBAL_CONTENT_CONTROLLER_KEY] = controller
 

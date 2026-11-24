@@ -131,7 +131,8 @@ async function buildWebActivationArtifacts(options = {}) {
     entryPoints: {
       background: join(extDir, 'background.ts'),
       'content-script': join(extDir, 'content-script.ts'),
-      popup: join(extDir, 'popup.ts')
+      popup: join(extDir, 'popup.ts'),
+      'context-picker': join(extDir, 'context-picker.ts')
     },
     outdir: extOutDir,
     bundle: true,
@@ -159,6 +160,7 @@ async function buildWebActivationArtifacts(options = {}) {
 
   copyFileSync(join(extDir, 'manifest.json'), join(extOutDir, 'manifest.json'))
   copyFileSync(join(extDir, 'popup.html'), join(extOutDir, 'popup.html'))
+  copyFileSync(join(extDir, 'context-picker.html'), join(extOutDir, 'context-picker.html'))
 
   const metadata = {
     schemaVersion: 1,

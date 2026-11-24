@@ -108,6 +108,27 @@ describe('Native Messaging protocol, bridge, consent, and Windows registration',
     })
   })
 
+  it('authorizes the picker without granting the same origin MCP execution', async () => {
+    const consentStore = new ConsentStore(makeTempDir('picker-consent-'))
+    const dispatchLocalAction = vi.fn(async () => ({ ok: true as const, result: { scope: 'fixture' } }))
+    const bridge = new NativeMessagingBridge({
+      consentStore,
+      callerOrigin: VALID_EXT_ORIGIN,
+      allowedExtensionOrigins: [VALID_EXT_ORIGIN],
+      dispatchLocalAction
+    })
+    const request = { action: 'catalog', filters: {} }
+    const read = { id: 'picker', action: 'context_picker', webOrigin: 'https://chatgpt.com', request }
+    expect(await bridge.handle(read)).toMatchObject({ ok: true, result: { scope: 'fixture' } })
+    expect(await bridge.handle({ ...read, webOrigin: 'https://chatgpt.com.evil.example' }))
+      .toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } })
+    expect(await bridge.handle({ ...read, action: 'mcp_request', site: 'chatgpt', method: 'tools/list' }))
+      .toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } })
+    const anonymous = new NativeMessagingBridge({ consentStore, dispatchLocalAction })
+    expect(await anonymous.handle(read)).toMatchObject({ error: { code: 'ORIGIN_NOT_ALLOWED' } })
+    expect(dispatchLocalAction).toHaveBeenCalledExactlyOnceWith('context_picker', { webOrigin: read.webOrigin, request })
+  })
+
   it('validates caller/web origins, read-only allowlists, URI confinement, and revocable consent by site + projectId + dataClass', async () => {
     const dataDir = makeTempDir('web-consent-')
     const store = new ConsentStore(dataDir)

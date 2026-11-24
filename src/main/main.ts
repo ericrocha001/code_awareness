@@ -1,3 +1,4 @@
+import { ContextPickerService } from './web-activation/context-picker-service'
 /*
 -T ---
 */
@@ -207,7 +208,19 @@ const localAgentChannel = new LocalChannelHost(
     new GitHubLocalAdapter(() => activeGithubLocalState, continuumSession),
     new AcademyLocalAdapter(academyService),
     new TestOutputLocalAdapter(continuumSession, validationLedger),
-    new WebActivationLocalAdapter(() => mcpLifecycle.ensureGlobalSkillsEndpoint(), extensionManagerService)
+    new WebActivationLocalAdapter(
+      () => mcpLifecycle.ensureGlobalSkillsEndpoint(),
+      extensionManagerService,
+      new ContextPickerService(() => {
+        const active = activeProjects?.getState()
+        const project = active?.project
+        const session = continuumSession.getActiveSession()
+        const service = continuumSession.getActiveService()
+        if (!active || !project || !service || session?.repositoryPath !== project.path ||
+          active.context?.identity !== 'IDENTITY_BOUND' || active.context.repositoryId !== session.repositoryId) return null
+        return { repositoryId: session.repositoryId, revision: active.revision, name: project.name, service }
+      })
+    )
   ],
   app.getPath('userData'),
   () => mcpLifecycle.getLocalEndpoint(runtimeIdentityProvider.getInstanceId())
