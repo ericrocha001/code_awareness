@@ -413,12 +413,14 @@ export type NativeReferenceStepResult =
       nativeKey: string
       summary: NativeSourceRecordSummary
       liveFingerprint: string
+      sourcePhysicalBytes: number
     }
   | {
       status: 'INDEXING_PENDING'
       nativeKey: string
       indexedBytes: number
-      totalBytes: number
+      totalBytes: number | null
+      sourcePhysicalBytes: number
       indexedEvents: number
       liveFingerprint: string
       reason: 'STEP_BUDGET_REACHED' | 'SOURCE_REQUIRES_INDEXING' | 'READ_ONLY_STORE'
@@ -486,7 +488,7 @@ export function runNativeReferenceStep(options: {
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       closeOnce()
       handle.verifyAfterClose?.()
-      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint }
+      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint, sourcePhysicalBytes: existing.sourceBytes }
     }
 
     if (mode === 'READ_ONLY') {
@@ -504,6 +506,7 @@ export function runNativeReferenceStep(options: {
         nativeKey,
         indexedBytes: checkpointExact ? cp!.nextOffset : 0,
         totalBytes: handle.sizeBytes,
+        sourcePhysicalBytes: handle.sizeBytes,
         indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'READ_ONLY_STORE'
@@ -536,6 +539,7 @@ export function runNativeReferenceStep(options: {
         nativeKey,
         indexedBytes: checkpoint ? checkpoint.nextOffset : 0,
         totalBytes: handle.sizeBytes,
+        sourcePhysicalBytes: handle.sizeBytes,
         indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'SOURCE_REQUIRES_INDEXING'
@@ -641,6 +645,7 @@ export function runNativeReferenceStep(options: {
           nativeKey,
           indexedBytes: stepOut.nextOffset,
           totalBytes: handle.sizeBytes,
+          sourcePhysicalBytes: handle.sizeBytes,
           indexedEvents: state.typedEvents,
           liveFingerprint: handle.liveFingerprint,
           reason: 'STEP_BUDGET_REACHED'
@@ -673,7 +678,7 @@ export function runNativeReferenceStep(options: {
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       closeOnce()
       handle.verifyAfterClose?.()
-      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
+      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint, sourcePhysicalBytes: summary.sourceBytes }
     } catch (error) {
       refs.invalidate(nativeKey)
       invalidateZstdStreamCache(nativeKey)
@@ -725,7 +730,7 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       closeOnce()
       handle.verifyAfterClose?.()
-      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint }
+      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint, sourcePhysicalBytes: existing.sourceBytes }
     }
 
     if (mode === 'READ_ONLY') {
@@ -736,13 +741,15 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
         cp.normalizer === normalizer &&
         cp.fileIdentity === handle.identity &&
         cp.sourceBytes === handle.sizeBytes &&
-        cp.nextOffset <= handle.sizeBytes
+        Number.isSafeInteger(cp.nextOffset) &&
+        cp.nextOffset >= 0
       )
       return {
         status: 'INDEXING_PENDING',
         nativeKey,
         indexedBytes: checkpointExact ? cp!.nextOffset : 0,
-        totalBytes: handle.sizeBytes,
+        totalBytes: null,
+        sourcePhysicalBytes: handle.sizeBytes,
         indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'READ_ONLY_STORE'
@@ -774,7 +781,8 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
         status: 'INDEXING_PENDING',
         nativeKey,
         indexedBytes: checkpoint ? checkpoint.nextOffset : 0,
-        totalBytes: handle.sizeBytes,
+        totalBytes: null,
+        sourcePhysicalBytes: handle.sizeBytes,
         indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
         liveFingerprint: handle.liveFingerprint,
         reason: 'SOURCE_REQUIRES_INDEXING'
@@ -883,7 +891,8 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
           status: 'INDEXING_PENDING',
           nativeKey,
           indexedBytes: stepOut.nextOffset,
-          totalBytes: handle.sizeBytes,
+          totalBytes: null,
+          sourcePhysicalBytes: handle.sizeBytes,
           indexedEvents: state.typedEvents,
           liveFingerprint: handle.liveFingerprint,
           reason: 'STEP_BUDGET_REACHED'
@@ -916,7 +925,7 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
       verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
       closeOnce()
       handle.verifyAfterClose?.()
-      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
+      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint, sourcePhysicalBytes: summary.sourceBytes }
     } catch (error) {
       refs.invalidate(nativeKey)
       invalidateZstdStreamCache(nativeKey)

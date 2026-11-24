@@ -443,7 +443,8 @@ async function runNativeSessionIndexStep(
           sourceSessionId: request.sourceSessionId,
           revision,
           indexedBytes: stepResult.summary.indexedBytes,
-          totalBytes: stepResult.summary.sourceBytes,
+          totalBytes: stepResult.summary.indexedBytes,
+          sourcePhysicalBytes: stepResult.sourcePhysicalBytes,
           indexedEvents: stepResult.summary.eventCount,
           turnCount: stepResult.summary.turnCount,
           transcriptImported: false
@@ -456,6 +457,7 @@ async function runNativeSessionIndexStep(
         sourceSessionId: request.sourceSessionId,
         indexedBytes: stepResult.indexedBytes,
         totalBytes: stepResult.totalBytes,
+        sourcePhysicalBytes: stepResult.sourcePhysicalBytes,
         indexedEvents: stepResult.indexedEvents,
         reason: stepResult.reason,
         transcriptImported: false,
@@ -477,7 +479,7 @@ async function runNativeSessionIndexStep(
           nativeSession: request.nativeSession,
           sourceSessionId: request.sourceSessionId,
           indexedBytes: 0,
-          totalBytes: 0,
+          totalBytes: null,
           indexedEvents: 0,
           reason: 'SOURCE_STALE' as const,
           transcriptImported: false,
@@ -705,6 +707,7 @@ async function nativeLiteralProjection(store: SessionStore, name: SessionToolNam
         contentAvailability: 'INDEXING_PENDING',
         indexedBytes: indexOutcome.indexedBytes,
         totalBytes: indexOutcome.totalBytes,
+        sourcePhysicalBytes: indexOutcome.sourcePhysicalBytes,
         indexedEvents: indexOutcome.indexedEvents,
         reason: indexOutcome.reason,
         next: pendingNext
@@ -716,6 +719,7 @@ async function nativeLiteralProjection(store: SessionStore, name: SessionToolNam
       readinessReason: 'INDEXING_PENDING' as SourceReadinessReason,
       indexedBytes: indexOutcome.indexedBytes,
       totalBytes: indexOutcome.totalBytes,
+      sourcePhysicalBytes: indexOutcome.sourcePhysicalBytes,
       next: pendingNext
     })
   }
@@ -906,6 +910,7 @@ async function nativeLiteralProjection(store: SessionStore, name: SessionToolNam
       ...((!Array.isArray(observedEvents) || observedEvents.length || hookObserved) ? { observedEvents } : {}),
       sourceEventCount: summary.eventCount,
       omittedSourceEvents: summary.omittedRecords,
+      sourcePhysicalBytes: summary.sourceBytes,
       recordCoverage: (() => {
         const bd = summary.opaqueBreakdown ?? {
           protocolMetadata: 0,
@@ -1632,6 +1637,7 @@ export async function executeSessionTool(
       if ('indexingState' in error) payload.indexingState = (error as any).indexingState
       if ('indexedBytes' in error) payload.indexedBytes = (error as any).indexedBytes
       if ('totalBytes' in error) payload.totalBytes = (error as any).totalBytes
+      if ('sourcePhysicalBytes' in error) payload.sourcePhysicalBytes = (error as any).sourcePhysicalBytes
       if ('next' in error) payload.next = (error as any).next
       if ('file' in error) payload.file = (error as any).file
       if ('range' in error) payload.range = (error as any).range
