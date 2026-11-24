@@ -5,6 +5,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { zstdCompressSync } from 'node:zlib'
 import { afterEach, expect, it } from 'vitest'
 import { SessionContextClient } from './client'
 import { antigravityAppTranscriptPath } from './antigravity-app-locator'
@@ -798,4 +799,77 @@ it('U4 classifies opaque Codex protocol metadata separately from unqualified/unr
     limit: 5
   })
   expect(reasoningSearch.data.hits).toHaveLength(0)
+}, 60_000)
+
+it('U2 produces identical eventIds/digests/content for .jsonl.zst vs plain .jsonl, supports paginated reads, FTS5, drift, and revocation', async () => {
+  const f = setupWorkerEnv('repo-u2-zst')
+  const profile = join(f.base, 'codex-profile')
+  const sessionUuid = '01a1f500-0000-7000-8000-000000000910'
+  const day = new Date(Number.parseInt(sessionUuid.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+  const rolloutDir = join(profile, 'sessions', ...day)
+  mkdirSync(rolloutDir, { recursive: true })
+  const accHash = nativeDigest(JSON.stringify(['u2z-u', 'u2z-a']))
+  const plainPath = join(rolloutDir, `rollout-2026-11-23T10-00-00-${sessionUuid}.jsonl`)
+  const zstPath = `${plainPath}.zst`
+
+  const longTailText = `zst-tail-marker token=sk-zstsecret999 ` + 'β'.repeat(5000)
+  const jsonlBody = [
+    JSON.stringify({ timestamp: '2026-11-23T10:00:00Z', type: 'session_meta', payload: { id: sessionUuid, session_id: sessionUuid, account_scoped: true, creator_user_id: 'u2z-u', creator_account_id: 'u2z-a', cwd: f.root, runtime_workspace_roots: [f.root], cli_version: '0.171.0-alpha.13' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:01Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'start-zst-input discriminative_zst_phrase_551' }] } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:02Z', type: 'event_msg', payload: { type: 'token_count', total_tokens: 42 } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:03Z', type: 'response_item', payload: { type: 'function_call', name: 'run_check', call_id: 'c1', arguments: '{"k":"v"}' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:04Z', type: 'response_item', payload: { type: 'function_call_output', call_id: 'c1', output: 'Exit code: 0\nok' } }),
+    JSON.stringify({ timestamp: '2026-11-23T10:00:05Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: longTailText }] } })
+  ].join('\n') + '\n'
+
+  writeFileSync(f.configPath, JSON.stringify({
+    repositoryId: 'repo-u2-zst',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash, allowLexicalIndex: true } }
+  }))
+
+  // 1. Read as plain .jsonl first to capture canonical eventIds & digests
+  writeFileSync(plainPath, jsonlBody)
+  const listedPlain = await f.call('list_agent_sessions', { ...f.target })
+  const deepen = listedPlain.data.sessions[0].deepen.arguments
+  const mapPlain = await f.call('inspect_agent_session', deepen)
+  const evsPlain = await f.call('list_agent_session_events', { ...deepen, expectedRevision: mapPlain.data.revision, limit: 15 })
+
+  // 2. Replace plain .jsonl with .jsonl.zst (same underlying JSONL)
+  require('node:fs').unlinkSync(plainPath)
+  writeFileSync(zstPath, zstdCompressSync(Buffer.from(jsonlBody)))
+
+  const refreshZst = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: deepen.sourceSessionId })
+  expect(refreshZst.data.state).toBe('READY')
+  const mapZst = await f.call('inspect_agent_session', deepen)
+  expect(mapZst.data.recordCoverage).toMatchObject({ recordsTotal: 6, recordsAddressable: 6, typed: 4, opaque: 2, unavailable: 0, interpretedContentCoverage: 'COMPLETE' })
+  const evsZst = await f.call('list_agent_session_events', { ...deepen, expectedRevision: mapZst.data.revision, limit: 15 })
+  expect(evsZst.data.events.map((e: any) => e.payloadDigest)).toEqual(evsPlain.data.events.map((e: any) => e.payloadDigest))
+
+  // Paginated literal read of the long tail event with redaction
+  const tailEv = evsZst.data.events.at(-1)
+  const p1 = await f.call('read_agent_session_event', { ...deepen, expectedRevision: mapZst.data.revision, eventId: tailEv.eventId })
+  expect(p1.data.partial).toBe(true)
+  expect(p1.data.sanitized).toBe(true)
+  expect(p1.data.content).toContain('[REDACTED]')
+  expect(p1.data.content).not.toContain('sk-zstsecret999')
+  const p2 = await f.call('read_agent_session_event', { ...deepen, expectedRevision: mapZst.data.revision, eventId: tailEv.eventId, cursor: p1.data.nextCursor })
+  expect(p2.data.complete).toBe(true)
+
+  // FTS5 search on .jsonl.zst
+  const fts = await f.call('search_agent_session_evidence', { ...f.target, query: 'discriminative_zst_phrase_551', limit: 5 })
+  expect(fts.data.hits).toHaveLength(1)
+  const readFts = await f.call('read_agent_session_event', fts.data.hits[0].deepen.arguments)
+  expect(readFts.data.content).toBe('start-zst-input discriminative_zst_phrase_551')
+
+  // Snapshot drift on .jsonl.zst -> REVISION_CONFLICT
+  writeFileSync(zstPath, zstdCompressSync(Buffer.from(jsonlBody + JSON.stringify({ timestamp: '2026-11-23T10:00:06Z', type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'appended' }] } }) + '\n')))
+  const drift = await f.call('read_agent_session_event', { ...deepen, expectedRevision: mapZst.data.revision, eventId: tailEv.eventId })
+  expect(drift.isError).toBe(true)
+  expect(drift.data.code).toBe('REVISION_CONFLICT')
+
+  // Revoking grant -> SOURCE_NOT_AUTHORIZED
+  writeFileSync(f.configPath, JSON.stringify({ repositoryId: 'repo-u2-zst', nativeSources: {} }))
+  const revoked = await f.call('inspect_agent_session', deepen)
+  expect(revoked.isError).toBe(true)
+  expect(revoked.data.code).toBe('SOURCE_NOT_AUTHORIZED')
 }, 60_000)

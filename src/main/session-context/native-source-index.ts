@@ -2,6 +2,11 @@ import Database from 'better-sqlite3'
 import { closeSync, fstatSync, lstatSync, openSync, readSync, constants, type BigIntStats } from 'node:fs'
 import { digest, sanitize, utf8Prefix } from './privacy'
 import {
+  invalidateZstdStreamCache,
+  readZstdLogicalRange,
+  streamZstdJsonlChunk
+} from './native-zstd-jsonl'
+import {
   toNativeEventMeta,
   type NativeAttemptSummary,
   type NativeEventFilter,
@@ -397,6 +402,7 @@ export interface NativeIndexedSourceHandle {
   assertPath: () => void
   verifyAfterClose?: () => void
   allowLexicalIndex?: boolean
+  compressed?: boolean
   sourceVariant?: string
   coexistingVariants?: string[]
 }
@@ -439,24 +445,28 @@ export function runNativeReferenceStep(options: {
   onUnavailableRecord?: (lineStart: number, lineEnd: number, limitation: 'RECORD_TOO_LARGE' | 'INVALID_RECORD_FORMAT', acc: StepAccumulator) => void
   makeEventId: (ordinal: number, part: number, payloadDigest: string, snapshotIdentity: string) => string
   onReady?: (ready: { summary: NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
-}): NativeReferenceStepResult {
+}, preopenedHandle?: NativeIndexedSourceHandle): NativeReferenceStepResult {
   const {
     refs, nativeKey, provider, repositoryId, worktreeId, generation, sourceSessionId,
     normalizer, sourceCoverage, attemptCoverage, formatError, staleError,
     mode, stepBudget, assertCurrent, openHandle, processRecord, onUnavailableRecord, makeEventId, onReady
   } = options
   let handle: NativeIndexedSourceHandle
-  try {
-    handle = openHandle()
-  } catch (error) {
-    if (!refs.isReadOnly && error instanceof Error && [
-      'SOURCE_NOT_AUTHORIZED', 'SOURCE_NOT_FOUND', 'SOURCE_UNAVAILABLE', 'PROFILE_UNAVAILABLE',
-      'IDENTITY_MISMATCH', 'ORIGIN_UNVERIFIED', 'SOURCE_IDENTITY_CONFLICT',
-      'SOURCE_FORMAT_UNSUPPORTED', 'FORMAT_UNSUPPORTED', 'SOURCE_PATH_ESCAPE'
-    ].includes(error.message)) {
-      refs.invalidate(nativeKey)
+  if (preopenedHandle) {
+    handle = preopenedHandle
+  } else {
+    try {
+      handle = openHandle()
+    } catch (error) {
+      if (!refs.isReadOnly && error instanceof Error && [
+        'SOURCE_NOT_AUTHORIZED', 'SOURCE_NOT_FOUND', 'SOURCE_UNAVAILABLE', 'PROFILE_UNAVAILABLE',
+        'IDENTITY_MISMATCH', 'ORIGIN_UNVERIFIED', 'SOURCE_IDENTITY_CONFLICT',
+        'SOURCE_FORMAT_UNSUPPORTED', 'FORMAT_UNSUPPORTED', 'SOURCE_PATH_ESCAPE'
+      ].includes(error.message)) {
+        refs.invalidate(nativeKey)
+      }
+      throw error
     }
-    throw error
   }
   let closed = false
   const closeOnce = () => { if (!closed) { closed = true; closeSync(handle.fd) } }
@@ -666,6 +676,250 @@ export function runNativeReferenceStep(options: {
       return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
     } catch (error) {
       refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+      throw error
+    }
+  } finally {
+    closeOnce()
+  }
+}
+
+export async function runNativeReferenceStepAsync(options: Parameters<typeof runNativeReferenceStep>[0]): Promise<NativeReferenceStepResult> {
+  const {
+    refs, nativeKey, provider, repositoryId, worktreeId, generation, sourceSessionId,
+    normalizer, sourceCoverage, attemptCoverage, formatError, staleError,
+    mode, stepBudget, assertCurrent, openHandle, processRecord, onUnavailableRecord, makeEventId, onReady
+  } = options
+  let handle: NativeIndexedSourceHandle
+  try {
+    handle = openHandle()
+  } catch (error) {
+    if (!refs.isReadOnly && error instanceof Error && [
+      'SOURCE_NOT_AUTHORIZED', 'SOURCE_NOT_FOUND', 'SOURCE_UNAVAILABLE', 'PROFILE_UNAVAILABLE',
+      'IDENTITY_MISMATCH', 'ORIGIN_UNVERIFIED', 'SOURCE_IDENTITY_CONFLICT', 'IDENTITY_UNVERIFIED',
+      'SOURCE_FORMAT_UNSUPPORTED', 'FORMAT_UNSUPPORTED', 'SOURCE_PATH_ESCAPE'
+    ].includes(error.message)) {
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+    }
+    throw error
+  }
+  if (!handle.compressed) {
+    return runNativeReferenceStep(options, handle)
+  }
+  let closed = false
+  const closeOnce = () => { if (!closed) { closed = true; closeSync(handle.fd) } }
+  try {
+    const existing = refs.getSummary(nativeKey)
+    const existingExact = !!(
+      existing &&
+      existing.locatorHash === handle.locatorHash &&
+      existing.normalizer === normalizer &&
+      existing.fileIdentity === handle.identity &&
+      existing.sourceBytes === handle.sizeBytes
+    )
+    if (existingExact && existing) {
+      if (onReady) {
+        onReady({ summary: existing, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
+      }
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      closeOnce()
+      handle.verifyAfterClose?.()
+      return { status: 'READY', nativeKey, summary: existing, liveFingerprint: handle.liveFingerprint }
+    }
+
+    if (mode === 'READ_ONLY') {
+      const cp = refs.getCheckpoint(nativeKey)
+      const checkpointExact = !!(
+        cp &&
+        cp.locatorHash === handle.locatorHash &&
+        cp.normalizer === normalizer &&
+        cp.fileIdentity === handle.identity &&
+        cp.sourceBytes === handle.sizeBytes &&
+        cp.nextOffset <= handle.sizeBytes
+      )
+      return {
+        status: 'INDEXING_PENDING',
+        nativeKey,
+        indexedBytes: checkpointExact ? cp!.nextOffset : 0,
+        totalBytes: handle.sizeBytes,
+        indexedEvents: checkpointExact ? (JSON.parse(cp!.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
+        liveFingerprint: handle.liveFingerprint,
+        reason: 'READ_ONLY_STORE'
+      }
+    }
+
+    if (existing) {
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+    }
+
+    let checkpoint = refs.getCheckpoint(nativeKey)
+    const checkpointValid = !!(
+      checkpoint &&
+      checkpoint.locatorHash === handle.locatorHash &&
+      checkpoint.normalizer === normalizer &&
+      checkpoint.fileIdentity === handle.identity &&
+      checkpoint.sourceBytes === handle.sizeBytes
+    )
+    if (checkpoint && !checkpointValid) {
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+      checkpoint = undefined
+    }
+
+    const onDemandCap = stepBudget?.onDemandMaxBytes ?? DEFAULT_NATIVE_ONDEMAND_BYTES
+    if (mode === 'ON_DEMAND' && handle.sizeBytes > onDemandCap) {
+      return {
+        status: 'INDEXING_PENDING',
+        nativeKey,
+        indexedBytes: checkpoint ? checkpoint.nextOffset : 0,
+        totalBytes: handle.sizeBytes,
+        indexedEvents: checkpoint ? (JSON.parse(checkpoint.stateJson) as NativeIndexerState).typedEvents ?? 0 : 0,
+        liveFingerprint: handle.liveFingerprint,
+        reason: 'SOURCE_REQUIRES_INDEXING'
+      }
+    }
+
+    if (!checkpoint) {
+      checkpoint = refs.startFreshCheckpoint({
+        nativeKey,
+        locatorHash: handle.locatorHash,
+        normalizer,
+        fileIdentity: handle.identity,
+        prefixDigest: '',
+        sourceBytes: handle.sizeBytes,
+        stateJson: JSON.stringify(createInitialIndexerState(attemptCoverage))
+      })
+    }
+
+    const state = JSON.parse(checkpoint.stateJson) as NativeIndexerState
+    state.turns = {}
+    const acc: StepAccumulator = {
+      state,
+      events: [],
+      pairUpdates: [],
+      dirtyTurns: new Set<string>(),
+      makeEventId: (ordinal, part, payloadDigest) => makeEventId(ordinal, part, payloadDigest, handle.identity)
+    }
+
+    const streamDeadline = stepBudget?.stepMs !== undefined
+      ? (stepBudget.deadlineMs !== undefined ? Math.min(stepBudget.deadlineMs, Date.now() + stepBudget.stepMs) : Date.now() + stepBudget.stepMs)
+      : stepBudget?.deadlineMs
+    const effectiveStepBudget: NativeStepBudget = {
+      maxBytes: stepBudget?.maxBytes ?? (mode === 'ON_DEMAND' ? Math.max(onDemandCap, DEFAULT_NATIVE_STEP_BYTES) : DEFAULT_NATIVE_STEP_BYTES),
+      maxLines: stepBudget?.maxLines ?? DEFAULT_NATIVE_STEP_LINES,
+      ...(streamDeadline !== undefined ? { deadlineMs: streamDeadline } : {})
+    }
+
+    let stepOut: { done: boolean; nextOffset: number; processedBytes: number; processedLines: number }
+    try {
+      stepOut = await streamZstdJsonlChunk({
+        fd: handle.fd,
+        fileSize: handle.sizeBytes,
+        nativeKey,
+        fileIdentity: handle.identity,
+        startOffset: checkpoint.nextOffset,
+        formatError,
+        stepBudget: effectiveStepBudget,
+        assertCurrent,
+        onRecord: (record, lineStart, lineEnd) => processRecord(record, lineStart, lineEnd, acc),
+        ...(onUnavailableRecord
+          ? {
+              onUnavailableRecord: (lineStart, lineEnd, limitation) =>
+                onUnavailableRecord(lineStart, lineEnd, limitation, acc)
+            }
+          : {})
+      })
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      handle.verifyAfterClose?.()
+    } catch (error) {
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+      throw error
+    }
+
+    if (stepOut.done && (!state.ordinal || (state.typedRecords === 0 && state.opaqueRecords === 0))) {
+      closeOnce()
+      handle.verifyAfterClose?.()
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
+      throw new Error(state.ordinal ? 'SOURCE_CONTENT_UNAVAILABLE' : formatError)
+    }
+
+    const turnRows = [...acc.dirtyTurns].map(id => {
+      const t = state.turns[id]!
+      return {
+        ordinal: t.ordinal,
+        turnId: t.id,
+        firstTime: t.firstObserved || undefined,
+        lastTime: t.lastObserved || undefined,
+        eventCount: t.eventCount,
+        typesJson: '{}'
+      }
+    })
+    state.turns = {}
+
+    try {
+      refs.saveChunk({
+        nativeKey,
+        revision: checkpoint.revision,
+        events: acc.events,
+        pairUpdates: acc.pairUpdates,
+        turns: turnRows,
+        nextOffset: stepOut.nextOffset,
+        tailDigest: '',
+        sourceBytes: handle.sizeBytes,
+        fileIdentity: handle.identity,
+        stateJson: JSON.stringify(state),
+        allowLexicalIndex: handle.allowLexicalIndex
+      })
+
+      if (!stepOut.done) {
+        verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+        closeOnce()
+        handle.verifyAfterClose?.()
+        return {
+          status: 'INDEXING_PENDING',
+          nativeKey,
+          indexedBytes: stepOut.nextOffset,
+          totalBytes: handle.sizeBytes,
+          indexedEvents: state.typedEvents,
+          liveFingerprint: handle.liveFingerprint,
+          reason: 'STEP_BUDGET_REACHED'
+        }
+      }
+
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      handle.verifyAfterClose?.()
+
+      const summary = refs.promote(buildSummaryFromState({
+        nativeKey,
+        provider,
+        repositoryId,
+        worktreeId,
+        generation,
+        sourceSessionId,
+        locatorHash: handle.locatorHash,
+        normalizer,
+        revision: checkpoint.revision,
+        fileIdentity: handle.identity,
+        prefixDigest: '',
+        tailOffset: stepOut.nextOffset,
+        tailDigest: '',
+        sourceBytes: handle.sizeBytes,
+        sourceCoverage,
+        ...(handle.sourceVariant ? { sourceVariant: handle.sourceVariant } : {}),
+        ...(handle.coexistingVariants?.length ? { coexistingVariants: handle.coexistingVariants } : {})
+      }, state))
+      onReady?.({ summary, nativeKey, liveFingerprint: handle.liveFingerprint, fd: handle.fd })
+      verifyStaticSourceBeforeClose(handle.fd, handle.path, handle.identity, handle.assertPath, handle.configUnchanged, assertCurrent, staleError)
+      closeOnce()
+      handle.verifyAfterClose?.()
+      return { status: 'READY', nativeKey, summary, liveFingerprint: handle.liveFingerprint }
+    } catch (error) {
+      refs.invalidate(nativeKey)
+      invalidateZstdStreamCache(nativeKey)
       throw error
     }
   } finally {
@@ -824,6 +1078,67 @@ export function extractAndVerifyEventLiteral(options: {
   return { content, sanitized: content !== rawText }
 }
 
+export async function extractAndVerifyEventLiteralAsync(options: {
+  fd: number
+  fileSize: number
+  nativeKey: string
+  fileIdentity: string
+  compressed?: boolean
+  row: NativeIndexedEventRow
+  formatError: string
+  staleError: string
+  extractPart: (record: unknown, partIndex: number) => string | undefined
+  assertCurrent: () => void
+  deadlineMs?: number
+}) {
+  const { fd, fileSize, nativeKey, fileIdentity, compressed, row, formatError, staleError, extractPart, assertCurrent, deadlineMs } = options
+  if (!compressed) {
+    return extractAndVerifyEventLiteral({ fd, row, formatError, staleError, extractPart })
+  }
+  if (row.type === 'UNAVAILABLE') {
+    const limitation = row.errorKind ?? 'RECORD_TOO_LARGE'
+    const expectedDigest = digest(JSON.stringify(['UNAVAILABLE', limitation, row.lineStart, row.lineEnd]))
+    if (expectedDigest !== row.payloadDigest) throw new Error(staleError)
+    return { content: '', sanitized: false, unavailable: true, limitation }
+  }
+  const lineBuf = await readZstdLogicalRange({
+    fd,
+    fileSize,
+    nativeKey,
+    fileIdentity,
+    lineStart: row.lineStart,
+    lineEnd: row.lineEnd,
+    staleError,
+    formatError,
+    assertCurrent,
+    deadlineMs
+  })
+  let record: unknown
+  try {
+    record = JSON.parse(utf8Decoder.decode(lineBuf))
+  } catch {
+    throw new Error(formatError)
+  }
+  if (row.type === 'OPAQUE') {
+    const safeFields = extractOpaqueSafeMetadata(record)
+    if (digest(JSON.stringify(safeFields)) !== row.payloadDigest) throw new Error(staleError)
+    return {
+      content: '',
+      sanitized: true,
+      opaque: true,
+      limitation: row.errorKind ?? 'UNRECOGNIZED_FORMAT',
+      safeFields
+    }
+  }
+  const rawText = extractPart(record, row.partIndex)
+  if (rawText === undefined) throw new Error(staleError)
+  const content = sanitize(rawText)
+  if (digest(content) !== row.payloadDigest || Buffer.byteLength(content) !== row.bytes) {
+    throw new Error(staleError)
+  }
+  return { content, sanitized: content !== rawText }
+}
+
 export function findFtsMatchOffset(content: string, queryText: string, mode: 'ALL_TERMS' | 'PHRASE' = 'ALL_TERMS'): number | undefined {
   const trimmed = queryText.trim()
   if (!trimmed) return undefined
@@ -904,6 +1219,58 @@ export function readEventLiteralSlice(options: {
     if (fits(result, budget, true)) return result
   }
   throw new Error('RESPONSE_LIMIT_REACHED')
+}
+
+export async function searchIndexedNativeEventsAsync(options: Parameters<typeof searchIndexedNativeEvents>[0] & {
+  fileSize?: number
+  fileIdentity?: string
+  compressed?: boolean
+}) {
+  if (!options.compressed || options.fileSize === undefined || !options.fileIdentity) {
+    return searchIndexedNativeEvents(options)
+  }
+  const { refs, nativeKey, revision, filters, query, matchOffset, limit, fd, fileSize, fileIdentity, formatError, staleError, extractPart, assertCurrent } = options
+  const batchSize = 100
+  const maxScan = 50_000
+  const deadlineMs = options.deadlineMs ?? (Date.now() + 4000)
+  let sqlOffset = 0
+  let matchedSeen = 0
+  let scanned = 0
+  let truncated = false
+  const items: Array<ReturnType<typeof toNativeEventMeta> & { match: { startByte: number } }> = []
+
+  for (;;) {
+    assertCurrent()
+    if (scanned >= maxScan || Date.now() >= deadlineMs) {
+      truncated = true
+      break
+    }
+    const batch = refs.pageEvents(nativeKey, revision, filters, sqlOffset, batchSize)
+    if (!batch.length) break
+    sqlOffset += batch.length
+    for (const row of batch) {
+      assertCurrent()
+      scanned++
+      if (row.type === 'OPAQUE' || row.type === 'UNAVAILABLE') continue
+      const { content } = await extractAndVerifyEventLiteralAsync({
+        fd, fileSize, nativeKey, fileIdentity, compressed: true, row, formatError, staleError, extractPart, assertCurrent, deadlineMs
+      })
+      const pos = content.indexOf(query)
+      if (pos >= 0) {
+        if (matchedSeen >= matchOffset) {
+          items.push({ ...toNativeEventMeta(row), match: { startByte: Buffer.byteLength(content.slice(0, pos)) } })
+          if (items.length >= limit + 1) return { items, truncated: false }
+        }
+        matchedSeen++
+      }
+      if (scanned >= maxScan || Date.now() >= deadlineMs) {
+        truncated = true
+        break
+      }
+    }
+    if (batch.length < batchSize) break
+  }
+  return { items, truncated, ...(truncated ? {} : { totalMatched: matchedSeen }) }
 }
 
 export function searchIndexedNativeEvents(options: {
