@@ -1,3 +1,4 @@
+import { PickerRouter, type PickerMessage } from './context-picker-router'
 import { getChromeApi, type ChromeApi, type ChromeMessageSender, type ChromeNativePortLike } from './chrome-api'
 import {
   ExtensionMaintenanceCoordinator,
@@ -400,11 +401,22 @@ export function createChromeNativeSender(chromeApi: ChromeApi): NativeMessageSen
 
 export class ExtensionBackgroundRouter {
   private seq = 0
+  private readonly picker: PickerRouter
 
   constructor(
     private readonly sendNative: NativeMessageSender,
-    private readonly runtimeId?: string
-  ) {}
+    private readonly runtimeId?: string,
+    chromeApi?: ChromeApi
+  ) {
+    this.picker = new PickerRouter(runtimeId, (webOrigin, request) =>
+      this.sendNative({ id: this.nextId(), action: 'context_picker', webOrigin, request }),
+      chromeApi?.tabs && ((tab, documentId, href, challenge, markdown) => new Promise(resolve => {
+        chromeApi.tabs!.sendMessage(tab, { type: 'PICKER_INSERT_TEXT', href, challenge, markdown }, { documentId }, response => {
+          resolve(chromeApi.runtime?.lastError ? undefined : response)
+        })
+      }))
+    )
+  }
 
   private nextId(): string {
     this.seq += 1
@@ -414,6 +426,11 @@ export class ExtensionBackgroundRouter {
   async handleMessage(rawMessage: unknown, sender: ChromeMessageSender): Promise<unknown> {
     if (!rawMessage || typeof rawMessage !== 'object' || typeof (rawMessage as { type?: unknown }).type !== 'string') {
       return { ok: false, error: { code: 'INVALID_REQUEST', message: 'Missing message type' } }
+    }
+
+    const type = (rawMessage as { type: string }).type
+    if (type === 'PICKER_BIND' || type === 'PICKER_CLOSE' || type === 'PICKER_REQUEST') {
+      return this.picker.handle(rawMessage as PickerMessage, sender)
     }
 
     const msg = rawMessage as ExtensionBackgroundMessage
@@ -536,7 +553,7 @@ export function registerBackgroundServiceWorker(
 ): ExtensionMaintenanceCoordinator | null {
   if (!chromeApi?.runtime?.onMessage) return null
   const nativeSender = createChromeNativePortSender(chromeApi)
-  const router = new ExtensionBackgroundRouter(nativeSender, chromeApi.runtime.id)
+  const router = new ExtensionBackgroundRouter(nativeSender, chromeApi.runtime.id, chromeApi)
   const maintenance = new ExtensionMaintenanceCoordinator({
     chromeApi,
     sendNative: nativeSender,

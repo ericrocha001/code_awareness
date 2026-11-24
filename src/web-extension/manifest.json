@@ -10,6 +10,9 @@
     "scripting"
   ],
   "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://claude.ai/*",
+    "https://gemini.google.com/*",
     "https://chat.deepseek.com/*",
     "https://chat.qwen.ai/*"
   ],
@@ -23,6 +26,9 @@
   "content_scripts": [
     {
       "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
         "https://chat.deepseek.com/*",
         "https://chat.qwen.ai/*"
       ],
@@ -30,6 +36,20 @@
         "content-script.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "context-picker.html"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://claude.ai/*",
+        "https://gemini.google.com/*",
+        "https://chat.deepseek.com/*",
+        "https://chat.qwen.ai/*"
+      ]
     }
   ]
 }

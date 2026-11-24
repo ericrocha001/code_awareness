@@ -77,6 +77,7 @@ export const WEB_EXTENSION_MANAGER_TOOL_NAMES = Object.freeze([
 
 export type NativeBridgeCommand =
   | { id: string; action: 'ping' }
+  | { id: string; action: 'context_picker'; webOrigin: string; request: unknown }
   | {
       id: string
       action: 'get_status'

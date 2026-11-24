@@ -1,5 +1,7 @@
 export interface ChromeMessageSender {
   id?: string
+  frameId?: number
+  documentId?: string
   url?: string
   origin?: string
   tab?: { id?: number; url?: string }
@@ -28,6 +30,7 @@ export type ChromeMessageListener = (
 export interface ChromeRuntimeApi {
   readonly id?: string
   readonly lastError?: { message?: string }
+  getURL?(path: string): string
   getManifest?: () => { version?: string; [key: string]: unknown }
   reload?: () => void
   connectNative?(application: string): ChromeNativePortLike
@@ -67,6 +70,7 @@ export interface ChromeTabsApi {
     callback: (tabs: ChromeTabInfo[]) => void
   ): void
   sendMessage(tabId: number, message: unknown, callback?: (response: unknown) => void): void
+  sendMessage(tabId: number, message: unknown, options: { documentId: string }, callback: (response: unknown) => void): void
 }
 
 export interface ChromeStorageArea {
@@ -108,11 +112,17 @@ export interface ChromeScriptingApi {
   }): Promise<Array<{ frameId?: number; result?: unknown }>>
 }
 
+export type ChromeStorageChangeListener = (changes: Record<string, { newValue?: unknown }>, area: string) => void
+
 export interface ChromeApi {
   runtime?: ChromeRuntimeApi
   tabs?: ChromeTabsApi
   storage?: {
     local?: ChromeStorageArea
+    onChanged?: {
+      addListener(listener: ChromeStorageChangeListener): void
+      removeListener(listener: ChromeStorageChangeListener): void
+    }
   }
   alarms?: ChromeAlarmsApi
   management?: ChromeManagementApi

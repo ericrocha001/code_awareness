@@ -1,3 +1,4 @@
+import { defaultPosition, detectChatSite, positionKey, positions, readPosition } from './floating-bar'
 import { getChromeApi } from './chrome-api'
 
 interface StatusResult {
@@ -74,6 +75,29 @@ export async function initPopup(): Promise<void> {
     chromeApi.tabs!.query({ active: true, currentWindow: true }, resolve)
   })
   const activeTab = tabs[0]
+  const floatingBarSite = detectChatSite(activeTab?.url)
+  const storage = chromeApi.storage?.local
+  const globalPosition = doc.querySelector<HTMLSelectElement>('#floating-bar-global')
+  const sitePosition = doc.querySelector<HTMLSelectElement>('#floating-bar-site')
+  if (storage && globalPosition && sitePosition) {
+    const labels = ['Top left', 'Top right', 'Bottom left', 'Bottom right']
+    const options = () => positions.map((position, index) => new Option(labels[index], position))
+    globalPosition.replaceChildren(...options())
+    globalPosition.addEventListener('change', () => storage.set({ [positionKey()]: globalPosition.value }))
+    storage.get(positionKey(), (items) => {
+      globalPosition.value = readPosition(items[positionKey()]) ?? defaultPosition
+    })
+    if (floatingBarSite) {
+      const key = positionKey(floatingBarSite)
+      doc.getElementById('floating-bar-site-label')!.textContent = activeTab?.url
+        ? new URL(activeTab.url).hostname
+        : floatingBarSite
+      doc.getElementById('floating-bar-site-row')!.hidden = false
+      sitePosition.replaceChildren(new Option('Use global position', ''), ...options())
+      storage.get(key, (items) => { sitePosition.value = readPosition(items[key]) ?? '' })
+      sitePosition.addEventListener('change', () => storage.set({ [key]: sitePosition.value || null }))
+    }
+  }
   const tabId = activeTab?.id
   const detected = detectSiteFromUrl(activeTab?.url)
 

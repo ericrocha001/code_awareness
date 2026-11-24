@@ -1,3 +1,4 @@
+import type { ContextPickerService } from './context-picker-service'
 import type { LocalChannelAdapter, LocalOperation } from '../local-agent-channel/local-channel-types'
 import { operation } from '../local-agent-channel/local-channel-types'
 import { object, text } from '../local-agent-channel/request-validation'
@@ -32,7 +33,8 @@ export class WebActivationLocalAdapter implements LocalChannelAdapter {
 
   constructor(
     private readonly ensureEndpoint: () => Promise<DesktopSkillsEndpointInfo>,
-    private readonly extensionManager?: ExtensionManagerService
+    private readonly extensionManager?: ExtensionManagerService,
+    picker?: ContextPickerService
   ) {
     const ops: Record<string, LocalOperation> = {
       endpoint: operation(
@@ -46,6 +48,8 @@ export class WebActivationLocalAdapter implements LocalChannelAdapter {
         }
       )
     }
+
+    if (picker) ops.context_picker = operation(input => input, (input, context) => picker.execute(input, context.connected))
 
     if (extensionManager) {
       ops.status = operation(

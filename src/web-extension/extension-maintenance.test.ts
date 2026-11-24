@@ -133,7 +133,10 @@ describe('MV3 ExtensionMaintenanceCoordinator & Manifest Permissions', () => {
     expect(manifest.permissions).toContain('scripting')
     expect(manifest.permissions).not.toContain('management')
     expect(manifest.permissions).not.toContain('tabs')
-    expect(manifest.host_permissions).toEqual(['https://chat.deepseek.com/*', 'https://chat.qwen.ai/*'])
+    expect(manifest.host_permissions).toEqual([
+      'https://chatgpt.com/*', 'https://claude.ai/*', 'https://gemini.google.com/*',
+      'https://chat.deepseek.com/*', 'https://chat.qwen.ai/*'
+    ])
   })
 
   it('schedules 1-minute alarm only for managed development installs, backs off on APP_UNAVAILABLE, and clears on revoke', async () => {

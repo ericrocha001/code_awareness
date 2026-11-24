@@ -31,6 +31,7 @@
         gap: 8px;
         margin: 4px 0;
       }
+      .row[hidden] { display: none; }
       .badge {
         padding: 2px 8px;
         border-radius: 9999px;
@@ -99,6 +100,13 @@
     </div>
     <div id="status-message" class="error"></div>
 
+    <div class="card">
+      <label class="row">Floating Bar position <select id="floating-bar-global"></select></label>
+      <label class="row" id="floating-bar-site-row" hidden>
+        <span id="floating-bar-site-label"></span>
+        <select id="floating-bar-site"></select>
+      </label>
+    </div>
     <script src="popup.js"></script>
   </body>
 </html>

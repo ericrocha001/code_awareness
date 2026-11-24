@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Continuum Context Picker</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; padding: 12px; background: #111827; color: #f9fafb;
+      font: 13px/1.4 system-ui, sans-serif; overflow-wrap: anywhere; }
+    h1 { font-size: 15px; margin: 0; }
+    header, .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    p { margin: 6px 0 10px; }
+    label { display: grid; gap: 3px; }
+    input, select, button { min-width: 0; font: inherit; }
+    input, select { border: 1px solid #64748b; border-radius: 5px; background: #1e293b; padding: 4px; }
+    button { border: 1px solid #64748b; border-radius: 6px; padding: 4px 8px; background: #25354d; color: inherit; }
+    button:enabled { cursor: pointer; }
+    button:disabled { opacity: .55; }
+    :focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+    .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 6px 0; }
+    #results { list-style: none; margin: 8px 0; padding: 0; }
+    #results li { border-bottom: 1px solid #344155; }
+    #results label { grid-template-columns: auto 1fr; align-items: start; padding: 5px 0; }
+    #results input { margin: 3px 4px; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+    #selection { margin-top: 10px; }
+    #selected { margin: 4px 0; padding-left: 18px; }
+    #selected button { margin-left: 6px; padding: 0 4px; }
+    #project, small { color: #cbd5e1; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Continuum Context</h1>
+    <button type="button" id="close" aria-label="Close Context Picker">×</button>
+  </header>
+  <p id="project"></p>
+  <p id="destination"></p>
+  <form id="search">
+    <label>Search artifacts <input type="search" name="query" maxlength="250"></label>
+    <div class="filters">
+      <label>Tag <select name="tag"></select></label>
+      <label>Kind <select name="kind"></select></label>
+      <label>Status <select name="status"></select></label>
+    </div>
+    <button type="submit">Search</button>
+  </form>
+  <p id="status" role="status">Connecting to Continuum…</p>
+  <ul id="results"></ul>
+  <button type="button" id="more" hidden>Load more</button>
+  <section id="selection" aria-label="Selected artifacts">
+    <strong id="count">0 selected</strong>
+    <ol id="selected"></ol>
+    <p id="preview" role="status" hidden></p>
+    <div class="actions">
+      <button type="button" id="preview-button" disabled>Preview</button>
+      <button type="button" id="insert" disabled hidden>Insert text</button>
+      <button type="button" id="copy" disabled>Copy text</button>
+      <button type="button" id="export" disabled>Export originals (ZIP)</button>
+    </div>
+  </section>
+  <script src="context-picker.js"></script>
+</body>
+</html>
