@@ -26,6 +26,7 @@ export class FloatingBar {
   private disposed = false
   private readonly activation: HTMLElement
   private panel?: HTMLIFrameElement
+  private panelResize?: ResizeObserver
   private challenge?: string
   private pickerCleanup?: () => void
   private position = defaultPosition
@@ -69,7 +70,7 @@ export class FloatingBar {
       .bar:has(.identity) .brand { margin-right: 6px; position: relative; }
       .bar:has(.identity) .brand::after { content: ''; position: absolute; left: calc(100% + 6px); top: 3px; bottom: 3px; border-left: 1px solid #59648d88; }
       iframe { position: absolute; width: min(454px, calc(100vw - 32px));
-        height: min(570px, calc(100vh - 90px)); border: 1px solid #586b96;
+        box-sizing: border-box; height: max(0px, calc(100dvh - 40px - var(--bar-height))); border: 1px solid #586b96;
         border-radius: 18px; box-shadow: 0 16px 38px #080b18aa; background: #111827; }
       button {
         flex: none; border: 1px solid #7769dc; border-radius: 20px; padding: 4px 9px;
@@ -169,6 +170,7 @@ export class FloatingBar {
   private positionPanel(): void {
     if (!this.panel) return
     const [vertical, horizontal] = this.position.split('-')
+    this.panel.style.setProperty('--bar-height', `${this.controls.getBoundingClientRect().height}px`)
     this.panel.style.inset = 'auto'
     this.panel.style.setProperty(vertical, 'calc(100% + 8px)')
     this.panel.style.setProperty(horizontal, '0')
@@ -190,6 +192,8 @@ export class FloatingBar {
 
     const close = (restoreFocus = false) => {
       if (!this.panel) return
+      this.panelResize?.disconnect()
+      this.panelResize = undefined
       this.panel.remove()
       this.panel = undefined
       trigger.setAttribute('aria-expanded', 'false')
@@ -238,6 +242,8 @@ export class FloatingBar {
       this.panel = panel
       this.positionPanel()
       this.host.shadowRoot?.append(panel)
+      this.panelResize = new ResizeObserver(() => this.positionPanel())
+      this.panelResize.observe(this.controls, { box: 'border-box' })
       trigger.setAttribute('aria-expanded', 'true')
     })
     const insert: ChromeMessageListener = (raw, sender, respond) => {

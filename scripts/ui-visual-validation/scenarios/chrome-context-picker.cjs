@@ -9,11 +9,16 @@ const fixture = {
   projectName: 'Engineering Demo',
   tags: [{ slug: 'architecture', name: 'Architecture' }],
   facets: [
-    { key: 'kind', values: [{ value: 'DOCUMENT', count: 1 }, { value: 'VISUAL_REFERENCE', count: 1 }] }
+    { key: 'kind', values: [{ value: 'DOCUMENT', count: 19 }, { value: 'VISUAL_REFERENCE', count: 1 }] },
+    { key: 'status', values: [{ value: 'PENDING', count: 8 }, { value: 'VALIDATED', count: 12 }] }
   ],
   artifacts: [
     { artifactId: 'a', revision: 1, name: 'Service boundaries', kind: 'DOCUMENT' },
-    { artifactId: 'b', revision: 2, name: 'Navigation overview', kind: 'VISUAL_REFERENCE' }
+    { artifactId: 'b', revision: 2, name: 'Navigation overview', kind: 'VISUAL_REFERENCE' },
+    ...Array.from({ length: 18 }, (_, i) => ({
+      artifactId: 'doc-' + i, revision: 1, kind: 'DOCUMENT',
+      name: i === 1 ? 'Orientações para integrações entre serviços e recuperação após falhas de rede' : 'Documento de referência ' + (i + 1)
+    }))
   ]
 }
 
@@ -49,7 +54,16 @@ exports.run = async ctx => {
   const protocol = ctx.window.webContents.session.protocol
   const pickerOrigin = 'https://chatgpt.com'
   const runtime = `
+    let storageListener;
+    globalThis.setPickerPosition = position => {
+      globalThis.pickerPosition = position;
+      storageListener?.({ floatingBarPosition: { newValue: position } }, 'local');
+    };
     globalThis.chrome = {
+      storage: {
+        local: { get: (_keys, reply) => reply({ floatingBarPosition: globalThis.pickerPosition }) },
+        onChanged: { addListener: listener => { storageListener = listener }, removeListener() {} }
+      },
       runtime: {
         id: 'fixture',
         getURL: path => '${pickerOrigin}/' + path,
@@ -62,7 +76,7 @@ exports.run = async ctx => {
             }
 
             const result = message.request.action === 'catalog' ? ${JSON.stringify(fixture)}
-              : {tokenCount: 412, markdownBytes: 1320, hasVisuals: true, artifactTokens: [{artifactId:"a",rawMarkdownTokenCount:32},{artifactId:"b",rawMarkdownTokenCount:42}], members: []};
+              : {tokenCount: 412, markdownBytes: 1320, hasVisuals: true, artifactTokens: message.request.selected.map(item => ({artifactId:item.artifactId,rawMarkdownTokenCount:32})), members: []};
             reply?.({ ok: true, result });
           }
         }
@@ -122,7 +136,7 @@ exports.run = async ctx => {
       }
       throw new Error('Picker condition timed out')
     }
-    await until("document.querySelectorAll('#results input').length === 2")
+    await until("document.querySelectorAll('#results input').length === 20")
     const activatePanelControl = async selector => {
       const frame = await ctx.evaluate(() => {
         const iframe = document.querySelector('#code-awareness-activation-pill').shadowRoot.querySelector('iframe')
@@ -135,17 +149,49 @@ exports.run = async ctx => {
     await activatePanelControl('#results input[value="a"]')
     await until("document.querySelector('#count').textContent === '1 selecionado'")
     await activatePanelControl('#results input[value="b"]')
-    await until("document.querySelector('#count').textContent === '2 selecionados'")
+    for (let i = 0; i < 6; i++) await activatePanelControl(`#results input[value="doc-${i}"]`)
+    await until("document.querySelector('#count').textContent === '8 selecionados'")
+    ctx.check('Selecting leaves the selection panel collapsed', await evaluation("document.querySelector('#selected').hidden"))
     await until("document.querySelector('#preview').textContent.includes('412 tokens')")
     ctx.check('Picker preview and text action rendered', await evaluation("!document.querySelector('#insert').disabled && document.querySelector('#preview').textContent.includes('WebP')"))
     await ctx.capture('context-picker-wide')
+    await activatePanelControl('#selection-toggle')
+    ctx.check('Expanded catalog and selection each scroll independently', await evaluation(
+      "['#catalog','#selected'].every(s => { const el=document.querySelector(s); return el.clientHeight >= 65 && el.scrollHeight > el.clientHeight })"
+    ))
+    await ctx.capture('context-picker-wide-expanded')
 
     await ctx.viewport(390, 640)
     ctx.check('Picker stays inside narrow viewport', await ctx.evaluate(() => {
       const { left, right, top, bottom } = document.querySelector('#code-awareness-activation-pill').shadowRoot.querySelector('iframe').getBoundingClientRect()
       return left >= 0 && top >= 0 && right <= innerWidth && bottom <= innerHeight
     }))
+    ctx.check('Split viewport leaves both lists usable and keeps actions visible', await evaluation(
+      "['#catalog','#selected'].every(s => document.querySelector(s).clientHeight >= 66) && document.querySelector('#attach').getBoundingClientRect().bottom <= innerHeight"
+    ))
+    await ctx.capture('context-picker-split-expanded')
+    await evaluation("document.querySelector('#selection-toggle').focus()")
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Space' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Space' })
+    await until("document.querySelector('#selected').hidden")
+    ctx.check('Keyboard collapses the list and keeps selection, total, and action', await evaluation(
+      "document.activeElement.id === 'selection-toggle' && document.querySelector('#selected').children.length === 8 && document.querySelector('#preview').textContent.includes('412 tokens') && !document.querySelector('#copy').disabled"
+    ))
     await ctx.capture('context-picker-split')
+    for (const position of ['top-left', 'top-right', 'bottom-left', 'bottom-right']) {
+      await ctx.evaluate(position => window.setPickerPosition(position), position)
+      ctx.check(`Picker fits the ${position} corner`, await ctx.evaluate(position => {
+        const host = document.querySelector('#code-awareness-activation-pill')
+        const bar = host.getBoundingClientRect()
+        const rect = host.shadowRoot.querySelector('iframe').getBoundingClientRect()
+        const close = (actual, expected) => Math.abs(actual - expected) < 2
+        const vertical = position.startsWith('top')
+          ? close(rect.top, bar.bottom + 8) && close(rect.bottom, innerHeight - 16)
+          : close(rect.bottom, bar.top - 8) && close(rect.top, 16)
+        const horizontal = position.endsWith('left') ? close(rect.left, 16) : close(rect.right, innerWidth - 16)
+        return vertical && horizontal
+      }, position))
+    }
     await evaluation("document.querySelector('#attach').scrollIntoView({ block: 'nearest' })")
     await activatePanelControl('#attach')
     await until("document.querySelector('#action-status').textContent.includes('Arquivos salvos em')")

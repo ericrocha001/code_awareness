@@ -12,8 +12,10 @@ const projectName = document.querySelector<HTMLParagraphElement>('#project')!
 const form = document.querySelector<HTMLFormElement>('#search')!
 const results = document.querySelector<HTMLUListElement>('#results')!
 const selectedList = document.querySelector<HTMLOListElement>('#selected')!
+const selectionPanel = document.querySelector<HTMLElement>('#selection')!
+const selectionToggle = document.querySelector<HTMLButtonElement>('#selection-toggle')!
 const count = document.querySelector<HTMLElement>('#count')!
-const preview = document.querySelector<HTMLParagraphElement>('#preview')!
+const preview = document.querySelector<HTMLSpanElement>('#preview')!
 const more = document.querySelector<HTMLButtonElement>('#more')!
 const close = document.querySelector<HTMLButtonElement>('#close')!
 const copy = document.querySelector<HTMLButtonElement>('#copy')!
@@ -68,6 +70,7 @@ function renderSelection() {
   }
   const focused = document.activeElement instanceof HTMLButtonElement
     ? document.activeElement.dataset.remove : undefined
+  const scrollTop = selectedList.scrollTop
   selectedList.replaceChildren(...Array.from(selected.values(), item => {
     const li = document.createElement('li')
     const remove = document.createElement('button')
@@ -83,14 +86,25 @@ function renderSelection() {
       selectionChanged()
     })
     const amount = amounts.get(item.artifactId)
-    const detail = amount === undefined ? '' : ` · ≈ ${tokens(amount)}`
-    li.append(item.name + detail, remove)
+    const line = document.createElement('div')
+    line.className = 'selection-line'
+    const title = document.createElement('span')
+    title.textContent = item.name
+    if (amount !== undefined) {
+      const detail = document.createElement('small')
+      detail.textContent = ` · ≈ ${tokens(amount)}`
+      title.append(detail)
+    }
+    line.append(title, remove)
+    li.append(line)
     return li
   }))
   if (focused) {
     const target = [...selectedList.querySelectorAll('button')].find(button => button.dataset.remove === focused)
-    ;(target ?? selectedList.querySelector('button') ?? form.querySelector('input'))?.focus()
+    const nextFocus = target ?? selectedList.querySelector('button') ?? selectionToggle
+    nextFocus.focus({ preventScroll: true })
   }
+  selectedList.scrollTop = scrollTop
   renderActions()
 }
 
@@ -327,6 +341,12 @@ retry.addEventListener('click', () => search())
 copy.addEventListener('click', event => { if (event.isTrusted) void doSelection('copy') })
 attach.addEventListener('click', event => { if (event.isTrusted) void doSelection(shouldDownload() ? 'download' : 'attach') })
 insert.addEventListener('click', event => { if (event.isTrusted && !textAttempted) void doSelection('text') })
+selectionToggle.addEventListener('click', () => {
+  const expanded = selectionToggle.getAttribute('aria-expanded') !== 'true'
+  selectionToggle.setAttribute('aria-expanded', String(expanded))
+  selectionPanel.classList.toggle('is-expanded', expanded)
+  selectedList.hidden = !expanded
+})
 close.addEventListener('click', closePanel)
 document.addEventListener('keydown', event => { if (event.key === 'Escape') closePanel() })
 renderSelection()

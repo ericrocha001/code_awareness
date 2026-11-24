@@ -32,13 +32,15 @@
     .meta { min-width: 0; }
     #project { font-weight: 600; }
     #destination, small, .field-label { color: var(--muted); }
-    header, .metadata, #search, #selection { flex-shrink: 0; }
+    header, .metadata, #search, footer { flex-shrink: 0; }
     label { display: grid; gap: 4px; min-width: 0; }
     input, select, button { min-width: 0; font: inherit; color: inherit; }
     input[type="search"], select {
       width: 100%; min-height: 32px; border: 1px solid var(--control); border-radius: 8px;
       background: linear-gradient(150deg, #263249, var(--field)); padding: 5px 8px;
     }
+    select { color-scheme: dark; background: var(--field); color: var(--text); }
+    select option { background: var(--field); color: var(--text); }
     input::placeholder { color: #aebbd4; opacity: 1; }
     .search-field { position: relative; }
     .search-field .icon { position: absolute; left: 9px; bottom: 8px; pointer-events: none; }
@@ -55,7 +57,15 @@
     :focus-visible { outline: 2px solid #a5caff; outline-offset: 2px; }
     #close { font-size: 19px; line-height: 1; width: 28px; height: 28px; padding: 0; flex-shrink: 0; }
 
-    #catalog { flex: 1; min-height: 34px; overflow: auto; scrollbar-width: thin; }
+    .lists { display: flex; flex: 1; flex-direction: column; gap: 7px; min-height: 156px; }
+    #catalog { flex: 3 1 0; min-height: 40px; overflow: auto; scrollbar-width: thin; }
+    #selection { display: flex; flex-direction: column; flex: 0 0 auto; }
+    #selection.is-expanded { flex: 2 1 36px; min-height: 108px; }
+    #selection-toggle { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; width: 100%; text-align: left; }
+    #selection-toggle .chevron { margin-left: auto; }
+    #selection-toggle[aria-expanded="true"] .chevron { transform: rotate(180deg); }
+    .selection-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; align-items: start; }
+    .selection-line small { color: var(--muted); }
     #results { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
     #results:empty { border: 0; }
     #results li { border-bottom: 1px solid var(--line); }
@@ -65,16 +75,16 @@
     .result-name { font-weight: 600; }
     small { font-size: inherit; font-weight: 400; }
 
-    #selection { border-top: 1px solid var(--line); }
-    .selection-title {
+
+    #selection-toggle {
       display: flex; align-items: center; gap: 7px; padding: 6px 3px; font-size: 14px;
       background: linear-gradient(90deg, #2b406844, transparent);
-      border-bottom: 1px solid #35446188;
+      border: 1px solid #35446188;
     }
-    #selected { max-height: 74px; overflow: auto; margin: 5px 0; padding-left: 23px; scrollbar-width: thin; }
-    #selected li { margin: 3px 0; }
+    #selected { flex: 1; min-height: 0; overflow: auto; margin: 0; padding: 0 3px 0 24px; scrollbar-width: thin; }
+    #selected li { padding: 6px 0; border-bottom: 1px solid #35446188; }
     #selected button { margin-left: 6px; padding: 1px 5px; color: #d1ddfa; }
-    #preview { margin: 5px 0 7px; color: var(--muted); }
+    #preview { margin: 0; color: var(--muted); font-weight: 400; font-size: 12px; }
     .token-total { display: inline-block; padding: 2px 7px; border-radius: 6px; background: #2a3454; color: #d4c5ff; font-weight: 650; }
     #action-status { max-height: 56px; overflow: auto; color: var(--muted); }
     #action-status:empty, #status:empty, #preview:empty { display: none; }
@@ -95,7 +105,8 @@
     }
     @media (max-height: 435px) {
       body { gap: 6px; padding-block: 8px; }
-      #selected { max-height: 48px; }
+      .metadata, .filters { gap: 4px; }
+
     }
     [hidden] { display: none !important; }
   </style>
@@ -118,6 +129,7 @@
       <label><span class="field-label" data-label="status"></span><select name="status"></select></label>
     </div>
   </form>
+  <div class="lists">
   <section id="catalog">
   <p id="status" role="status" data-label="connecting"></p>
   <button type="button" id="retry" data-label="retry" hidden></button>
@@ -125,16 +137,22 @@
   <button type="button" id="more" data-label="more" hidden></button>
   </section>
   <section id="selection" data-aria="selection">
-    <div class="selection-title"><svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg><strong id="count"></strong></div>
-    <ol id="selected"></ol>
-    <p id="preview" role="status"></p>
+    <button type="button" id="selection-toggle" aria-expanded="false" aria-controls="selected">
+      <svg class="icon" aria-hidden="true"><use href="#icon-layers"/></svg><strong id="count"></strong>
+      <span id="preview" role="status"></span>
+      <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    </button>
+    <ol id="selected" hidden></ol>
+  </section>
+  </div>
+  <footer>
     <p id="action-status" role="status"></p>
     <div class="actions">
       <button type="button" id="copy" disabled><svg class="icon" aria-hidden="true"><use href="#icon-copy"/></svg><span data-label="copy"></span></button>
       <button type="button" id="attach" disabled><svg class="icon" aria-hidden="true"><use href="#icon-download"/></svg><span></span></button>
       <button type="button" id="insert" disabled hidden><svg class="icon" aria-hidden="true"><use href="#icon-add"/></svg><span data-label="insert"></span></button>
     </div>
-  </section>
+  </footer>
   <script src="context-picker.js"></script>
 </body>
 </html>
