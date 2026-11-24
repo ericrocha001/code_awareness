@@ -1,5 +1,6 @@
 export const messages = {
-  picker: 'Contexto do Continuum', close: 'Fechar painel de contexto',
+  picker: 'Contexto do Continuum', back: 'Voltar às configurações', manualUse: 'Uso manual',
+  floatingBarVisible: 'Exibir barra flutuante', floatingBarHint: 'Afeta apenas a interface. A ativação do chat pode ser gerenciada neste popup.', close: 'Fechar painel de contexto',
   search: 'Buscar documentos', tag: 'Tag', kind: 'Tipo', status: 'Status', any: 'Todos',
   loading: 'Buscando…', connecting: 'Conectando ao Continuum…', noResults: 'Nenhum documento encontrado.',
   more: 'Carregar mais', retry: 'Atualizar lista', remove: 'Remover', selection: 'Documentos selecionados',

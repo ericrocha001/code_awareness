@@ -31,7 +31,14 @@
         gap: 8px;
         margin: 4px 0;
       }
-      .row[hidden] { display: none; }
+      [hidden] { display: none !important; }
+      #open-picker { width: 100%; margin-bottom: 10px; }
+      body.picker-open { padding: 0; width: 360px; }
+      #picker-view { height: 560px; display: flex; flex-direction: column; }
+      #picker-view button { flex: none; margin: 6px 10px; align-self: flex-start; }
+      #picker-view iframe { width: 100%; flex: 1; min-height: 0; border: 0; }
+      select { color-scheme: dark; background: #202b40; color: #f8fafc; border: 1px solid #64728d; border-radius: 6px; padding: 3px 5px; }
+      select option { background: #202b40; color: #f8fafc; }
       .badge {
         padding: 2px 8px;
         border-radius: 9999px;
@@ -72,6 +79,9 @@
     </style>
   </head>
   <body>
+    <main id="settings-view">
+    <button type="button" id="open-picker" data-label="picker"></button>
+    <section id="activation-settings">
     <h1 data-label="settings"></h1>
     <div class="card">
       <div class="row"><span data-label="bridge"></span><span id="desktop-status" class="badge" data-label="checking"></span></div>
@@ -99,14 +109,24 @@
       <button id="btn-revoke" class="danger" disabled data-label="revoke"></button>
     </div>
     <div id="status-message" class="error"></div>
+    </section>
 
     <div class="card">
+      <label class="toggle">
+        <span data-label="floatingBarVisible"></span>
+        <input type="checkbox" id="floating-bar-visible" checked disabled />
+      </label>
+      <div class="hint" data-label="floatingBarHint"></div>
       <label class="row"><span data-label="barPosition"></span><select id="floating-bar-global"></select></label>
       <label class="row" id="floating-bar-site-row" hidden>
         <span id="floating-bar-site-label"></span>
         <select id="floating-bar-site"></select>
       </label>
     </div>
+    </main>
+    <section id="picker-view" hidden>
+      <button type="button" id="back-to-settings" class="secondary" data-label="back"></button>
+    </section>
     <script src="popup.js"></script>
   </body>
 </html>

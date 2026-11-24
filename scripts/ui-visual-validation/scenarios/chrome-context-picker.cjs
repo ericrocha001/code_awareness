@@ -59,15 +59,20 @@ exports.run = async ctx => {
       globalThis.pickerPosition = position;
       storageListener?.({ floatingBarPosition: { newValue: position } }, 'local');
     };
+    globalThis.setPickerBarVisible = visible => {
+      globalThis.pickerBarVisible = visible;
+      storageListener?.({ floatingBarVisible: { newValue: visible } }, 'local');
+    };
     globalThis.chrome = {
       storage: {
-        local: { get: (_keys, reply) => reply({ floatingBarPosition: globalThis.pickerPosition }) },
+        local: { get: (_keys, reply) => reply({ floatingBarPosition: globalThis.pickerPosition, floatingBarVisible: globalThis.pickerBarVisible }) },
         onChanged: { addListener: listener => { storageListener = listener }, removeListener() {} }
       },
       runtime: {
         id: 'fixture',
         getURL: path => '${pickerOrigin}/' + path,
         sendMessage: (message, reply) => {
+          if (message.type === 'PICKER_CLOSE') globalThis.closedPicker = true;
           if (message.type === 'PICKER_BIND') reply?.({ok:true});
           if (message.type === 'PICKER_REQUEST') {
             if (message.request.action === 'download') {
@@ -217,6 +222,59 @@ exports.run = async ctx => {
       return bounds.left >= 0 && bounds.right <= innerWidth
     }))
     await ctx.capture('floating-bar-split')
+    const contextButton = await ctx.evaluate(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
+      .querySelector('.context-trigger').getBoundingClientRect().toJSON())
+    click(contextButton)
+    await until("document.querySelectorAll('#results input').length === 20")
+    await ctx.evaluate(() => window.setPickerBarVisible(false))
+    await ctx.waitFor(() => {
+      const bar = document.querySelector('#code-awareness-activation-pill')
+      return window.closedPicker && bar.hidden && !bar.shadowRoot.querySelector('iframe') && bar.dataset.caState === 'INACTIVE'
+    })
+    await ctx.evaluate(() => window.setPickerBarVisible(true))
+    ctx.check('Visibility preference closes the binding without changing activation state', await ctx.evaluate(() => {
+      const bar = document.querySelector('#code-awareness-activation-pill')
+      return !bar.hidden && bar.dataset.caState === 'INACTIVE' && bar.shadowRoot.querySelectorAll('.context-trigger').length === 1 &&
+        document.querySelector('textarea').value === 'Rascunho sintético'
+    }))
+
+    const loaded = await ctx.window.webContents.session.extensions.loadExtension(extension)
+    try {
+      await ctx.viewport(360, 560)
+      await ctx.window.loadURL(`chrome-extension://${loaded.id}/popup.html`)
+      await ctx.waitFor(() => document.querySelector('#open-picker')?.textContent.includes('Continuum'))
+      await ctx.evaluate((catalog) => {
+        chrome.runtime.sendMessage = (message, reply) => {
+          const result = message.request?.action === 'preview'
+            ? { tokenCount: 412, hasVisuals: true, artifactTokens: message.request.selected.map(item => ({ artifactId: item.artifactId, rawMarkdownTokenCount: 32 })) }
+            : catalog
+          reply({ ok: true, result })
+        }
+      }, fixture)
+      await ctx.capture('context-picker-popup-settings')
+      await ctx.click('#open-picker')
+      await ctx.waitFor(() => document.querySelector('iframe')?.contentDocument?.querySelectorAll('#results input').length === 20)
+      await ctx.evaluate(() => {
+        const view = document.querySelector('iframe').contentDocument
+        for (const checkbox of [...view.querySelectorAll('#results input')].slice(0, 8)) checkbox.click()
+        view.querySelector('#selection-toggle').click()
+      })
+      await ctx.waitFor(() => document.querySelector('iframe')?.contentDocument?.querySelector('#preview')?.textContent.includes('412'))
+      ctx.check('Shared picker has manual actions in the popup', await ctx.evaluate(() => {
+        const view = document.querySelector('iframe').contentDocument
+        return view.querySelector('#destination').textContent === 'Uso manual' &&
+          view.querySelector('#insert').hidden && !view.querySelector('#attach').disabled &&
+          view.querySelector('#attach').textContent.includes('Baixar arquivos')
+      }))
+      await ctx.capture('context-picker-popup')
+      await ctx.click('#back-to-settings')
+      ctx.check('Back discards popup selection instance', await ctx.evaluate(() =>
+        !document.querySelector('#picker-view iframe') && !document.querySelector('#settings-view').hidden
+      ))
+    } finally {
+      ctx.window.webContents.session.extensions.removeExtension(loaded.id)
+    }
+
     ctx.check('Source unchanged during capture', runGit('rev-parse', 'HEAD') === head &&
       runGit('status', '--porcelain') === dirty && fingerprint() === metadata.inputsFingerprint)
     require('node:fs').writeFileSync(join(ctx.evidenceDir, 'source.json'), JSON.stringify({

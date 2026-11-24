@@ -71,3 +71,9 @@ export type PickerResponse = { ok: true; result: PickerResult } | { ok: false; e
 export type DraftOutcome =
   | { outcome: 'inserted' }
   | { outcome: 'unavailable' | 'uncertain'; reason: string }
+
+export function isPopupPickerRequest(value: unknown): value is PickerRequest {
+  if (value === null || typeof value !== 'object' || !('action' in value)) return false
+  return value.action === 'catalog' || value.action === 'preview' ||
+    value.action === 'copy' || value.action === 'download'
+}

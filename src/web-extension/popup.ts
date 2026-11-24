@@ -1,5 +1,6 @@
+import { isPopupPickerRequest } from '../shared/web-activation/context-picker-contract'
 import { labelFor, localize, messages as pt } from './locale'
-import { defaultPosition, detectChatSite, positionKey, positions, readPosition } from './floating-bar'
+import { defaultPosition, detectChatSite, floatingBarVisibleKey, positionKey, positions, readPosition } from './floating-bar'
 import { getChromeApi } from './chrome-api'
 
 interface StatusResult {
@@ -56,11 +57,58 @@ function sendTab<T>(tabId: number, msg: Record<string, unknown>): Promise<T | nu
   })
 }
 
+function mountPickerView(doc: Document): void {
+  const win = doc.defaultView
+  const settings = doc.getElementById('settings-view')
+  const picker = doc.getElementById('picker-view')
+  const open = doc.getElementById('open-picker')
+  const back = doc.getElementById('back-to-settings')
+  if (!win || !settings || !picker || !open || !back) return
+  let frame: HTMLIFrameElement | undefined
+  const origin = win.location.origin
+  const close = () => {
+    frame?.remove()
+    frame = undefined
+    picker.hidden = true
+    settings.hidden = false
+    doc.body.classList.remove('picker-open')
+    open.focus()
+  }
+  const receive = (event: MessageEvent) => {
+    const current = frame
+    if (!current || event.source !== current.contentWindow || event.origin !== origin) return
+    if (event.data?.type === 'PICKER_PANEL_HELLO') {
+      current.contentWindow?.postMessage({ type: 'PICKER_POPUP_READY' }, origin)
+    } else if (event.data?.type === 'PICKER_PANEL_CLOSE') {
+      close()
+    } else if (event.data?.type === 'PICKER_POPUP_REQUEST' && Number.isSafeInteger(event.data.id) &&
+      isPopupPickerRequest(event.data.request)) {
+      const { id, request } = event.data
+      void sendRuntime<unknown>({ type: 'PICKER_POPUP_REQUEST', request }).then(response => {
+        if (frame === current) current.contentWindow?.postMessage({ type: 'PICKER_POPUP_RESPONSE', id, response }, origin)
+      })
+    }
+  }
+  open.addEventListener('click', () => {
+    if (frame) return
+    frame = doc.createElement('iframe')
+    frame.title = pt.picker
+    frame.src = 'context-picker.html'
+    settings.hidden = true
+    picker.hidden = false
+    doc.body.classList.add('picker-open')
+    picker.append(frame)
+  })
+  back.addEventListener('click', close)
+  win.addEventListener('message', receive)
+}
+
 export async function initPopup(): Promise<void> {
   const doc = (globalThis as unknown as { document?: Document }).document
   const chromeApi = getChromeApi()
   if (!doc) return
   localize(doc)
+  mountPickerView(doc)
   if (!chromeApi?.tabs) return
 
   const desktopBadge = doc.getElementById('desktop-status')!
@@ -80,6 +128,14 @@ export async function initPopup(): Promise<void> {
   const activeTab = tabs[0]
   const floatingBarSite = detectChatSite(activeTab?.url)
   const storage = chromeApi.storage?.local
+  const visibility = doc.querySelector<HTMLInputElement>('#floating-bar-visible')
+  if (storage && visibility) {
+    storage.get(floatingBarVisibleKey, items => {
+      visibility.checked = items[floatingBarVisibleKey] !== false
+      visibility.disabled = false
+    })
+    visibility.addEventListener('change', () => storage.set({ [floatingBarVisibleKey]: visibility.checked }))
+  }
   const globalPosition = doc.querySelector<HTMLSelectElement>('#floating-bar-global')
   const sitePosition = doc.querySelector<HTMLSelectElement>('#floating-bar-site')
   if (storage && globalPosition && sitePosition) {
@@ -103,6 +159,8 @@ export async function initPopup(): Promise<void> {
   }
   const tabId = activeTab?.id
   const detected = detectSiteFromUrl(activeTab?.url)
+  const activationSettings = doc.getElementById('activation-settings')
+  if (activationSettings && !detected) activationSettings.hidden = true
 
   let currentProjectId: string | null = null
 
@@ -255,7 +313,7 @@ export async function initPopup(): Promise<void> {
     await refresh()
   })
 
-  await refresh()
+  if (detected || !activationSettings) await refresh()
 }
 
 if (typeof (globalThis as { document?: unknown }).document !== 'undefined') {
