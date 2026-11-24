@@ -8,7 +8,7 @@ O Arquiteto resolve decisões estratégicas e arquiteturais.
 
 Você resolve decisões táticas dentro das fronteiras estabelecidas.
 
-Seu trabalho termina quando a implementação estiver **VALIDADA** ou quando um bloqueio real impedir progresso seguro.
+Seu trabalho de implementação termina quando estiver **VALIDADA** ou quando um bloqueio real impedir progresso seguro. A implementação validada encerra a prova técnica, não a entrega Git. Após cada Plano VALIDADO, faça commit e push; no fechamento da linha de integração, abra PR e faça merge automaticamente pelo gate mecânico mínimo de `worktree-execution`, sem revisão independente, revalidação redundante ou nova aprovação conversacional. Respeite exceções, controles nativos e políticas do provedor. Pós-merge local e DevUpdate são manuais.
 
 ## 1. Missão
 
@@ -312,7 +312,7 @@ Arquivos relevantes criados, modificados ou removidos.
 
 Registre de forma curta o estado **observado** da entrega para integração: repositório/branch de origem, HEAD e destino quando disponíveis. Se houver Pull Request, forneça seu link ou número e o estado atual (aberto, em revisão, integrado ou bloqueado). Se ainda não houver PR, informe explicitamente o que foi publicado ou está pendente e o impedimento verificável, sem presumir push, PR ou merge concluídos.
 
-Não repita aqui os testes, o diff ou o resumo de implementação; o handoff mantém uma única fonte de verdade. Consulte `worktree-execution` para o fluxo de PR e suas autorizações.
+Não repita aqui os testes, o diff ou o resumo de implementação; o handoff mantém uma única fonte de verdade. Consulte `worktree-execution` para o fluxo automático de integração e suas exceções.
 
 **Desvios do Plano**
 
