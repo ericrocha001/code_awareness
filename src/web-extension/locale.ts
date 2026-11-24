@@ -1,5 +1,12 @@
 export const messages = {
   picker: 'Contexto do Continuum', back: 'Voltar às configurações', manualUse: 'Uso manual',
+  expandBar: 'Expandir barra flutuante', collapseBar: 'Recolher barra flutuante',
+  editTags: 'Tags', closeTags: 'Fechar tags', searchTags: 'Buscar tags', newTag: 'Nova tag',
+  createAndAssign: 'Criar e atribuir', tagDescription: 'Descrição opcional', tagSaved: 'Tags atualizadas.',
+  tagCheck: 'Confira as tags atuais antes de tentar novamente.', tagConfirmDesktop: 'Confirme a alteração no Code Awareness.',
+  PICKER_TAG_CANCELLED: 'Alteração cancelada.', TAG_IDENTITY_CONFLICT: 'Já existe uma tag com esse identificador.',
+  floatingBarSettings: 'Barra flutuante',
+  barPreferencesSaved: 'As preferências por plataforma ficam guardadas enquanto a barra estiver desligada.',
   floatingBarVisible: 'Exibir barra flutuante', floatingBarHint: 'Afeta apenas a interface. A ativação do chat pode ser gerenciada neste popup.', close: 'Fechar painel de contexto',
   search: 'Buscar documentos', tag: 'Tag', kind: 'Tipo', status: 'Status', any: 'Todos',
   loading: 'Buscando…', connecting: 'Conectando ao Continuum…', noResults: 'Nenhum documento encontrado.',
@@ -76,3 +83,5 @@ export function localize(document: Document): void {
     element.setAttribute('aria-label', messages[element.dataset.aria as keyof typeof messages])
   }
 }
+
+export const platformNames = { chatgpt: 'ChatGPT', claude: 'Claude', gemini: 'Gemini', deepseek: 'DeepSeek', qwen: 'Qwen' } as const

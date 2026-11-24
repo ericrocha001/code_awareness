@@ -52,7 +52,7 @@ it('reinjects a single dormant shell on a picker-only site without mounting acti
   const shells = doc.querySelectorAll<HTMLElement>('#code-awareness-activation-pill')
   expect(shells).toHaveLength(1)
   expect(shells[0].hidden).toBe(true)
-  expect(shells[0].shadowRoot?.querySelector('button')).toBeNull()
+  expect(shells[0].shadowRoot?.querySelector('.context-trigger')).toBeNull()
   expect(doc.activeElement).toBe(draft)
   expect(detectChatSite('https://chatgpt.com.example.com/')).toBeUndefined()
   expect(detectChatSite('http://chatgpt.com/')).toBeUndefined()

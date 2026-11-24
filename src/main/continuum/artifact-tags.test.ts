@@ -1,3 +1,4 @@
+import { ContextPickerService } from '../web-activation/context-picker-service'
 import { afterEach, expect, it, vi } from 'vitest'
 import * as tokenizer from '../core/tokenizer'
 import sharp from 'sharp'
@@ -279,4 +280,35 @@ it('adds optional descriptions to a v2 catalog without changing identities, memb
   const restarted = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => restarted.close())
   expect(restarted.tags()[0]).toEqual({ slug: 'architecture', name: 'Architecture display', description, count: 2 })
   expect(restarted.get(one.artifactId)).toEqual(before)
+})
+
+it('uses canonical tag receipts for popup creation and prevents embedded writes without desktop approval', async () => {
+  const f = setup()
+  const artifact = f.service.publishHuman(markdown('Picker document'))
+  const origin = 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/'
+  const project = { repositoryId: 'catalog-A', name: 'Picker project', revision: 1, service: f.service }
+  let current = project
+  let confirm = false
+  const picker = new ContextPickerService(() => current, value => value === origin, async () => confirm)
+  const popup = (request: unknown) => picker.execute({ surface: 'extension-ui', extensionOrigin: origin, request }, () => true)
+  const web = (request: unknown) => picker.execute({ webOrigin: 'https://chatgpt.com', extensionOrigin: origin, request }, () => true)
+  const catalog = await popup({ action: 'catalog', filters: {} })
+  if (!('scope' in catalog)) throw new Error('Expected catalog')
+  const scope = catalog.scope
+  let target = { artifactId: artifact.artifactId, expectedRevision: artifact.revision }
+  const create = { action: 'tag-create', scope, target, name: 'Release' }
+  await expect(web(create)).rejects.toThrow('PICKER_TAG_CANCELLED')
+  expect(f.service.tags()).toHaveLength(0)
+  const created = await popup(create)
+  expect(created).toMatchObject({ assigned: ['release'], receipt: { state: 'PERSISTED', revision: 2 } })
+  await expect(popup(create)).rejects.toThrow('REVISION_CONFLICT')
+  target = { ...target, expectedRevision: 2 }
+  await expect(popup({ ...create, target })).resolves.toMatchObject({ tags: [{ slug: 'release' }], receipt: { revision: 2 } })
+  expect(f.service.tags()).toHaveLength(1)
+  confirm = true
+  const remove = { action: 'tag-assign', scope, target, slug: 'release', operation: 'remove' }
+  await expect(web(remove)).resolves.toMatchObject({ assigned: [], receipt: { state: 'PERSISTED', revision: 3 } })
+  expect(f.service.tags()).toHaveLength(1)
+  current = { ...project, revision: 2 }
+  await expect(popup({ ...create, target: { ...target, expectedRevision: 3 } })).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
 })

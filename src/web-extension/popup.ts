@@ -1,6 +1,7 @@
 import { isPopupPickerRequest } from '../shared/web-activation/context-picker-contract'
-import { labelFor, localize, messages as pt } from './locale'
-import { defaultPosition, detectChatSite, floatingBarVisibleKey, positionKey, positions, readPosition } from './floating-bar'
+import { labelFor, localize, messages as pt, platformNames } from './locale'
+import { positionKey, positions, resolveBarPreferences, visibilityKey } from './floating-bar-preferences'
+import { contextPickerSites, type ContextPickerSite } from '../shared/web-activation/context-picker-sites'
 import { getChromeApi } from './chrome-api'
 
 interface StatusResult {
@@ -103,12 +104,72 @@ function mountPickerView(doc: Document): void {
   win.addEventListener('message', receive)
 }
 
+function mountBarSettings(doc: Document, storage: NonNullable<ReturnType<typeof getChromeApi>>['storage']): void {
+  const master = doc.querySelector<HTMLInputElement>('#floating-bar-visible')
+  const globalPosition = doc.querySelector<HTMLSelectElement>('#floating-bar-global')
+  const rows = doc.getElementById('floating-bar-sites')
+  const suspended = doc.getElementById('floating-bar-suspended')
+  if (!storage?.local || !master || !globalPosition || !rows || !suspended) return
+  const local = storage.local
+  const labels = [pt.topLeft, pt.topRight, pt.bottomLeft, pt.bottomRight]
+  const options = () => positions.map((position, index) => new Option(labels[index], position))
+  globalPosition.replaceChildren(...options())
+  const sites = Object.keys(contextPickerSites) as ContextPickerSite[]
+  const controls = sites.map(site => {
+    const row = doc.createElement('fieldset')
+    const name = doc.createElement('legend')
+    name.textContent = platformNames[site]
+    const show = doc.createElement('input')
+    show.type = 'checkbox'
+    const position = doc.createElement('select')
+    const showLabel = doc.createElement('label')
+    const positionLabel = doc.createElement('label')
+    showLabel.className = positionLabel.className = 'row'
+    show.setAttribute('aria-label', pt.floatingBarVisible + " · " + platformNames[site])
+    position.setAttribute('aria-label', pt.barPosition + " · " + platformNames[site])
+    showLabel.append(pt.floatingBarVisible, show)
+    positionLabel.append(pt.barPosition, position)
+    position.replaceChildren(new Option(pt.inherit, ''), ...options())
+    row.append(name, showLabel, positionLabel)
+    rows.append(row)
+    show.addEventListener('change', () => local.set({ [visibilityKey(site)]: show.checked }))
+    position.addEventListener('change', () => local.set({ [positionKey(site)]: position.value || null }))
+    return { site, show, position }
+  })
+  const keys = [visibilityKey(), positionKey(), ...sites.flatMap(site => [visibilityKey(site), positionKey(site)])]
+  let generation = 0
+  const refresh = () => {
+    const version = ++generation
+    local.get(keys, items => {
+      if (version !== generation) return
+      const defaults = resolveBarPreferences(items)
+      master.checked = defaults.masterVisible
+      master.disabled = false
+      globalPosition.value = defaults.position
+      suspended.hidden = defaults.masterVisible
+      for (const { site, show, position } of controls) {
+        const preferences = resolveBarPreferences(items, site)
+        show.checked = preferences.siteVisible
+        position.value = preferences.override ?? ''
+        position.options[0].text = `${pt.inherit} · ${labels[positions.indexOf(preferences.defaultLocation)]}`
+      }
+    })
+  }
+  master.addEventListener('change', () => local.set({ [visibilityKey()]: master.checked }, refresh))
+  globalPosition.addEventListener('change', () => local.set({ [positionKey()]: globalPosition.value }, refresh))
+  storage.onChanged?.addListener((changes, area) => {
+    if (area === 'local' && keys.some(key => key in changes)) refresh()
+  })
+  refresh()
+}
+
 export async function initPopup(): Promise<void> {
   const doc = (globalThis as unknown as { document?: Document }).document
   const chromeApi = getChromeApi()
   if (!doc) return
   localize(doc)
   mountPickerView(doc)
+  mountBarSettings(doc, chromeApi?.storage)
   if (!chromeApi?.tabs) return
 
   const desktopBadge = doc.getElementById('desktop-status')!
@@ -126,37 +187,6 @@ export async function initPopup(): Promise<void> {
     chromeApi.tabs!.query({ active: true, currentWindow: true }, resolve)
   })
   const activeTab = tabs[0]
-  const floatingBarSite = detectChatSite(activeTab?.url)
-  const storage = chromeApi.storage?.local
-  const visibility = doc.querySelector<HTMLInputElement>('#floating-bar-visible')
-  if (storage && visibility) {
-    storage.get(floatingBarVisibleKey, items => {
-      visibility.checked = items[floatingBarVisibleKey] !== false
-      visibility.disabled = false
-    })
-    visibility.addEventListener('change', () => storage.set({ [floatingBarVisibleKey]: visibility.checked }))
-  }
-  const globalPosition = doc.querySelector<HTMLSelectElement>('#floating-bar-global')
-  const sitePosition = doc.querySelector<HTMLSelectElement>('#floating-bar-site')
-  if (storage && globalPosition && sitePosition) {
-    const labels = [pt.topLeft, pt.topRight, pt.bottomLeft, pt.bottomRight]
-    const options = () => positions.map((position, index) => new Option(labels[index], position))
-    globalPosition.replaceChildren(...options())
-    globalPosition.addEventListener('change', () => storage.set({ [positionKey()]: globalPosition.value }))
-    storage.get(positionKey(), (items) => {
-      globalPosition.value = readPosition(items[positionKey()]) ?? defaultPosition
-    })
-    if (floatingBarSite) {
-      const key = positionKey(floatingBarSite)
-      doc.getElementById('floating-bar-site-label')!.textContent = activeTab?.url
-        ? new URL(activeTab.url).hostname
-        : floatingBarSite
-      doc.getElementById('floating-bar-site-row')!.hidden = false
-      sitePosition.replaceChildren(new Option(pt.inherit, ''), ...options())
-      storage.get(key, (items) => { sitePosition.value = readPosition(items[key]) ?? '' })
-      sitePosition.addEventListener('change', () => storage.set({ [key]: sitePosition.value || null }))
-    }
-  }
   const tabId = activeTab?.id
   const detected = detectSiteFromUrl(activeTab?.url)
   const activationSettings = doc.getElementById('activation-settings')

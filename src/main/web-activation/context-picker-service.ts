@@ -1,9 +1,10 @@
-import { isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
+import { isPickerTagMutation, isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
 import { randomUUID } from 'node:crypto'
 import { contextPickerSite } from '../../shared/web-activation/context-picker-sites'
 import type {
-  PickerCatalog, PickerFilters, PickerPreview, PickerRequest, PickerResult, PickerScope
+  PickerCatalog, PickerFilters, PickerPreview, PickerRequest, PickerResult, PickerScope, PickerTagMutation, PickerTagView
 } from '../../shared/web-activation/context-picker-contract'
+import { artifactTags, quickTag, tagDescription, validateTagSlug } from '../../shared/types/continuum-tag-types'
 import type { ContinuumService } from '../continuum/continuum-service'
 import { ContextBundle, SELECTION_MAX_ARTIFACTS } from '../continuum/context-bundle'
 import { downloadPickerFiles, nativePickerFiles, pickerOriginals } from './context-picker-files'
@@ -21,7 +22,8 @@ export class ContextPickerService {
 
   constructor(
     private readonly activeProject: () => PickerProject | null,
-    private readonly isEnrolledExtension: (origin: string) => boolean = () => false
+    private readonly isEnrolledExtension: (origin: string) => boolean = () => false,
+    private readonly confirmWebTag: (name: string, project: string, request: PickerTagMutation) => Promise<boolean> = async () => false
   ) {}
 
   private current() {
@@ -44,7 +46,7 @@ export class ContextPickerService {
     const surface = object(input).surface
     const args = surface === 'extension-ui'
       ? object(input, ['surface', 'extensionOrigin', 'request'])
-      : object(input, ['webOrigin', 'request'])
+      : object(input, ['webOrigin', 'extensionOrigin', 'request'])
     if (surface === 'extension-ui') {
       if (!isPopupPickerRequest(args.request) || !this.isEnrolledExtension(text(args.extensionOrigin))) {
         throw new Error('ORIGIN_NOT_ALLOWED')
@@ -56,10 +58,11 @@ export class ContextPickerService {
       }
     }
     const request = parseRequest(args.request)
+    const mutation = isPickerTagMutation(request)
     const { project, scope } = this.current()
     const assertCurrent = () => {
       if (!connected()) throw new Error('PICKER_SESSION_EXPIRED')
-      if (surface === 'extension-ui' && !this.isEnrolledExtension(text(args.extensionOrigin))) {
+      if ((surface === 'extension-ui' || mutation) && !this.isEnrolledExtension(text(args.extensionOrigin))) {
         throw new Error('ORIGIN_NOT_ALLOWED')
       }
       if (this.current().scope !== scope) throw new Error('PROJECT_CONTEXT_CHANGED')
@@ -67,6 +70,37 @@ export class ContextPickerService {
     if (request.scope && (
       request.scope.repositoryId !== scope.repositoryId || request.scope.binding !== scope.binding
     )) throw new Error('PROJECT_CONTEXT_CHANGED')
+
+    if (request.action === 'tag-membership' || isPickerTagMutation(request)) {
+      const artifactId = request.action === 'tag-membership' ? request.artifactId : request.target.artifactId
+      const read = (): PickerTagView => {
+        const tags = project.service.tags().map(({ slug, name }) => ({ slug, name }))
+        const item = project.service.get(artifactId)
+        if (!item) throw new Error('ARTIFACT_NOT_FOUND')
+        assertCurrent()
+        return {
+          artifact: { artifactId, revision: item.revision, name: item.metadata.name, kind: item.metadata.kind },
+          assigned: artifactTags(item.metadata.tags),
+          tags
+        }
+      }
+      assertCurrent()
+      if (request.action === 'tag-membership') return read()
+      const target = [request.target]
+      project.service.assertSelection(target)
+      if (surface !== 'extension-ui') {
+        const item = read()
+        if (!await this.confirmWebTag(item.artifact.name, project.name, request)) throw new Error('PICKER_TAG_CANCELLED')
+        assertCurrent()
+        project.service.assertSelection(target)
+      }
+      const result = request.action === 'tag-create'
+        ? project.service.createTag({ name: request.name, description: request.description, selected: target })
+        : project.service.assignTag({ slug: request.slug, operation: request.operation, selected: target })
+      const receipt = result.artifacts[0]
+      if (result.state !== 'PERSISTED' || !receipt?.success) throw new Error('PICKER_TAG_UNCONFIRMED')
+      return { ...read(), receipt: { state: result.state, artifactId: receipt.artifactId, revision: receipt.revision } }
+    }
 
     if (request.action === 'catalog') {
       const page = project.service.list({ ...request.filters, limit: 20 })
@@ -165,6 +199,27 @@ function parseRequest(input: unknown): PickerRequest {
     return { action, scope: req.scope === undefined ? undefined : parseScope(req.scope), filters }
   }
 
+  if (action === 'tag-membership') {
+    const req = object(input, ['action', 'scope', 'artifactId'])
+    return { action, scope: parseScope(req.scope), artifactId: text(req.artifactId) }
+  }
+  if (action === 'tag-assign' || action === 'tag-create') {
+    const req = object(input, action === 'tag-assign'
+      ? ['action', 'scope', 'target', 'slug', 'operation']
+      : ['action', 'scope', 'target', 'name', 'description'])
+    const target = parseTarget(req.target)
+    const scope = parseScope(req.scope)
+    if (action === 'tag-assign') {
+      const slug = text(req.slug)
+      validateTagSlug(slug)
+      if (req.operation !== 'add' && req.operation !== 'remove') throw new Error('INVALID_TAG_OPERATION')
+      return { action, scope, target, slug, operation: req.operation }
+    }
+    const name = quickTag(text(req.name)).name
+    const description = tagDescription(req.description)
+    return { action, scope, target, name, description }
+  }
+
   if (action !== 'preview' && action !== 'copy' && action !== 'download' && action !== 'attach' && action !== 'text') {
     throw new Error('INVALID_ARGUMENT')
   }
@@ -175,13 +230,15 @@ function parseRequest(input: unknown): PickerRequest {
   return {
     action,
     scope: parseScope(req.scope),
-    selected: req.selected.map(value => {
-      const item = object(value, ['artifactId', 'expectedRevision'])
-      const artifactId = text(item.artifactId)
-      const expectedRevision = item.expectedRevision
-      if (artifactId.length > 200 || typeof expectedRevision !== 'number' ||
-        !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('INVALID_SELECTION')
-      return { artifactId, expectedRevision }
-    })
+    selected: req.selected.map(parseTarget)
   }
+}
+
+function parseTarget(value: unknown) {
+  const item = object(value, ['artifactId', 'expectedRevision'])
+  const artifactId = text(item.artifactId)
+  const expectedRevision = item.expectedRevision
+  if (artifactId.length > 200 || typeof expectedRevision !== 'number' ||
+    !Number.isSafeInteger(expectedRevision) || expectedRevision < 1) throw new Error('INVALID_SELECTION')
+  return { artifactId, expectedRevision }
 }

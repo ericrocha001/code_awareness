@@ -1,4 +1,4 @@
-import { isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
+import { isPickerTagMutation, isPopupPickerRequest } from '../../shared/web-activation/context-picker-contract'
 import { contextPickerSite } from '../../shared/web-activation/context-picker-sites'
 import { existsSync, readFileSync } from 'node:fs'
 import { createConnection } from 'node:net'
@@ -413,6 +413,7 @@ export class NativeMessagingBridge {
             return this.error(rawId, 'ORIGIN_NOT_ALLOWED', 'Picker origin is not authorized')
           }
           origin = { webOrigin: command.webOrigin }
+          if (isPickerTagMutation(command.request)) origin.extensionOrigin = this.callerOrigin
         }
         const response = await this.dispatchLocalAction('context_picker', { ...origin, request: command.request })
         if (!response.ok) {
