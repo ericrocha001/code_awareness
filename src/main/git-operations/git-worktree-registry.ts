@@ -167,6 +167,14 @@ export class GitWorktreeRegistry {
     return current
   }
 
+  hasObserved(worktreeId: string): boolean {
+    return this.observed.has(worktreeId)
+  }
+
+  peekObserved(worktreeId: string): WorktreeRecord | undefined {
+    return this.observed.get(worktreeId)?.record
+  }
+
   isReference(worktreeId: string): boolean {
     const observed = this.observed.get(worktreeId)
     return !!observed?.admin && observed.admin === observed.common

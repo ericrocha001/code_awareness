@@ -739,7 +739,7 @@ export class ChannelMcpAdapter {
     }
     if (WORKTREE_TEXT_EDITING_TOOLS.some(tool => tool.name === name)) {
       return this.gitOperations
-        ? executeWorktreeTextEditing(this.gitOperations, args, authority)
+        ? executeWorktreeTextEditing(this.gitOperations, args, authority, invocationContext?.deadlineAtMs)
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {

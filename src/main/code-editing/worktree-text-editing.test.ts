@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { focalDiff } from './focal-diff'
 import { executeWorktreeTextEditing, WORKTREE_TEXT_EDITING_TOOLS } from './worktree-text-editing-mcp'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
-import type { GitOperationsService } from '../git-operations/git-operations-service'
+import { GitOperationsService } from '../git-operations/git-operations-service'
+import type { GitService } from '../core/git-service'
+import type { GitRemoteTransport } from '../core/git-remote-transport'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 const hex64 = (ch: string) => ch.repeat(64)
@@ -99,4 +104,157 @@ describe('code editing unit contracts', () => {
     expect(fingerprintArgs).not.toHaveProperty('leaseCredential')
     expect(createHash('sha256').update(JSON.stringify(fingerprintArgs)).digest('hex')).toHaveLength(64)
   })
+
+  it('revalidates only the target worktree across 30 siblings and separates deadline/authority/repo causes', async () => {
+    const temp = mkdtempSync(join(tmpdir(), 'wt-siblings-'))
+    try {
+      const common = join(temp, 'repo/.git')
+      const targetRoot = join(temp, 'wt-target')
+      const targetAdmin = join(common, 'worktrees/wt-target')
+      mkdirSync(common, { recursive: true })
+      mkdirSync(targetAdmin, { recursive: true })
+      mkdirSync(join(targetRoot, 'src'), { recursive: true })
+      writeFileSync(join(targetRoot, 'src/a.ts'), 'const a = 1\n')
+      writeFileSync(join(targetRoot, 'src/b.ts'), 'const b = 1\n')
+
+      const siblings = Array.from({ length: 30 }, (_, idx) => {
+        const wtPath = join(temp, `wt-sibling-${idx}`)
+        const wtAdmin = join(common, `worktrees/wt-sibling-${idx}`)
+        mkdirSync(wtPath, { recursive: true })
+        mkdirSync(wtAdmin, { recursive: true })
+        return { path: wtPath, admin: wtAdmin, branch: `sibling-${idx}` }
+      })
+
+      const porcelain = [
+        `worktree ${targetRoot}\0HEAD ${'1'.repeat(40)}\0branch refs/heads/feat/target`,
+        ...siblings.map(s => `worktree ${s.path}\0HEAD ${'2'.repeat(40)}\0branch refs/heads/${s.branch}`)
+      ].join('\0\0') + '\0\0'
+
+      const dirLookups = new Map<string, number>()
+      const receipts = new Map<string, any>()
+      let currentForeignRevision = hex64('7')
+      const fakeGit = {
+        getCommonDirectory: async () => common,
+        getWorktreeDirectory: async () => targetAdmin,
+        getWorktreeRoot: async () => targetRoot,
+        getUpstreamState: async () => ({ upstream: null, ahead: 0, behind: 0 }),
+        getRepositoryDirectories: async (p: string) => {
+          dirLookups.set(p, (dirLookups.get(p) ?? 0) + 1)
+          if (p === targetRoot) return { common, admin: targetAdmin }
+          const sib = siblings.find(s => s.path === p)
+          return { common, admin: sib ? sib.admin : common }
+        },
+        listWorktreeRecords: async () => porcelain,
+        getCurrentCommitHash: async () => '1'.repeat(40),
+        getCurrentBranch: async () => 'feat/target',
+        getGitOperation: async () => null,
+        getIndexRevision: async () => hex64('3'),
+        getOperationsStatus: async () => '',
+        getWorktreeRevision: async () => hex64('4'),
+        getWorktreeRevisionExcluding: async () => currentForeignRevision,
+        isGitRepository: async () => true,
+        readOperationReceipt: async (_root: string, id: string) => receipts.get(id) ?? null,
+        prepareOperationReceipt: async (_root: string, r: any) => {
+          const entry = { receipt: r, sha: hex64('5') }
+          receipts.set(r.operationId, entry)
+          return { created: true, ...entry }
+        },
+        completeOperationReceipt: async (_root: string, r: any) => {
+          receipts.set(r.operationId, { receipt: r, sha: hex64('6') })
+        }
+      } as unknown as GitService
+
+      let repoActive = true
+      const service = new GitOperationsService(
+        targetRoot,
+        fakeGit,
+        {} as GitRemoteTransport,
+        { repositoryId: 'repo-sib', isActive: () => repoActive }
+      )
+
+      const discovered = await service.discoverWorktrees()
+      expect(discovered.worktrees).toHaveLength(31)
+      dirLookups.clear() // Measure ONLY edit_worktree_text revalidations after discovery
+
+      const shaA = createHash('sha256').update('const a = 1\n').digest('hex')
+      const shaB = createHash('sha256').update('const b = 1\n').digest('hex')
+      const targetWt = discovered.worktrees.find(w => w.path === targetRoot)!
+      const snapshot = {
+        branch: 'feat/target',
+        head: '1'.repeat(40),
+        indexRevision: hex64('3'),
+        worktreeRevision: hex64('4'),
+        operation: null
+      }
+
+      let authorityActive = true
+      const authority = authorizeArtifactAgent(
+        authenticatedAgentPrincipal('MCP', () => authorityActive),
+        'repo-sib',
+        () => authorityActive
+      )
+
+      const ok = await executeWorktreeTextEditing(service, {
+        worktreeId: targetWt.worktreeId,
+        generation: targetWt.generation,
+        operationId: 'op-sib-ok',
+        snapshot,
+        intent: { description: '3-file edit with 30 siblings' },
+        changes: [
+          { operation: 'EDIT', path: 'src/a.ts', expectedSha256: shaA, replacements: [{ oldText: '= 1', newText: '= 2' }] },
+          { operation: 'EDIT', path: 'src/b.ts', expectedSha256: shaB, replacements: [{ oldText: '= 1', newText: '= 2' }] },
+          { operation: 'CREATE', path: 'src/c.ts', text: 'export const c = 3\n' }
+        ]
+      }, authority, Date.now() + 20_000)
+      expect(ok.isError).toBeUndefined()
+      expect(JSON.parse(ok.content[0].text)).toMatchObject({ state: 'APPLIED' })
+
+      // Sibling directory lookups must be ZERO during edit_worktree_text
+      for (const sib of siblings) {
+        expect(dirLookups.get(sib.path) ?? 0).toBe(0)
+      }
+      expect(readFileSync(join(targetRoot, 'src/c.ts'), 'utf8')).toBe('export const c = 3\n')
+
+      // Expired deadline -> REQUEST_TIMEOUT (not REPOSITORY_CONTEXT_CHANGED)
+      const timedOut = await executeWorktreeTextEditing(service, {
+        worktreeId: targetWt.worktreeId,
+        generation: targetWt.generation,
+        operationId: 'op-sib-timeout',
+        snapshot,
+        intent: { description: 'Expired deadline' },
+        changes: [{ operation: 'CREATE', path: 'src/d.ts', text: 'x' }]
+      }, authority, Date.now() - 1)
+      expect(timedOut.isError).toBe(true)
+      expect(JSON.parse(timedOut.content[0].text)).toMatchObject({ code: 'REQUEST_TIMEOUT', reason: 'DEADLINE_EXCEEDED' })
+
+      // Authority closed -> AGENT_UNAUTHORIZED (not REPOSITORY_CONTEXT_CHANGED)
+      authorityActive = false
+      const lostAuth = await executeWorktreeTextEditing(service, {
+        worktreeId: targetWt.worktreeId,
+        generation: targetWt.generation,
+        operationId: 'op-sib-auth',
+        snapshot,
+        intent: { description: 'Closed authority' },
+        changes: [{ operation: 'CREATE', path: 'src/d.ts', text: 'x' }]
+      }, authority, Date.now() + 20_000)
+      expect(lostAuth.isError).toBe(true)
+      expect(JSON.parse(lostAuth.content[0].text)).toMatchObject({ code: 'AGENT_UNAUTHORIZED', reason: 'AUTHORITY_INACTIVE' })
+
+      // Repo context changed -> REPOSITORY_CONTEXT_CHANGED
+      authorityActive = true
+      repoActive = false
+      const lostRepo = await executeWorktreeTextEditing(service, {
+        worktreeId: targetWt.worktreeId,
+        generation: targetWt.generation,
+        operationId: 'op-sib-repo',
+        snapshot,
+        intent: { description: 'Inactive repo' },
+        changes: [{ operation: 'CREATE', path: 'src/d.ts', text: 'x' }]
+      }, authority, Date.now() + 20_000)
+      expect(lostRepo.isError).toBe(true)
+      expect(JSON.parse(lostRepo.content[0].text)).toMatchObject({ code: 'WORKTREE_REPOSITORY_CHANGED' })
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
+  }, 30_000)
 })
