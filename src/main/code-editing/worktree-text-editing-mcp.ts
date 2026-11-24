@@ -59,7 +59,7 @@ const createChange = {
 export const WORKTREE_TEXT_EDITING_TOOLS: McpToolDefinition[] = [
   {
     name: 'edit_worktree_text',
-    description: 'Edit existing UTF-8 source files and/or exclusively create new source files (1–16 distinct paths, aggregate payload <= 1 MiB) inside an authorized implementation worktree. Use read_worktree_file for literal fileRevision (expectedSha256) and inspect_worktree for snapshot/generation. Requires an active handoff_worktree_for_git lease with EDIT_TEXT and exact target paths. Preflight validates all items before any write; file commits are per-file and batches interrupted mid-flight return PARTIAL or UNKNOWN without blind rollback. Reuse the same operationId for replay/recovery. Does not stage, commit, delete, rename, handle binaries, or write AGENTS.md/ARCHITECT.md/protected paths. Returns focal unified diff <= 8 KiB; use get_worktree_diff for cumulative diffs.',
+    description: 'Autonomously edit existing UTF-8 source files and/or exclusively create new source files (1–16 distinct paths, aggregate payload <= 1 MiB) inside an eligible implementation worktree without manual approval or handoff. Use read_worktree_file for literal fileRevision (expectedSha256) and inspect_worktree for snapshot/generation. Coordinates automatically via the worktree transaction lock and refuses if an incompatible worktree ownership grant or Git operation is active. Preflight validates all items before any write; file commits are per-file and batches interrupted mid-flight return PARTIAL or UNKNOWN without blind rollback. Reuse the same operationId for replay/recovery. Does not stage, commit, delete, rename, handle binaries, or write AGENTS.md/ARCHITECT.md/protected paths. Returns focal unified diff <= 8 KiB; use get_worktree_diff for cumulative diffs.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -84,7 +84,7 @@ export const WORKTREE_TEXT_EDITING_TOOLS: McpToolDefinition[] = [
           items: { oneOf: [editChange, createChange] }
         }
       },
-      required: ['worktreeId', 'generation', 'leaseId', 'leaseCredential', 'operationId', 'snapshot', 'intent', 'changes'],
+      required: ['worktreeId', 'generation', 'operationId', 'snapshot', 'intent', 'changes'],
       additionalProperties: false
     },
     securitySchemes: [{ type: 'oauth2', scopes: [] }],
@@ -105,5 +105,22 @@ export async function executeWorktreeTextEditing(
       isError: true
     }
   }
-  return editWorktreeText(service, args, authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : undefined)
+  if (authority && (!authority.isActive() || !authority.principal.isActive())) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ code: 'AGENT_UNAUTHORIZED' }) }],
+      isError: true
+    }
+  }
+  return editWorktreeText(service, args, {
+    ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}),
+    ...(authority ? {
+      authority: {
+        repositoryId: authority.repositoryId,
+        transport: authority.principal.transport,
+        ...(authority.worktreeId ? { worktreeId: authority.worktreeId } : {}),
+        ...(authority.deliveryContext ? { deliveryContext: authority.deliveryContext } : {}),
+        isActive: () => authority.isActive() && authority.principal.isActive()
+      }
+    } : {})
+  })
 }

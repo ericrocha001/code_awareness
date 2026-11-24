@@ -11,8 +11,6 @@ const hex64 = (ch: string) => ch.repeat(64)
 const validArgs = () => ({
   worktreeId: hex64('a'),
   generation: hex64('b'),
-  leaseId: 'lease-1',
-  leaseCredential: hex64('c'),
   operationId: 'op-1',
   snapshot: {
     branch: 'feat/test',
@@ -51,6 +49,8 @@ describe('code editing unit contracts', () => {
       null,
       [],
       { ...validArgs(), extra: true },
+      { ...validArgs(), leaseId: 'only-one-half' },
+      { ...validArgs(), leaseCredential: hex64('c') },
       { ...validArgs(), worktreeId: 'bad' },
       { ...validArgs(), intent: { description: 'ok', explicitUserAuthorization: true } },
       { ...validArgs(), changes: [] },
@@ -89,6 +89,8 @@ describe('code editing unit contracts', () => {
     const tool = adapter.listTools().find(item => item.name === 'edit_worktree_text')
     expect(tool).toEqual(WORKTREE_TEXT_EDITING_TOOLS[0])
     expect(tool!.inputSchema.additionalProperties).toBe(false)
+    expect(tool!.inputSchema.required).not.toContain('leaseId')
+    expect(tool!.inputSchema.required).not.toContain('leaseCredential')
 
     const args = validArgs()
     await adapter.callTool('edit_worktree_text', args)

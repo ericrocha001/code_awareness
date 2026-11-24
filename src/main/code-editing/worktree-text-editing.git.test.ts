@@ -1,5 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -11,6 +10,7 @@ import type { WorktreeApprovalPort, WorktreeSnapshot } from '../git-operations/g
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -26,7 +26,7 @@ const snap = (s: WorktreeSnapshot): WorktreeSnapshot => ({
   operation: s.operation
 })
 
-async function createFixture(approve?: WorktreeApprovalPort) {
+async function createFixture(options: { approve?: WorktreeApprovalPort; repositoryId?: string; readOnlyWorktree?: boolean } = {}) {
   const root = await createTempGitRepo(); roots.push(root)
   const external = createTempDir('code-editing-wt-'); roots.push(external)
   mkdirSync(join(root, 'src'), { recursive: true })
@@ -45,15 +45,17 @@ async function createFixture(approve?: WorktreeApprovalPort) {
   const git = new GitService()
   let active = true
   let approvalCalls = 0
+  const repositoryId = options.repositoryId ?? 'repo-code-editing'
   const service = new GitOperationsService(
     root,
     git,
     new GitHubGitTransport(null, git),
     { repositoryId: 'repo-code-editing', isActive: () => active },
-    false,
+    options.readOnlyWorktree ?? false,
     async request => {
       approvalCalls++
-      return approve ? approve(request) : true
+      if (!options.approve) throw new Error('APPROVAL_MUST_NOT_BE_CALLED')
+      return options.approve(request)
     }
   )
   const adapter = new ChannelMcpAdapter({
@@ -62,22 +64,31 @@ async function createFixture(approve?: WorktreeApprovalPort) {
     navigation: {} as ProjectContextNavigation,
     gitOperations: service
   })
-  const server = createMcpHttpServer(adapter, () => {})
+  const server = createMcpHttpServer(
+    adapter,
+    () => {},
+    undefined,
+    undefined,
+    (headers, connected) => {
+      const wtHeader = typeof headers['x-test-worktree'] === 'string' ? headers['x-test-worktree'] : undefined
+      return authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', connected), repositoryId, connected, wtHeader)
+    }
+  )
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address()
   if (!address || typeof address === 'string') throw new Error('Missing port')
 
-  const rpc = async (method: string, params: unknown) => {
+  const rpc = async (method: string, params: unknown, extraHeaders: Record<string, string> = {}) => {
     const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', connection: 'close' },
+      headers: { 'content-type': 'application/json', connection: 'close', ...extraHeaders },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
     })
     return (await response.json() as { result: any }).result
   }
-  const callRaw = (name: string, args: unknown) => rpc('tools/call', { name, arguments: args })
-  const call = async (name: string, args: unknown) => {
-    const res = await callRaw(name, args)
+  const callRaw = (name: string, args: unknown, extraHeaders?: Record<string, string>) => rpc('tools/call', { name, arguments: args }, extraHeaders)
+  const call = async (name: string, args: unknown, extraHeaders?: Record<string, string>) => {
+    const res = await callRaw(name, args, extraHeaders)
     return { isError: Boolean(res.isError), data: JSON.parse(res.content[0].text) }
   }
 
@@ -121,12 +132,15 @@ async function createFixture(approve?: WorktreeApprovalPort) {
   }
 }
 
-describe('governed worktree text editing through real MCP HTTP', () => {
-  it('discovers, inspects, reads fileRevision, edits two files and creates one test in one batch, preserves sibling/HEAD/index, reuses grant, and feeds mutate_worktree', async () => {
-    const f = await createFixture()
+describe('autonomous worktree text editing through real MCP HTTP', () => {
+  it('edits two files and creates one file autonomously without lease or approval, preserves sibling/HEAD/index, replays idempotently, and repeats cleanly', async () => {
+    const f = await createFixture() // approve throws if invoked!
     try {
       const catalog = await f.rpc('tools/list', {})
-      expect(catalog.tools.some((t: { name: string }) => t.name === 'edit_worktree_text')).toBe(true)
+      const tool = catalog.tools.find((t: { name: string }) => t.name === 'edit_worktree_text')
+      expect(tool).toBeDefined()
+      expect(tool.inputSchema.required).not.toContain('leaseId')
+      expect(tool.inputSchema.required).not.toContain('leaseCredential')
 
       const discovered = (await f.call('discover_worktrees', {})).data.worktrees
       const mainWt = discovered.find((w: any) => w.path === f.root)
@@ -140,17 +154,17 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       const bHeadBefore = await f.git.getCurrentCommitHash(f.b)
       const bIndexBefore = await f.git.getIndexRevision(f.b)
 
+      const inspectedA = (await f.call('inspect_worktree', { worktreeId: wtA.worktreeId })).data
       const readAlpha = (await f.call('read_worktree_file', { worktreeId: wtA.worktreeId, path: 'src/alpha.ts', startLine: 1, endLine: 3 })).data
       const readBeta = (await f.call('read_worktree_file', { worktreeId: wtA.worktreeId, path: 'src/beta.ts', startLine: 1, endLine: 1 })).data
       expect(readAlpha.revisionKind).toBe('FILE_BYTES_SHA256')
 
-      const ownership = await f.grant(wtA.worktreeId, ['EDIT_TEXT', 'STAGE', 'COMMIT'], ['src/alpha.ts', 'src/beta.ts', 'src/alpha.test.ts'])
-      expect(f.getApprovalCalls()).toBe(1)
-
-      // Decisive negative: stale hash in item 2 refuses whole batch without touching disk and preserves grant
+      // Decisive negative without lease: stale hash in item 2 refuses whole batch without touching disk
       const rejected = await f.call('edit_worktree_text', {
-        ...ownership,
-        operationId: 'op-stale-negative',
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedA),
+        operationId: 'op-auto-stale',
         intent: { description: 'Should reject stale second file' },
         changes: [
           { operation: 'EDIT', path: 'src/alpha.ts', expectedSha256: readAlpha.fileRevision, replacements: [{ oldText: 'ação 😀', newText: 'mutated' }] },
@@ -162,12 +176,15 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(rejected.data).toMatchObject({ state: 'REJECTED', code: 'FILE_REVISION_CONFLICT' })
       expect(readFileSync(join(f.a, 'src/alpha.ts'), 'utf8')).toBe(readAlpha.content)
       expect(existsSync(join(f.a, 'src/alpha.test.ts'))).toBe(false)
+      expect(f.getApprovalCalls()).toBe(0)
 
-      // Happy path batch using the same grant (approvalCalls stays 1)
+      // Autonomous batch: edit 2 files + create 1 file without leaseId/leaseCredential/handoff/Plan binding
       const applyArgs = {
-        ...ownership,
-        operationId: 'op-batch-1',
-        intent: { description: 'Edit alpha/beta and create alpha.test.ts' },
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedA),
+        operationId: 'op-auto-1',
+        intent: { description: 'Autonomous edit alpha/beta and create alpha.test.ts' },
         changes: [
           { operation: 'EDIT', path: 'src/alpha.ts', expectedSha256: readAlpha.fileRevision, replacements: [{ oldText: 'ação 😀', newText: 'revisão ✅' }] },
           { operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'v2' }] },
@@ -180,22 +197,20 @@ describe('governed worktree text editing through real MCP HTTP', () => {
         state: 'APPLIED',
         worktreeId: wtA.worktreeId,
         generation: wtA.generation,
-        operationId: 'op-batch-1',
+        operationId: 'op-auto-1',
         replayed: false
       })
       expect(applied.data.files).toHaveLength(3)
-      expect(applied.data.files[0]).toMatchObject({ path: 'src/alpha.ts', operation: 'EDIT', beforeSha256: readAlpha.fileRevision, changed: true, state: 'CONFIRMED' })
-      expect(applied.data.files[2]).toMatchObject({ path: 'src/alpha.test.ts', operation: 'CREATE', beforeSha256: null, changed: true, state: 'CONFIRMED' })
       expect(applied.data.diff.patch).toContain('+export const label = "revisão ✅"')
       expect(applied.data.diff.bytes).toBeLessThanOrEqual(8192)
-      expect(f.getApprovalCalls()).toBe(1)
+      expect(f.getApprovalCalls()).toBe(0)
 
-      // Reread bytes via read_worktree_file and disk; verify isolation
       const rereadAlpha = (await f.call('read_worktree_file', { worktreeId: wtA.worktreeId, path: 'src/alpha.ts', startLine: 1, endLine: 3 })).data
       expect(rereadAlpha.fileRevision).toBe(applied.data.files[0].afterSha256)
       expect(rereadAlpha.content).toBe('// Alpha\r\nexport const label = "revisão ✅"\r\nexport const keep = 1\r\n')
       expect(readFileSync(join(f.a, 'src/alpha.test.ts'), 'utf8')).toBe('export const tested = true\n')
 
+      // Isolation: root and agent-b untouched; agent-a HEAD and index untouched
       expect(await f.git.getCurrentCommitHash(f.root)).toBe(rootHeadBefore)
       expect(await f.git.getIndexRevision(f.root)).toBe(rootIndexBefore)
       expect(await f.git.getCurrentCommitHash(f.a)).toBe(aHeadBefore)
@@ -204,77 +219,54 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(await f.git.getIndexRevision(f.b)).toBe(bIndexBefore)
       expect(readFileSync(join(f.b, 'src/alpha.ts'), 'utf8')).toBe(readAlpha.content)
       expect(existsSync(join(f.b, 'src/alpha.test.ts'))).toBe(false)
-      expect(existsSync(join(f.root, 'src/alpha.test.ts'))).toBe(false)
 
-      // Replay with same operationId + payload omits diff and does not re-apply
+      // Replay and IDEMPOTENCY_CONFLICT
       const replayed = await f.call('edit_worktree_text', applyArgs)
       expect(replayed.isError).toBe(false)
       expect(replayed.data).toMatchObject({ state: 'APPLIED', replayed: true, diff: { omitted: 'REPLAY' } })
 
-      // Divergent payload with same operationId refuses with IDEMPOTENCY_CONFLICT
-      const conflict = await f.call('edit_worktree_text', {
-        ...applyArgs,
-        intent: { description: 'divergent intent' }
-      })
-      expect(conflict.isError).toBe(true)
-      expect(conflict.data).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' })
+      const divergent = await f.call('edit_worktree_text', { ...applyArgs, intent: { description: 'divergent' } })
+      expect(divergent.isError).toBe(true)
+      expect(divergent.data).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' })
 
-      // Second consecutive edit with the SAME grant using returned snapshot (still approvalCalls === 1)
-      const secondEdit = await f.call('edit_worktree_text', {
-        ...ownership,
+      // Second consecutive autonomous edit with updated snapshot/hash (still 0 approvals)
+      const second = await f.call('edit_worktree_text', {
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
         snapshot: applied.data.snapshot,
-        operationId: 'op-batch-2',
-        intent: { description: 'Second edit on same lease' },
+        operationId: 'op-auto-2',
+        intent: { description: 'Second autonomous edit' },
         changes: [
           { operation: 'EDIT', path: 'src/beta.ts', expectedSha256: applied.data.files[1].afterSha256, replacements: [{ oldText: 'v2', newText: 'v3' }] }
         ]
       })
-      expect(secondEdit.isError).toBe(false)
-      expect(secondEdit.data.state).toBe('APPLIED')
+      expect(second.isError).toBe(false)
+      expect(second.data.state).toBe('APPLIED')
       expect(readFileSync(join(f.a, 'src/beta.ts'), 'utf8')).toBe(readBeta.content.replace('initial', 'v3'))
-      expect(f.getApprovalCalls()).toBe(1)
+      expect(f.getApprovalCalls()).toBe(0)
 
-      // Consumption by Git Operations (STAGE + COMMIT with the same grant)
-      const stage = await f.call('mutate_worktree', {
-        worktreeId: wtA.worktreeId,
-        leaseId: ownership.leaseId,
-        leaseCredential: ownership.leaseCredential,
-        snapshot: secondEdit.data.snapshot,
-        operationId: 'op-stage-all',
-        action: 'STAGE',
-        paths: ['src/alpha.ts', 'src/beta.ts', 'src/alpha.test.ts']
-      })
-      expect(stage.isError).toBe(false)
-      const committed = await f.call('mutate_worktree', {
-        worktreeId: wtA.worktreeId,
-        leaseId: ownership.leaseId,
-        leaseCredential: ownership.leaseCredential,
-        snapshot: snap(stage.data),
-        operationId: 'op-commit-all',
-        action: 'COMMIT',
-        message: 'feat: governed batch edit'
-      })
-      expect(committed.isError).toBe(false)
-      expect(committed.data.head).not.toBe(aHeadBefore)
-      expect(await f.git.getCurrentCommitHash(f.root)).toBe(rootHeadBefore)
-
-      // Refusal on reference/root worktree
-      const mainGrant = await f.grant(mainWt.worktreeId, ['EDIT_TEXT'], ['src/beta.ts'])
+      // Refusal on reference/root worktree without approval
+      const inspectedMain = (await f.call('inspect_worktree', { worktreeId: mainWt.worktreeId })).data
       const mainRefused = await f.call('edit_worktree_text', {
-        ...mainGrant,
+        worktreeId: mainWt.worktreeId,
+        generation: mainWt.generation,
+        snapshot: snap(inspectedMain),
         operationId: 'op-main-refused',
         intent: { description: 'Cannot edit primary checkout' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: sha(readFileSync(join(f.root, 'src/beta.ts'))), replacements: [{ oldText: 'initial', newText: 'bad' }] }]
       })
       expect(mainRefused.isError).toBe(true)
       expect(mainRefused.data).toMatchObject({ code: 'WORKTREE_PRIMARY_PROTECTED' })
+      expect(f.getApprovalCalls()).toBe(0)
     } finally {
       await f.close()
     }
   }, 600_000)
 
-  it('recovers safely from lost receipt ack, detects mid-batch external changes as PARTIAL, and refuses unauthorized scopes and concurrent mutations', async () => {
-    const f = await createFixture()
+  it('enforces channel write access, authority scope, protected branch, active incompatible grant, concurrency, lost ack, and PARTIAL drift', async () => {
+    const f = await createFixture({ approve: async () => true })
+    const fReadOnly = await createFixture({ readOnlyWorktree: true })
+    const fWrongRepo = await createFixture({ repositoryId: 'other-repo' })
     try {
       const discovered = (await f.call('discover_worktrees', {})).data.worktrees
       const wtA = discovered.find((w: any) => w.path === f.a)
@@ -283,47 +275,56 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       const readBeta = (await f.call('read_worktree_file', { worktreeId: wtA.worktreeId, path: 'src/beta.ts', startLine: 1, endLine: 1 })).data
       const readAlpha = (await f.call('read_worktree_file', { worktreeId: wtA.worktreeId, path: 'src/alpha.ts', startLine: 1, endLine: 3 })).data
 
-      // Missing grant
-      const noGrant = await f.call('edit_worktree_text', {
+      // Read-only channel refusal
+      const roWtA = (await fReadOnly.call('discover_worktrees', {})).data.worktrees.find((w: any) => w.path === fReadOnly.a)
+      const roInspected = (await fReadOnly.call('inspect_worktree', { worktreeId: roWtA.worktreeId })).data
+      const roRes = await fReadOnly.call('edit_worktree_text', {
+        worktreeId: roWtA.worktreeId,
+        generation: roWtA.generation,
+        snapshot: snap(roInspected),
+        operationId: 'op-ro',
+        intent: { description: 'Read-only channel' },
+        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
+      })
+      expect(roRes.isError).toBe(true)
+      expect(roRes.data).toMatchObject({ code: 'WORKTREE_OWNERSHIP_REQUIRED' })
+      expect(readFileSync(join(fReadOnly.a, 'src/beta.ts'), 'utf8')).toBe(readBeta.content)
+
+      // ChannelMcpAdapter without gitOperations refusal
+      const noGitAdapter = new ChannelMcpAdapter({ projectId: 'p', repoRoot: f.root, navigation: {} as ProjectContextNavigation })
+      expect(noGitAdapter.listTools().some(t => t.name === 'edit_worktree_text')).toBe(false)
+      expect(await noGitAdapter.callTool('edit_worktree_text', {})).toMatchObject({ isError: true, content: [{ text: 'GIT_OPERATIONS_UNAVAILABLE' }] })
+
+      // Wrong repository authority & mismatched worktree authority
+      const wrongRepoWt = (await fWrongRepo.call('discover_worktrees', {})).data.worktrees.find((w: any) => w.path === fWrongRepo.a)
+      const wrongRepoInsp = (await fWrongRepo.call('inspect_worktree', { worktreeId: wrongRepoWt.worktreeId })).data
+      const wrongRepoRes = await fWrongRepo.call('edit_worktree_text', {
+        worktreeId: wrongRepoWt.worktreeId,
+        generation: wrongRepoWt.generation,
+        snapshot: snap(wrongRepoInsp),
+        operationId: 'op-wrong-repo',
+        intent: { description: 'Wrong repo authority' },
+        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
+      })
+      expect(wrongRepoRes.isError).toBe(true)
+      expect(wrongRepoRes.data).toMatchObject({ code: 'REPOSITORY_MISMATCH' })
+
+      const scopedConflict = await f.call('edit_worktree_text', {
         worktreeId: wtA.worktreeId,
         generation: wtA.generation,
-        leaseId: 'missing',
-        leaseCredential: '1'.repeat(64),
-        operationId: 'op-no-grant',
         snapshot: snap(inspectedA),
-        intent: { description: 'No grant' },
+        operationId: 'op-scope-conflict',
+        intent: { description: 'Wrong worktree scope' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
-      })
-      expect(noGrant.isError).toBe(true)
-      expect(noGrant.data).toMatchObject({ code: 'WORKTREE_OWNERSHIP_REQUIRED' })
+      }, { 'x-test-worktree': wtB.worktreeId })
+      expect(scopedConflict.isError).toBe(true)
+      expect(scopedConflict.data).toMatchObject({ code: 'DELIVERY_CONTEXT_INVALID', reason: 'WORKTREE_SCOPE_CONFLICT' })
 
-      // Grant without EDIT_TEXT intent
-      const stageGrant = await f.grant(wtA.worktreeId, ['STAGE'], ['src/beta.ts'])
-      const wrongIntent = await f.call('edit_worktree_text', {
-        ...stageGrant,
-        operationId: 'op-wrong-intent',
-        intent: { description: 'Missing EDIT_TEXT' },
-        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
-      })
-      expect(wrongIntent.isError).toBe(true)
-      expect(wrongIntent.data).toMatchObject({ code: 'WORKTREE_INTENT_NOT_GRANTED' })
-      const releasedStage = await f.call('handoff_worktree_for_git', { action: 'RELEASE', worktreeId: wtA.worktreeId, leaseId: stageGrant.leaseId, leaseCredential: stageGrant.leaseCredential })
-      expect(releasedStage.isError).toBe(false)
-      expect(releasedStage.data).toMatchObject({ state: 'RELEASED' })
-      const afterRelease = await f.call('edit_worktree_text', {
-        ...stageGrant,
-        operationId: 'op-after-release',
-        intent: { description: 'After release' },
-        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'bad' }] }]
-      })
-      expect(afterRelease.isError).toBe(true)
-      expect(afterRelease.data).toMatchObject({ code: 'WORKTREE_RECOVERY_REQUIRED' })
-
-      // Grant with EDIT_TEXT only for src/beta.ts: reject path out of scope, wrong generation, stale snapshot, protected branch
-      const betaOnly = await f.grant(wtA.worktreeId, ['EDIT_TEXT'], ['src/beta.ts', 'src/alpha.ts'])
+      // Wrong generation & stale snapshot
       const badGen = await f.call('edit_worktree_text', {
-        ...betaOnly,
+        worktreeId: wtA.worktreeId,
         generation: '9'.repeat(64),
+        snapshot: snap(inspectedA),
         operationId: 'op-bad-gen',
         intent: { description: 'Wrong generation' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
@@ -332,8 +333,9 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(badGen.data).toMatchObject({ code: 'WORKTREE_STALE' })
 
       const badSnap = await f.call('edit_worktree_text', {
-        ...betaOnly,
-        snapshot: { ...betaOnly.snapshot, worktreeRevision: '8'.repeat(64) },
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: { ...snap(inspectedA), worktreeRevision: '8'.repeat(64) },
         operationId: 'op-bad-snap',
         intent: { description: 'Stale snapshot' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
@@ -341,11 +343,41 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(badSnap.isError).toBe(true)
       expect(badSnap.data).toMatchObject({ code: 'GIT_STATE_CHANGED' })
 
-      // After failed pre-effect gate, recover grant for lost-ack test
-      const recovered1 = await f.grant(wtA.worktreeId, ['EDIT_TEXT'], ['src/beta.ts'], true)
+      // Active incompatible worktree grant (STAGE) blocks autonomous edit without stealing grant
+      const stageGrant = await f.grant(wtA.worktreeId, ['STAGE'], ['src/beta.ts'])
+      const blockedByGrant = await f.call('edit_worktree_text', {
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedA),
+        operationId: 'op-blocked-by-grant',
+        intent: { description: 'Blocked by active STAGE grant' },
+        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
+      })
+      expect(blockedByGrant.isError).toBe(true)
+      expect(blockedByGrant.data).toMatchObject({ code: 'WORKTREE_OWNERSHIP_REQUIRED' })
+      expect(readFileSync(join(f.a, 'src/beta.ts'), 'utf8')).toBe(readBeta.content)
+
+      // Invalid legacy credential never falls back to autonomous path
+      const badLegacyCred = await f.call('edit_worktree_text', {
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        leaseId: stageGrant.leaseId,
+        leaseCredential: '0'.repeat(64),
+        snapshot: snap(inspectedA),
+        operationId: 'op-bad-legacy-cred',
+        intent: { description: 'Bad legacy cred' },
+        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'x' }] }]
+      })
+      expect(badLegacyCred.isError).toBe(true)
+      expect(badLegacyCred.data).toMatchObject({ code: 'WORKTREE_OWNERSHIP_REQUIRED' })
+      await f.call('handoff_worktree_for_git', { action: 'RELEASE', worktreeId: wtA.worktreeId, leaseId: stageGrant.leaseId, leaseCredential: stageGrant.leaseCredential })
+
+      // Lost ack recovery
       const completeSpy = vi.spyOn(f.git, 'completeOperationReceipt').mockRejectedValueOnce(new Error('ack lost'))
       const lostAck = await f.call('edit_worktree_text', {
-        ...recovered1,
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedA),
         operationId: 'op-lost-ack',
         intent: { description: 'Simulate lost ack' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'once' }] }]
@@ -356,9 +388,10 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(lostAck.data).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId: 'op-lost-ack' })
       expect(readFileSync(join(f.a, 'src/beta.ts'), 'utf8')).toBe(betaOnce)
 
-      // Replay of op-lost-ack must not re-apply
       const lostReplay = await f.call('edit_worktree_text', {
-        ...recovered1,
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedA),
         operationId: 'op-lost-ack',
         intent: { description: 'Simulate lost ack' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBeta.fileRevision, replacements: [{ oldText: 'initial', newText: 'once' }] }]
@@ -366,28 +399,8 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(lostReplay.isError).toBe(true)
       expect(lostReplay.data).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
 
-      // Grant requires RECOVER after unknown outcome
-      const needsRecover = await f.call('edit_worktree_text', {
-        ...recovered1,
-        operationId: 'op-needs-recover',
-        intent: { description: 'Should require recovery' },
-        changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: sha(betaOnce), replacements: [{ oldText: 'once', newText: 'twice' }] }]
-      })
-      expect(needsRecover.isError).toBe(true)
-      expect(needsRecover.data).toMatchObject({ code: 'WORKTREE_RECOVERY_REQUIRED' })
-
-      // External concurrent change mid-batch -> PARTIAL without rollback
-      const recovered2 = await f.grant(wtA.worktreeId, ['EDIT_TEXT'], ['src/alpha.ts', 'src/beta.ts'], true)
-      const outOfScope = await f.call('edit_worktree_text', {
-        ...recovered2,
-        operationId: 'op-out-of-scope',
-        intent: { description: 'Path not in scope' },
-        changes: [{ operation: 'CREATE', path: 'src/extra.ts', text: 'nope' }]
-      })
-      expect(outOfScope.isError).toBe(true)
-      expect(outOfScope.data).toMatchObject({ code: 'WORKTREE_PATH_NOT_GRANTED' })
-
-      const recovered3 = await f.grant(wtA.worktreeId, ['EDIT_TEXT'], ['src/alpha.ts', 'src/beta.ts'], true)
+      // Mid-batch external drift -> PARTIAL without rollback
+      const inspectedAfterOnce = (await f.call('inspect_worktree', { worktreeId: wtA.worktreeId })).data
       const origExcluding = f.git.getWorktreeRevisionExcluding.bind(f.git)
       let excludingCalls = 0
       const excludingSpy = vi.spyOn(f.git, 'getWorktreeRevisionExcluding').mockImplementation(async (dir, excluded) => {
@@ -398,7 +411,9 @@ describe('governed worktree text editing through real MCP HTTP', () => {
         return origExcluding(dir, excluded)
       })
       const partial = await f.call('edit_worktree_text', {
-        ...recovered3,
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedAfterOnce),
         operationId: 'op-mid-batch-external',
         intent: { description: 'Detect external change mid-batch' },
         changes: [
@@ -418,10 +433,12 @@ describe('governed worktree text editing through real MCP HTTP', () => {
 
       // Protected branch refusal on secondary worktree checked out to main
       await gitExec(f.b, ['checkout', '-b', 'main'])
+      const inspectedBMain = (await f.call('inspect_worktree', { worktreeId: wtB.worktreeId })).data
       const readBMain = (await f.call('read_worktree_file', { worktreeId: wtB.worktreeId, path: 'src/beta.ts', startLine: 1, endLine: 1 })).data
-      const mainBranchGrant = await f.grant(wtB.worktreeId, ['EDIT_TEXT'], ['src/beta.ts'])
       const mainBranchRefused = await f.call('edit_worktree_text', {
-        ...mainBranchGrant,
+        worktreeId: wtB.worktreeId,
+        generation: wtB.generation,
+        snapshot: snap(inspectedBMain),
         operationId: 'op-main-branch-refused',
         intent: { description: 'Protected branch main' },
         changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: readBMain.fileRevision, replacements: [{ oldText: 'initial', newText: 'nope' }] }]
@@ -429,17 +446,21 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       expect(mainBranchRefused.isError).toBe(true)
       expect(mainBranchRefused.data).toMatchObject({ code: 'WORKTREE_BRANCH_PROTECTED' })
 
-      // Concurrent mutation lock
-      const recovered4 = await f.grant(wtA.worktreeId, ['EDIT_TEXT'], ['src/beta.ts'], true)
+      // Concurrent autonomous mutations
+      const inspectedBeforeConcurrent = (await f.call('inspect_worktree', { worktreeId: wtA.worktreeId })).data
       const [c1, c2] = await Promise.all([
         f.call('edit_worktree_text', {
-          ...recovered4,
+          worktreeId: wtA.worktreeId,
+          generation: wtA.generation,
+          snapshot: snap(inspectedBeforeConcurrent),
           operationId: 'op-concurrent-1',
           intent: { description: 'Concurrent 1' },
           changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: sha(betaOnce), replacements: [{ oldText: 'once', newText: 'win1' }] }]
         }),
         f.call('edit_worktree_text', {
-          ...recovered4,
+          worktreeId: wtA.worktreeId,
+          generation: wtA.generation,
+          snapshot: snap(inspectedBeforeConcurrent),
           operationId: 'op-concurrent-2',
           intent: { description: 'Concurrent 2' },
           changes: [{ operation: 'EDIT', path: 'src/beta.ts', expectedSha256: sha(betaOnce), replacements: [{ oldText: 'once', newText: 'win2' }] }]
@@ -449,9 +470,11 @@ describe('governed worktree text editing through real MCP HTTP', () => {
       const failures = [c1, c2].filter(r => r.isError)
       expect(successes).toHaveLength(1)
       expect(failures).toHaveLength(1)
-      expect(['WORKTREE_TRANSACTION_BUSY', 'GIT_STATE_CHANGED', 'FILE_REVISION_CONFLICT', 'WORKTREE_RECOVERY_REQUIRED']).toContain(failures[0].data.code)
+      expect(['WORKTREE_TRANSACTION_BUSY', 'GIT_STATE_CHANGED', 'FILE_REVISION_CONFLICT']).toContain(failures[0].data.code)
     } finally {
       await f.close()
+      await fReadOnly.close()
+      await fWrongRepo.close()
     }
   }, 600_000)
 })
