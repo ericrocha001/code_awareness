@@ -840,6 +840,19 @@ it('U2 produces identical eventIds/digests/content for .jsonl.zst vs plain .json
 
   const refreshZst = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: deepen.sourceSessionId })
   expect(refreshZst.data.state).toBe('READY')
+  const zstPhysicalSize = require('node:fs').statSync(zstPath).size
+  const logicalTotal = Buffer.byteLength(jsonlBody)
+  expect(logicalTotal).toBeGreaterThan(zstPhysicalSize)
+  expect(refreshZst.data.indexedBytes).toBe(logicalTotal)
+  expect(refreshZst.data.totalBytes).toBe(logicalTotal)
+  expect(refreshZst.data.sourcePhysicalBytes).toBe(zstPhysicalSize)
+
+  // Refreshing an already-ready Zstd index preserves logical total & physical size
+  const refreshZstAgain = await f.call('refresh_agent_sessions', { nativeSession: deepen.nativeSession, sourceSessionId: deepen.sourceSessionId })
+  expect(refreshZstAgain.data.state).toBe('READY')
+  expect(refreshZstAgain.data.indexedBytes).toBe(logicalTotal)
+  expect(refreshZstAgain.data.totalBytes).toBe(logicalTotal)
+  expect(refreshZstAgain.data.sourcePhysicalBytes).toBe(zstPhysicalSize)
   const mapZst = await f.call('inspect_agent_session', deepen)
   expect(mapZst.data.recordCoverage).toMatchObject({ recordsTotal: 6, recordsAddressable: 6, typed: 4, opaque: 2, unavailable: 0, interpretedContentCoverage: 'COMPLETE' })
   const evsZst = await f.call('list_agent_session_events', { ...deepen, expectedRevision: mapZst.data.revision, limit: 15 })
@@ -872,4 +885,97 @@ it('U2 produces identical eventIds/digests/content for .jsonl.zst vs plain .json
   const revoked = await f.call('inspect_agent_session', deepen)
   expect(revoked.isError).toBe(true)
   expect(revoked.data.code).toBe('SOURCE_NOT_AUTHORIZED')
+}, 60_000)
+
+it('reports logical indexedBytes, totalBytes=null while Zstd PENDING, sourcePhysicalBytes, and preserves READ_ONLY checkpoint when logical offset > compressed size', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'u2-zst-progress-'))
+  cleanup.push(() => safeRemove(dir))
+  const root = join(dir, 'repo')
+  mkdirSync(join(root, '.git'), { recursive: true })
+  const target = { worktreeId: nativeDigest('wt:zst-prog'), generation: nativeDigest('gen:zst-prog') }
+  const storePath = sessionStorePath(dir, 'repo-zst-prog')
+  const profile = join(dir, 'codex-profile')
+  const sessionUuid = '01a1f600-0000-7000-8000-000000000911'
+  const day = new Date(Number.parseInt(sessionUuid.replaceAll('-', '').slice(0, 12), 16)).toISOString().slice(0, 10).split('-')
+  const rolloutDir = join(profile, 'sessions', ...day)
+  mkdirSync(rolloutDir, { recursive: true })
+  mkdirSync(dirname(storePath), { recursive: true })
+  const accHash = nativeDigest(JSON.stringify(['zp-u', 'zp-a']))
+  writeFileSync(join(dirname(storePath), 'session-context.provider.json'), JSON.stringify({
+    repositoryId: 'repo-zst-prog',
+    nativeSources: { codex: { profile, creatorAccountHash: accHash } }
+  }))
+
+  // Compressed > 64KB (multi-chunk) while logical size >> compressed size
+  const pad = 'compressible_segment_'.repeat(240)
+  const lines = [
+    JSON.stringify({ timestamp: '2026-11-24T01:00:00Z', type: 'session_meta', payload: { id: sessionUuid, session_id: sessionUuid, account_scoped: true, creator_user_id: 'zp-u', creator_account_id: 'zp-a', cwd: root, runtime_workspace_roots: [root], cli_version: '0.171.0-alpha.13' } })
+  ]
+  for (let i = 0; i < 180; i++) {
+    const entropy = Array.from({ length: 20 }, (_, j) => nativeDigest(`${i}:${j}`)).join('')
+    lines.push(JSON.stringify({ timestamp: '2026-11-24T01:00:01Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: `msg-${i}:${entropy}:${pad}` }] } }))
+  }
+  const jsonlBody = lines.join('\n') + '\n'
+  const logicalTotal = Buffer.byteLength(jsonlBody)
+  const zstPath = join(rolloutDir, `rollout-2026-11-24T01-00-00-${sessionUuid}.jsonl.zst`)
+  writeFileSync(zstPath, zstdCompressSync(Buffer.from(jsonlBody)))
+  const physicalSize = require('node:fs').statSync(zstPath).size
+  expect(logicalTotal).toBeGreaterThan(physicalSize * 5)
+
+  const store = new SessionStore(storePath, 'repo-zst-prog')
+  cleanup.push(() => store.close())
+  const nativeSession = { provider: 'codex-native' as const, id: nativeDigest(JSON.stringify(['repo-zst-prog', 'codex', sessionUuid])), ...target }
+  const callWithBudget = async (s: SessionStore, name: Parameters<typeof executeSessionTool>[2], args: unknown, stepBudget?: { maxBytes?: number; maxLines?: number }) => {
+    const res = await executeSessionTool(s, {}, name, args, () => {}, target, [{ ...target, root, fingerprint: 'fp' }], undefined, root, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, stepBudget)
+    return { isError: !!res.isError, data: JSON.parse((res.content[0] as { text: string }).text) }
+  }
+
+  // Step 1: bounded step stops with logical indexedBytes > physicalSize, totalBytes=null
+  const step1 = await callWithBudget(store, 'refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxLines: 40, maxBytes: 200_000 })
+  expect(step1.isError).toBe(false)
+  expect(step1.data.state).toBe('INDEXING_PENDING')
+  expect(step1.data.indexedBytes).toBeGreaterThan(physicalSize)
+  expect(step1.data.totalBytes).toBeNull()
+  expect(step1.data.sourcePhysicalBytes).toBe(physicalSize)
+
+  // READ_ONLY store must accept the checkpoint (logical nextOffset > physicalSize) without mutating
+  const roStore = new SessionStore(storePath, 'repo-zst-prog', true)
+  try {
+    const roInspect = await callWithBudget(roStore, 'inspect_agent_session', { nativeSession, sourceSessionId: sessionUuid })
+    expect(roInspect.isError).toBe(false)
+    expect(roInspect.data.indexingState).toBe('INDEXING_PENDING')
+    expect(roInspect.data.reason).toBe('READ_ONLY_STORE')
+    expect(roInspect.data.indexedBytes).toBe(step1.data.indexedBytes)
+    expect(roInspect.data.totalBytes).toBeNull()
+    expect(roInspect.data.sourcePhysicalBytes).toBe(physicalSize)
+
+    const roEvents = await callWithBudget(roStore, 'list_agent_session_events', { nativeSession, sourceSessionId: sessionUuid, limit: 5 })
+    expect(roEvents.isError).toBe(true)
+    expect(roEvents.data.code).toBe('INDEXING_PENDING')
+    expect(roEvents.data.indexedBytes).toBe(step1.data.indexedBytes)
+    expect(roEvents.data.totalBytes).toBeNull()
+    expect(roEvents.data.sourcePhysicalBytes).toBe(physicalSize)
+  } finally {
+    roStore.close()
+  }
+
+  // Step 2+: complete indexing -> READY with logical indexedBytes=totalBytes=logicalTotal and sourcePhysicalBytes=physicalSize
+  let readyRes: any
+  for (let i = 0; i < 20; i++) {
+    const res = await callWithBudget(store, 'refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxLines: 40, maxBytes: 200_000 })
+    if (res.data.state === 'READY') { readyRes = res.data; break }
+  }
+  expect(readyRes.state).toBe('READY')
+  expect(readyRes.indexedBytes).toBe(logicalTotal)
+  expect(readyRes.totalBytes).toBe(logicalTotal)
+  expect(readyRes.sourcePhysicalBytes).toBe(physicalSize)
+
+  // Control: plain .jsonl continues to report known totalBytes === sourcePhysicalBytes === logicalTotal
+  require('node:fs').unlinkSync(zstPath)
+  const plainPath = join(rolloutDir, `rollout-2026-11-24T01-00-00-${sessionUuid}.jsonl`)
+  writeFileSync(plainPath, jsonlBody)
+  const plainPending = await callWithBudget(store, 'refresh_agent_sessions', { nativeSession, sourceSessionId: sessionUuid }, { maxLines: 4, maxBytes: 100_000 })
+  expect(plainPending.data.state).toBe('INDEXING_PENDING')
+  expect(plainPending.data.totalBytes).toBe(logicalTotal)
+  expect(plainPending.data.sourcePhysicalBytes).toBe(logicalTotal)
 }, 60_000)
