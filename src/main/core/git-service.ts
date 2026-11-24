@@ -477,6 +477,49 @@ export class GitService implements FileListingPort {
     return revision
   }
 
+  async captureWorktreeEditObservation(
+    dirPath: string,
+    excludedPaths: string[],
+    options?: { includeWorktreeRevision?: boolean; worktreeRevisionMetadataOnly?: boolean }
+  ): Promise<{
+    snapshot: { branch: string | null; head: string | null; indexRevision: string; worktreeRevision: string; operation: string | null }
+    foreignRevision: string
+  }> {
+    const [identity, indexRevision, rawStatus] = await Promise.all([
+      this.captureSnapshotIdentity(dirPath),
+      this.getIndexRevision(dirPath),
+      this.getOperationsStatus(dirPath, true)
+    ])
+    const includeWorktreeRevision = options?.includeWorktreeRevision !== false
+    const worktreeRevision = includeWorktreeRevision
+      ? this.worktreeRevision(dirPath, identity.head, indexRevision, rawStatus, options?.worktreeRevisionMetadataOnly ?? true)
+      : ''
+    const foreignStatus = this.filterPorcelainStatus(rawStatus, excludedPaths)
+    const foreignRevision = this.worktreeRevision(dirPath, identity.head, indexRevision, foreignStatus, false)
+    const [afterIdentity, afterIndex, afterStatus] = await Promise.all([
+      this.captureSnapshotIdentity(dirPath),
+      this.getIndexRevision(dirPath),
+      this.getOperationsStatus(dirPath, true)
+    ])
+    if (
+      afterIdentity.head !== identity.head ||
+      afterIdentity.branch !== identity.branch ||
+      afterIdentity.operation !== identity.operation ||
+      afterIndex !== indexRevision ||
+      afterStatus !== rawStatus
+    ) throw new Error('GIT_STATE_CHANGED')
+    return {
+      snapshot: {
+        branch: identity.branch,
+        head: identity.head,
+        indexRevision,
+        worktreeRevision,
+        operation: identity.operation
+      },
+      foreignRevision
+    }
+  }
+
   private filterPorcelainStatus(status: string, excludedPaths: string[]): string {
     const normalize = (value: string) => {
       const slash = value.replace(/\\/g, '/')

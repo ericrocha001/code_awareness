@@ -133,11 +133,24 @@ describe('code editing unit contracts', () => {
       const dirLookups = new Map<string, number>()
       const receipts = new Map<string, any>()
       let currentForeignRevision = hex64('7')
+      const getUpstreamState = vi.fn(async () => ({ upstream: null, ahead: 0, behind: 0 }))
+      const getWorktreeRevision = vi.fn(async () => hex64('4'))
+      const getOperationsStatus = vi.fn(async () => '')
+      const captureWorktreeEditObservation = vi.fn(async (_dir: string, _excluded: string[], opts?: { includeWorktreeRevision?: boolean }) => ({
+        snapshot: {
+          branch: 'feat/target',
+          head: '1'.repeat(40),
+          indexRevision: hex64('3'),
+          worktreeRevision: opts?.includeWorktreeRevision === false ? '' : hex64('4'),
+          operation: null
+        },
+        foreignRevision: currentForeignRevision
+      }))
       const fakeGit = {
         getCommonDirectory: async () => common,
         getWorktreeDirectory: async () => targetAdmin,
         getWorktreeRoot: async () => targetRoot,
-        getUpstreamState: async () => ({ upstream: null, ahead: 0, behind: 0 }),
+        getUpstreamState,
         getRepositoryDirectories: async (p: string) => {
           dirLookups.set(p, (dirLookups.get(p) ?? 0) + 1)
           if (p === targetRoot) return { common, admin: targetAdmin }
@@ -149,9 +162,10 @@ describe('code editing unit contracts', () => {
         getCurrentBranch: async () => 'feat/target',
         getGitOperation: async () => null,
         getIndexRevision: async () => hex64('3'),
-        getOperationsStatus: async () => '',
-        getWorktreeRevision: async () => hex64('4'),
+        getOperationsStatus,
+        getWorktreeRevision,
         getWorktreeRevisionExcluding: async () => currentForeignRevision,
+        captureWorktreeEditObservation,
         isGitRepository: async () => true,
         readOperationReceipt: async (_root: string, id: string) => receipts.get(id) ?? null,
         prepareOperationReceipt: async (_root: string, r: any) => {
@@ -209,10 +223,14 @@ describe('code editing unit contracts', () => {
       expect(ok.isError).toBeUndefined()
       expect(JSON.parse(ok.content[0].text)).toMatchObject({ state: 'APPLIED' })
 
-      // Sibling directory lookups must be ZERO during edit_worktree_text
+      // Sibling directory lookups, upstream queries, getChanges/status and legacy getWorktreeRevision must be ZERO during edit_worktree_text
       for (const sib of siblings) {
         expect(dirLookups.get(sib.path) ?? 0).toBe(0)
       }
+      expect(getUpstreamState).not.toHaveBeenCalled()
+      expect(getWorktreeRevision).not.toHaveBeenCalled()
+      expect(getOperationsStatus).not.toHaveBeenCalled()
+      expect(captureWorktreeEditObservation).toHaveBeenCalledTimes(5) // 1 entry + 3 beforePublish + 1 finalCheck (which also yields snapshotAfter)
       expect(readFileSync(join(targetRoot, 'src/c.ts'), 'utf8')).toBe('export const c = 3\n')
 
       // Expired deadline -> REQUEST_TIMEOUT (not REPOSITORY_CONTEXT_CHANGED)
