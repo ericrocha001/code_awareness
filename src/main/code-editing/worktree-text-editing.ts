@@ -135,6 +135,7 @@ export async function editWorktreeText(
   args: unknown,
   options?: {
     sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
+    deadlineAtMs?: number
     authority?: {
       repositoryId: string
       transport: string

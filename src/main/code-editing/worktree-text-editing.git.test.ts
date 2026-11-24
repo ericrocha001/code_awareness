@@ -258,6 +258,48 @@ describe('autonomous worktree text editing through real MCP HTTP', () => {
       expect(mainRefused.isError).toBe(true)
       expect(mainRefused.data).toMatchObject({ code: 'WORKTREE_PRIMARY_PROTECTED' })
       expect(f.getApprovalCalls()).toBe(0)
+
+      // Expired legacy grant from a prior runtime instance (UNKNOWN_OR_STALE) auto-reconciles to RELEASED without approval
+      const commonDir = await f.git.getCommonDirectory(f.root)
+      const ownershipDir = join(commonDir, 'code-awareness-worktree-ownership')
+      mkdirSync(ownershipDir, { recursive: true })
+      const staleGrantFile = join(ownershipDir, `${wtA.worktreeId}.json`)
+      const inspectedBeforeStale = (await f.call('inspect_worktree', { worktreeId: wtA.worktreeId })).data
+      writeFileSync(staleGrantFile, JSON.stringify({
+        instanceId: 'prior-restarted-instance',
+        requestId: 'stale-req-1',
+        observation: {
+          repositoryId: 'repo-code-editing',
+          commonDirectory: commonDir,
+          administrativeDirectory: await f.git.getWorktreeDirectory(f.a),
+          worktreeId: wtA.worktreeId,
+          generation: wtA.generation,
+          path: wtA.path,
+          snapshot: snap(inspectedBeforeStale),
+          contentRevision: '1'.repeat(64)
+        },
+        scope: { operations: ['STAGE'], paths: ['src/beta.ts'], branches: [] },
+        expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        credentialHash: '2'.repeat(64),
+        state: 'GRANTED'
+      }))
+      const afterStaleReconcile = await f.call('edit_worktree_text', {
+        worktreeId: wtA.worktreeId,
+        generation: wtA.generation,
+        snapshot: snap(inspectedBeforeStale),
+        operationId: 'op-auto-stale-grant',
+        intent: { description: 'Auto-reconcile expired grant' },
+        changes: [
+          { operation: 'EDIT', path: 'src/beta.ts', expectedSha256: second.data.files[0].afterSha256, replacements: [{ oldText: 'v3', newText: 'v4' }] }
+        ]
+      })
+      expect(afterStaleReconcile.isError).toBe(false)
+      expect(afterStaleReconcile.data.state).toBe('APPLIED')
+      expect(JSON.parse(readFileSync(staleGrantFile, 'utf8'))).toMatchObject({
+        state: 'RELEASED',
+        reconciliationReason: 'EXPIRED_AUTONOMOUS_RECONCILIATION'
+      })
+      expect(f.getApprovalCalls()).toBe(0)
     } finally {
       await f.close()
     }

@@ -95,7 +95,8 @@ export const WORKTREE_TEXT_EDITING_TOOLS: McpToolDefinition[] = [
 export async function executeWorktreeTextEditing(
   service: GitOperationsService,
   args: unknown,
-  authority?: AgentAuthority
+  authority?: AgentAuthority,
+  deadlineAtMs?: number
 ): Promise<McpToolResult> {
   const values = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
   const resolved = resolveEffectiveDeliveryContext(undefined, authority?.deliveryContext, authority?.deliveryContextError)
@@ -105,14 +106,21 @@ export async function executeWorktreeTextEditing(
       isError: true
     }
   }
+  if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify({ code: 'REQUEST_TIMEOUT', reason: 'DEADLINE_EXCEEDED' }) }],
+      isError: true
+    }
+  }
   if (authority && (!authority.isActive() || !authority.principal.isActive())) {
     return {
-      content: [{ type: 'text', text: JSON.stringify({ code: 'AGENT_UNAUTHORIZED' }) }],
+      content: [{ type: 'text', text: JSON.stringify({ code: 'AGENT_UNAUTHORIZED', reason: 'AUTHORITY_INACTIVE' }) }],
       isError: true
     }
   }
   return editWorktreeText(service, args, {
     ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}),
+    ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
     ...(authority ? {
       authority: {
         repositoryId: authority.repositoryId,

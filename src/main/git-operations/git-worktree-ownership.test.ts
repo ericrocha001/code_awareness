@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript'
 import { afterEach, describe, expect, it } from 'vitest'
-import { GitWorktreeOwnership, withWorktreeTransaction, type WorktreeObservation, type WorktreeApprovalPort } from './git-worktree-ownership'
+import { GitWorktreeOwnership, reconcileAutonomousWorktreeOwnership, withWorktreeTransaction, type WorktreeObservation, type WorktreeApprovalPort } from './git-worktree-ownership'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -158,5 +158,42 @@ describe('local worktree ownership authority', () => {
       'EDIT_TEXT',
       async () => ({})
     )).rejects.toThrow('WORKTREE_RECOVERY_REQUIRED')
+  })
+
+  it('reconciles expired APPROVED/GRANTED records durably for autonomous editing while blocking active, recovery-pending, and busy states', async () => {
+    const f = fixture(async () => true)
+    const request = await f.manager.request(f.observed.worktreeId, f.observed.snapshot, f.scope, 300)
+    await accept(f.manager, request)
+
+    const target = {
+      commonDirectory: f.common,
+      worktreeId: f.observed.worktreeId,
+      generation: f.observed.generation,
+      path: f.observed.path,
+      operation: null
+    }
+
+    // Active unexpired grant refuses
+    expect(() => reconcileAutonomousWorktreeOwnership(target, f.clock)).toThrow('WORKTREE_OWNERSHIP_REQUIRED')
+
+    // Advance clock past expiration (simulating expired grant across restart) -> reconciles to RELEASED
+    f.advance()
+    reconcileAutonomousWorktreeOwnership(target, f.clock)
+    expect(await f.manager.state(f.observed.worktreeId)).toBe('NOT_GRANTED')
+    const grantPath = join(f.common, 'code-awareness-worktree-ownership', f.observed.worktreeId + '.json')
+    const persisted = JSON.parse(readFileSync(grantPath, 'utf8'))
+    expect(persisted).toMatchObject({
+      state: 'RELEASED',
+      reconciliationReason: 'EXPIRED_AUTONOMOUS_RECONCILIATION'
+    })
+    expect(typeof persisted.reconciledAt).toBe('string')
+
+    // RECOVERY_PENDING refuses even if expired
+    writeFileSync(grantPath, JSON.stringify({ ...persisted, state: 'RECOVERY_PENDING' }))
+    expect(() => reconcileAutonomousWorktreeOwnership(target, f.clock)).toThrow('WORKTREE_RECOVERY_REQUIRED')
+
+    // Active Git operation refuses
+    writeFileSync(grantPath, JSON.stringify({ ...persisted, state: 'RELEASED' }))
+    expect(() => reconcileAutonomousWorktreeOwnership({ ...target, operation: 'MERGE' }, f.clock)).toThrow('GIT_OPERATION_IN_PROGRESS')
   })
 })

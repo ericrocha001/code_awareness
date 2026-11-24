@@ -36,6 +36,8 @@ interface Grant {
   expiresAt: string
   credentialHash: string
   state: 'APPROVED' | 'GRANTED' | 'RECOVERY_PENDING' | 'RELEASED'
+  reconciledAt?: string
+  reconciliationReason?: string
 }
 interface Pending {
   request: WorktreeApproval
@@ -58,6 +60,49 @@ export function assertNoWorktreeGrant(common: string, root: string): void {
   for (const file of readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name))) {
     const grant = JSON.parse(readFileSync(join(directory, file), 'utf8')) as Grant
     if (grant.observation.path === physical && grant.state !== 'RELEASED') fail('WORKTREE_OWNERSHIP_REQUIRED')
+  }
+}
+
+export function reconcileAutonomousWorktreeOwnership(
+  target: { commonDirectory: string; worktreeId: string; generation: string; path: string; operation: string | null },
+  now: () => number = Date.now
+): void {
+  if (target.operation) fail('GIT_OPERATION_IN_PROGRESS')
+  const directory = join(target.commonDirectory, 'code-awareness-worktree-ownership')
+  if (!existsSync(directory)) return
+  const validationLock = join(target.commonDirectory, 'code-awareness-validation-locks', target.worktreeId + '.lock')
+  if (existsSync(validationLock)) {
+    const record = JSON.parse(readFileSync(validationLock, 'utf8')) as { pid?: number; state?: string }
+    if (record.state === 'RECOVERY_PENDING') fail('WORKTREE_RECOVERY_REQUIRED')
+    if (Number.isSafeInteger(record.pid) && record.pid! > 0) {
+      try { process.kill(record.pid!, 0); fail('WORKTREE_VALIDATION_BUSY') }
+      catch (error) { if (!(error && typeof error === 'object' && 'code' in error && error.code === 'ESRCH')) throw error }
+    }
+  }
+  const physical = realpathSync(target.path)
+  const focalName = target.worktreeId + '.json'
+  const files = readdirSync(directory).filter(name => /^[a-f0-9]{64}\.json$/.test(name))
+  const ordered = files.includes(focalName) ? [focalName, ...files.filter(name => name !== focalName)] : files
+  const currentNow = now()
+  for (const name of ordered) {
+    const filePath = join(directory, name)
+    const grant = JSON.parse(readFileSync(filePath, 'utf8')) as Grant
+    if (name !== focalName && grant.observation.path !== physical) continue
+    if (grant.state === 'RELEASED') continue
+    if (grant.state === 'RECOVERY_PENDING') fail('WORKTREE_RECOVERY_REQUIRED')
+    if (Date.parse(grant.expiresAt) > currentNow) {
+      if (grant.observation.generation !== target.generation) fail('WORKTREE_RECOVERY_REQUIRED')
+      fail('WORKTREE_OWNERSHIP_REQUIRED')
+    }
+    const reconciled: Grant = {
+      ...grant,
+      state: 'RELEASED',
+      reconciledAt: new Date(currentNow).toISOString(),
+      reconciliationReason: 'EXPIRED_AUTONOMOUS_RECONCILIATION'
+    }
+    const temporary = filePath + '.' + randomUUID() + '.tmp'
+    writeFileSync(temporary, JSON.stringify(reconciled), { flag: 'wx', mode: 0o600 })
+    renameSync(temporary, filePath)
   }
 }
 
