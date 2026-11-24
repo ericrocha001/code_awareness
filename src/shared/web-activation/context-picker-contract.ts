@@ -16,7 +16,7 @@ export interface PickerFilters {
 export type PickerRequest =
   | { action: 'catalog'; scope?: PickerScope; filters: PickerFilters }
   | {
-      action: 'preview' | 'copy' | 'export' | 'text'
+      action: 'preview' | 'copy' | 'download' | 'attach' | 'text'
       scope: PickerScope
       selected: ContinuumSelectedArtifact[]
     }
@@ -40,11 +40,32 @@ export interface PickerCatalog {
 export interface PickerPreview {
   tokenCount: number
   markdownBytes: number
+  artifactTokens: { artifactId: string; rawMarkdownTokenCount: number }[]
   hasVisuals: boolean
   members: PickerArtifact[]
 }
 
-export type PickerResult = PickerCatalog | PickerPreview | { outcome: string } | { markdown: string }
+export interface PickerFile {
+  name: string
+  type: 'text/markdown' | 'image/webp'
+  encoded: string
+}
+
+export interface PickerDownload {
+  outcome: 'downloaded'
+  directory: string
+  names: string[]
+}
+
+export interface PickerAttachment {
+  outcome: 'attached' | 'partial' | 'failed' | 'unavailable' | 'uncertain'
+  confirmed: string[]
+  pending: string[]
+  failed?: string[]
+}
+
+export type PickerResult = PickerCatalog | PickerPreview | PickerDownload | { outcome: 'copied' } |
+  { markdown: string } | { files: PickerFile[] }
 export type PickerResponse = { ok: true; result: PickerResult } | { ok: false; error: { code: string; message: string } }
 
 export type DraftOutcome =

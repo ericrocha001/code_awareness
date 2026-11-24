@@ -66,13 +66,7 @@ export async function exportQuickContextBundle(bundle: ContextBundle, intent: Co
     await clipboard.writeText(bundle.preview.markdown)
     return { outcome: 'copied' as const, snapshotId }
   }
-  let downloadsDir: string
-  try {
-    downloadsDir = app.getPath('downloads')
-    if (!downloadsDir || !existsSync(downloadsDir)) throw new Error('DOWNLOADS_UNAVAILABLE')
-  } catch {
-    throw new Error('DOWNLOADS_UNAVAILABLE: pasta de downloads inacessível')
-  }
+  const downloadsDir = contextDownloadsDirectory()
   const extension = intent === 'zip' ? 'zip' : 'md'
   const rawBase = bundle.preview.slug || 'selecao'
   const safeBase = `${rawBase.replace(/[^a-zA-Z0-9._-]/g, '_') || 'context'}-context`
@@ -111,4 +105,15 @@ export async function exportQuickContextBundle(bundle: ContextBundle, intent: Co
     rmSync(temporary, { force: true })
   }
   return { outcome: 'saved' as const, snapshotId, filePath: targetPath }
+}
+
+export function contextDownloadsDirectory(): string {
+  let downloadsDir: string
+  try {
+    downloadsDir = app.getPath('downloads')
+    if (!downloadsDir || !existsSync(downloadsDir)) throw new Error('DOWNLOADS_UNAVAILABLE')
+  } catch {
+    throw new Error('DOWNLOADS_UNAVAILABLE: pasta de downloads inacessível')
+  }
+  return downloadsDir
 }

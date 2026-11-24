@@ -408,13 +408,18 @@ export class ExtensionBackgroundRouter {
     private readonly runtimeId?: string,
     chromeApi?: ChromeApi
   ) {
+    const tabs = chromeApi?.tabs
+    const deliver = (tab: number, documentId: string, message: unknown) => new Promise(resolve => {
+      tabs?.sendMessage(tab, message, { documentId }, response => {
+        resolve(chromeApi?.runtime?.lastError ? undefined : response)
+      })
+    })
     this.picker = new PickerRouter(runtimeId, (webOrigin, request) =>
       this.sendNative({ id: this.nextId(), action: 'context_picker', webOrigin, request }),
-      chromeApi?.tabs && ((tab, documentId, href, challenge, markdown) => new Promise(resolve => {
-        chromeApi.tabs!.sendMessage(tab, { type: 'PICKER_INSERT_TEXT', href, challenge, markdown }, { documentId }, response => {
-          resolve(chromeApi.runtime?.lastError ? undefined : response)
-        })
-      }))
+      tabs && ((tab, documentId, href, challenge, markdown) =>
+        deliver(tab, documentId, { type: 'PICKER_INSERT_TEXT', href, challenge, markdown })),
+      tabs && ((tab, documentId, href, challenge, files) =>
+        deliver(tab, documentId, { type: 'PICKER_ATTACH_FILES', href, challenge, files }))
     )
   }
 

@@ -5,8 +5,7 @@ import type {
 } from '../../shared/web-activation/context-picker-contract'
 import type { ContinuumService } from '../continuum/continuum-service'
 import { ContextBundle, SELECTION_MAX_ARTIFACTS } from '../continuum/context-bundle'
-import { exportQuickContextBundle } from '../continuum/bundle-export'
-import { countCanonicalTokens } from '../core/tokenizer'
+import { downloadPickerFiles, nativePickerFiles, pickerOriginals } from './context-picker-files'
 import { object, text } from '../local-agent-channel/request-validation'
 
 interface PickerProject {
@@ -72,6 +71,20 @@ export class ContextPickerService {
       return result
     }
 
+    if (request.action === 'attach' || request.action === 'download') {
+      const bundle = ContextBundle.prepare(project.service, {
+        repositoryId: scope.repositoryId, source: { kind: 'selection', selected: request.selected }
+      })
+      const assertSelection = () => {
+        assertCurrent()
+        bundle.assertFresh()
+      }
+      if (request.action === 'attach' && bundle.preview.hasVisuals) throw new Error('PICKER_MEDIA_DOWNLOAD_REQUIRED')
+      const files = pickerOriginals(project.service, bundle)
+      assertSelection()
+      return request.action === 'attach' ? { files: nativePickerFiles(files) } : downloadPickerFiles(files, assertSelection)
+    }
+
     const bundle = ContextBundle.prepareBuilder(
       project.service,
       scope.repositoryId,
@@ -89,19 +102,18 @@ export class ContextPickerService {
     assertSelection()
 
     if (request.action === 'preview') {
+      const artifactTokens = await project.service.selectionTokens(request.selected, true)
+      assertSelection()
       const result: PickerPreview = {
         tokenCount: request.selected.length === 1
-          ? countCanonicalTokens(markdown).tokenCount
+          ? artifactTokens[0].rawMarkdownTokenCount
           : bundle.preview.tokenCount,
+        artifactTokens,
         markdownBytes: Buffer.byteLength(markdown),
         hasVisuals: bundle.preview.hasVisuals,
         members: bundle.preview.members
       }
       return result
-    }
-    if (request.action === 'export') {
-      const { outcome } = await exportQuickContextBundle(bundle, 'zip', assertSelection)
-      return { outcome }
     }
     if (request.action === 'copy') {
       const { clipboard } = await import('electron')
@@ -137,7 +149,7 @@ function parseRequest(input: unknown): PickerRequest {
     return { action, scope: req.scope === undefined ? undefined : parseScope(req.scope), filters }
   }
 
-  if (action !== 'preview' && action !== 'copy' && action !== 'export' && action !== 'text') {
+  if (action !== 'preview' && action !== 'copy' && action !== 'download' && action !== 'attach' && action !== 'text') {
     throw new Error('INVALID_ARGUMENT')
   }
   const req = object(input, ['action', 'scope', 'selected'])

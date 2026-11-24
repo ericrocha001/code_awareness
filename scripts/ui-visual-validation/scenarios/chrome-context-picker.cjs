@@ -1,4 +1,6 @@
-const { readFileSync } = require('node:fs')
+const { mkdirSync, readFileSync } = require('node:fs')
+const { app } = require('electron')
+const esbuild = require('esbuild')
 const { join } = require('node:path')
 const { execFileSync } = require('node:child_process')
 
@@ -17,6 +19,24 @@ const fixture = {
 
 exports.run = async ctx => {
   const extension = join(ctx.projectRoot, 'dist', 'web-extension')
+  const modulePath = join(ctx.temporary, 'picker-downloader.cjs')
+  await esbuild.build({
+    entryPoints: [join(ctx.projectRoot, 'src/main/web-activation/context-picker-files.ts')],
+    outfile: modulePath, bundle: true, platform: 'node',
+    nodePaths: [join(ctx.projectRoot, 'node_modules')],
+    external: ['electron']
+  })
+  const { downloadPickerFiles } = require(modulePath)
+  const downloads = join(ctx.temporary, 'downloads')
+  mkdirSync(downloads)
+  app.setPath('downloads', downloads)
+  const originals = [
+    { name: 'Service boundaries.md', type: 'text/markdown', bytes: Buffer.from('# Service boundaries\r\n') },
+    { name: 'Navigation overview.md', type: 'text/markdown', bytes: Buffer.from('# Navigation overview\n') },
+    { name: 'Navigation overview.webp', type: 'image/webp', bytes: Buffer.from('UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQ/Y/+ByKi/wEA', 'base64') }
+  ]
+  let downloadReceipt
+
   const read = name => readFileSync(join(extension, name), 'utf8')
   const runGit = (...args) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: ctx.projectRoot, encoding: 'utf8' }).trim()
   const head = runGit('rev-parse', 'HEAD')
@@ -36,8 +56,13 @@ exports.run = async ctx => {
         sendMessage: (message, reply) => {
           if (message.type === 'PICKER_BIND') reply?.({ok:true});
           if (message.type === 'PICKER_REQUEST') {
+            if (message.request.action === 'download') {
+              fetch('/fixture-download', { method: 'POST' }).then(response => response.json()).then(reply);
+              return;
+            }
+
             const result = message.request.action === 'catalog' ? ${JSON.stringify(fixture)}
-              : {tokenCount: 412, markdownBytes: 1320, hasVisuals: true, members: []};
+              : {tokenCount: 412, markdownBytes: 1320, hasVisuals: true, artifactTokens: [{artifactId:"a",rawMarkdownTokenCount:32},{artifactId:"b",rawMarkdownTokenCount:42}], members: []};
             reply?.({ ok: true, result });
           }
         }
@@ -46,6 +71,16 @@ exports.run = async ctx => {
   `
   await protocol.handle('https', request => {
     const { origin, pathname } = new URL(request.url)
+    if (origin === pickerOrigin && pathname === '/fixture-download' && request.method === 'POST') {
+      downloadReceipt = downloadPickerFiles(originals, () => {})
+      return Response.json({ ok: true, result: downloadReceipt })
+    }
+    if (origin === 'https://chat.deepseek.com' && pathname === '/') return new Response(
+      '<!doctype html><body data-theme="light" style="margin:0;background:#f5f7fc;color:#273149;font:15px system-ui">' +
+      '<textarea aria-label="Rascunho sintético" style="position:fixed;bottom:12px;right:12px;width:calc(100% - 24px);max-width:550px;height:90px;border:1px solid #bac4d5;border-radius:12px;padding:8px;box-sizing:border-box">Rascunho sintético</textarea>' +
+      `<script>${runtime}</script><script src="/content-script.js"></script>`,
+      { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+    )
     if (origin === 'https://chatgpt.com' && pathname === '/') return new Response(
       '<!doctype html><html lang="en"><title>Chat draft fixture</title>' +
       '<body style="margin:0;padding:24px;background:#202123;color:#f1f5f9;font:15px system-ui" data-theme="dark">' +
@@ -54,7 +89,7 @@ exports.run = async ctx => {
       `<script>${runtime}</script><script src="/content-script.js"></script></body></html>`,
       { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
     )
-    if (origin === 'https://chatgpt.com' && pathname === '/content-script.js') return new Response(read('content-script.js'), { headers: { 'Content-Type': 'text/javascript' } })
+    if ((origin === pickerOrigin || origin === 'https://chat.deepseek.com') && pathname === '/content-script.js') return new Response(read('content-script.js'), { headers: { 'Content-Type': 'text/javascript' } })
     if (origin === pickerOrigin && pathname === '/context-picker.html') return new Response(
       read('context-picker.html').replace('<script src="context-picker.js">', `<script>${runtime}</script><script src="context-picker.js">`),
       { headers: { 'Content-Type': 'text/html; charset=utf-8' } }
@@ -98,10 +133,9 @@ exports.run = async ctx => {
       click({ ...control, x: control.x + frame.x, y: control.y + frame.y })
     }
     await activatePanelControl('#results input[value="a"]')
-    await until("document.querySelector('#count').textContent === '1 selected'")
+    await until("document.querySelector('#count').textContent === '1 selecionado'")
     await activatePanelControl('#results input[value="b"]')
-    await until("document.querySelector('#count').textContent === '2 selected'")
-    await activatePanelControl('#preview-button')
+    await until("document.querySelector('#count').textContent === '2 selecionados'")
     await until("document.querySelector('#preview').textContent.includes('412 tokens')")
     ctx.check('Picker preview and text action rendered', await evaluation("!document.querySelector('#insert').disabled && document.querySelector('#preview').textContent.includes('WebP')"))
     await ctx.capture('context-picker-wide')
@@ -112,6 +146,15 @@ exports.run = async ctx => {
       return left >= 0 && top >= 0 && right <= innerWidth && bottom <= innerHeight
     }))
     await ctx.capture('context-picker-split')
+    await evaluation("document.querySelector('#attach').scrollIntoView({ block: 'nearest' })")
+    await activatePanelControl('#attach')
+    await until("document.querySelector('#action-status').textContent.includes('Arquivos salvos em')")
+    ctx.check('Download saves individual Markdown and WebP and reports the result in the picker',
+      downloadReceipt?.names.length === originals.length && originals.every(file =>
+        readFileSync(join(downloadReceipt.directory, file.name)).equals(file.bytes)
+      )
+    )
+
     await evaluation("document.querySelector('#copy').focus()")
     ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' })
     ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
@@ -120,6 +163,14 @@ exports.run = async ctx => {
       return !host.shadowRoot.querySelector('iframe') && host.shadowRoot.activeElement === host.shadowRoot.querySelector('button')
     })
     ctx.check('Escape closes picker and restores trigger focus', true)
+    await ctx.window.loadURL('https://chat.deepseek.com/')
+    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill')?.shadowRoot.querySelectorAll('button').length === 2)
+    ctx.check('Floating bar fits split viewport with both actions', await ctx.evaluate(() => {
+      const bar = document.querySelector('#code-awareness-activation-pill')
+      const bounds = bar.getBoundingClientRect()
+      return bounds.left >= 0 && bounds.right <= innerWidth
+    }))
+    await ctx.capture('floating-bar-split')
     ctx.check('Source unchanged during capture', runGit('rev-parse', 'HEAD') === head &&
       runGit('status', '--porcelain') === dirty && fingerprint() === metadata.inputsFingerprint)
     require('node:fs').writeFileSync(join(ctx.evidenceDir, 'source.json'), JSON.stringify({

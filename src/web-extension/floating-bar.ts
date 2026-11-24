@@ -1,3 +1,6 @@
+import { attachChatGptFiles } from './chatgpt-attachments'
+import type { PickerFile } from '../shared/web-activation/context-picker-contract'
+import { messages as pt } from './locale'
 import type { ChromeApi, ChromeMessageListener, ChromeRuntimeApi, ChromeStorageChangeListener } from './chrome-api'
 import { insertDraftText } from './chat-context-adapter'
 
@@ -43,23 +46,63 @@ export class FloatingBar {
     style.textContent = `
       :host { all: initial; position: fixed; z-index: 2147483000; }
       :host([hidden]) { display: none; }
-      .bar { display: flex; align-items: center; gap: 8px; padding: 6px 10px;
-        max-width: calc(100vw - 54px); border-radius: 24px; background: #111827; color: #f9fafb;
-        border: 1px solid #374151; font: 12px/1.2 system-ui, sans-serif;
-        box-shadow: 0 4px 12px #0006; }
+      .bar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 7px; padding: 6px 9px;
+        box-sizing: border-box; max-width: calc(100vw - 32px); border-radius: 24px;
+        background: radial-gradient(ellipse at 100% 0%, #39377a 0%, transparent 74%),
+          linear-gradient(155deg, #19233b, #141b32 75%) padding-box,
+          linear-gradient(110deg, #8bb6ee, #8a72ff) border-box;
+        color: #f7f8ff; border: 1px solid transparent;
+        font: 12px/1.35 system-ui, sans-serif;
+        box-shadow: inset 0 1px 3px #b6caff44, 0 7px 18px #25285f70;
+      }
       .activation { display: contents; }
-      iframe { position: absolute; width: min(340px, calc(100vw - 32px));
-        height: min(500px, calc(100vh - 90px)); border: 1px solid #475569;
-        border-radius: 12px; box-shadow: 0 8px 24px #0007; background: #111827; }
-      button { border: 0; border-radius: 24px; padding: 4px 8px;
-        background: #2563eb; color: white; cursor: pointer; font: inherit; }
-      button[data-revoke] { background: #b91c1c; }
+      .identity { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
+      .product { font-weight: 720; white-space: nowrap; }
+      .state { display: inline-flex; align-items: baseline; gap: 5px; color: #b4bde0; overflow-wrap: anywhere; }
+      .state::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: 50%; background: #a2abd6; align-self: center; }
+      :host([data-ca-state="READY"]) .state::before { background: #8be4be; }
+      .brand { display: grid; place-items: center; inline-size: 26px; block-size: 26px;
+        flex: none; border-radius: 8px; border: 1px solid #535d9766;
+        background: linear-gradient(#2b345b, #20294a); color: #b7a9ff; }
+      .brand svg { width: 17px; height: 17px; }
+      .bar:has(.identity) .brand { margin-right: 6px; position: relative; }
+      .bar:has(.identity) .brand::after { content: ''; position: absolute; left: calc(100% + 6px); top: 3px; bottom: 3px; border-left: 1px solid #59648d88; }
+      iframe { position: absolute; width: min(454px, calc(100vw - 32px));
+        height: min(570px, calc(100vh - 90px)); border: 1px solid #586b96;
+        border-radius: 18px; box-shadow: 0 16px 38px #080b18aa; background: #111827; }
+      button {
+        flex: none; border: 1px solid #7769dc; border-radius: 20px; padding: 4px 9px;
+        color: #f7f8ff; cursor: pointer; font: inherit; font-weight: 650;
+        background: linear-gradient(#363c70, #232b51);
+      }
+      button:hover, button[aria-expanded="true"] { background: #495395; border-color: #afa1ff; }
+      button:focus-visible { outline: 2px solid #a5caff; outline-offset: 2px; }
+      .activation button { background: linear-gradient(#607bff, #4046eb); border-color: #8498fa;
+        box-shadow: inset 0 1px #c3d0ff55; }
+      .activation button:hover { background: linear-gradient(#758cff, #5359fa); }
+      .activation button[data-revoke] { color: #ffe4e8; background: #442536; border-color: #9b6273; }
+      .activation button[data-revoke]:hover { background: #653448; }
     `
     this.controls = doc.createElement('div')
     this.controls.className = 'bar'
     this.activation = doc.createElement('div')
     this.activation.className = 'activation'
-    this.controls.append(this.activation)
+    const brand = doc.createElement('span')
+    brand.className = 'brand'
+    const icon = doc.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    icon.setAttribute('viewBox', '0 0 24 24')
+    icon.setAttribute('aria-hidden', 'true')
+    const layers = doc.createElementNS(icon.namespaceURI, 'path')
+    layers.setAttribute('d', 'm12 3 9 5-9 5-9-5 9-5Zm-9 9 9 5 9-5M3 16l9 5 9-5')
+    layers.setAttribute('fill', 'none')
+    layers.setAttribute('stroke', 'currentColor')
+    layers.setAttribute('stroke-width', '1.7')
+    layers.setAttribute('stroke-linejoin', 'round')
+    layers.setAttribute('stroke-linecap', 'round')
+    icon.append(layers)
+    brand.append(icon)
+    this.controls.append(brand, this.activation)
     root.append(style, this.controls)
     if (runtime?.getURL && runtime.sendMessage) this.mountPicker(runtime)
     this.setPosition(defaultPosition)
@@ -101,11 +144,21 @@ export class FloatingBar {
     this.host.hidden = false
     this.host.dataset.caState = model.state
     const label = this.doc.createElement('span')
-    label.textContent = model.label
+    label.className = 'identity'
+    const product = this.doc.createElement('span')
+    product.className = 'product'
+    product.textContent = 'Code Awareness'
+    const separator = this.doc.createElement('span')
+    separator.textContent = '·'
+    separator.setAttribute('aria-hidden', 'true')
+    const status = this.doc.createElement('span')
+    status.className = 'state'
+    status.textContent = model.label
+    label.append(product, separator, status)
     label.title = model.title
     const button = this.doc.createElement('button')
     button.type = 'button'
-    button.textContent = model.revoke ? 'Revoke' : 'Activate'
+    button.textContent = model.revoke ? pt.revoke : pt.activate
     button.toggleAttribute('data-revoke', model.revoke)
     button.addEventListener('click', model.action)
     const restoreFocus = this.host.shadowRoot?.activeElement === this.activation.lastElementChild
@@ -128,7 +181,8 @@ export class FloatingBar {
     const extensionOrigin = panelUrl.slice(0, panelUrl.lastIndexOf('/'))
     const trigger = this.doc.createElement('button')
     trigger.type = 'button'
-    trigger.textContent = 'Context'
+    trigger.className = 'context-trigger'
+    trigger.textContent = pt.context
     trigger.setAttribute('aria-expanded', 'false')
     trigger.setAttribute('aria-haspopup', 'dialog')
     this.controls.append(trigger)
@@ -180,17 +234,29 @@ export class FloatingBar {
       }
       const panel = this.doc.createElement('iframe')
       panel.src = panelUrl
-      panel.title = 'Continuum Context Picker'
+      panel.title = pt.picker
       this.panel = panel
       this.positionPanel()
       this.host.shadowRoot?.append(panel)
       trigger.setAttribute('aria-expanded', 'true')
     })
     const insert: ChromeMessageListener = (raw, sender, respond) => {
-      const message = raw as { type?: string; href?: string; challenge?: string; markdown?: string } | null
-      if (message?.type !== 'PICKER_INSERT_TEXT' || sender.id !== runtime.id || sender.tab) return
+      const message = raw as { type?: string; href?: string; challenge?: string; markdown?: string; files?: PickerFile[] } | null
+      if (!message || sender.id !== runtime.id || sender.tab) return
       const isCurrent = () => Boolean(this.panel && this.challenge && this.challenge === message.challenge &&
         win.location.href === message.href && !this.doc.hidden)
+      if (message.type === 'PICKER_ATTACH_FILES') {
+        if (this.site !== 'chatgpt' || !Array.isArray(message.files) || !isCurrent()) {
+          respond({ outcome: 'unavailable', confirmed: [], pending: [] })
+          return
+        }
+        const files = message.files
+        void attachChatGptFiles(this.doc, files, isCurrent).then(respond, () => {
+          respond({ outcome: 'uncertain', confirmed: [], pending: files.map(file => file.name) })
+        })
+        return true
+      }
+      if (message.type !== 'PICKER_INSERT_TEXT') return
       if (typeof message.markdown !== 'string' || !isCurrent()) {
         respond({ outcome: 'unavailable', reason: 'The original conversation is no longer active.' })
         return

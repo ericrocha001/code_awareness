@@ -43,6 +43,9 @@ export function verifyBuildArtifactsIntegrity(metadata: BuildArtifactMetadata): 
     throw new Error('BUILD_METADATA_EMPTY_EXT_FILES')
   }
   for (const [name, expected] of extEntries) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/.test(name) && name !== '_locales/pt_BR/messages.json') {
+      throw new Error('BUILD_METADATA_INVALID_EXT_FILE')
+    }
     const filePath = join(metadata.extOutDir, name)
     if (!existsSync(filePath)) {
       throw new Error(`STAGED_EXT_FILE_MISSING:${name}`)
@@ -258,6 +261,7 @@ export function promoteStagedArtifactsTransactionally(options: {
     mkdirSync(nextExtTempDir, { recursive: true })
     for (const [name, expected] of Object.entries(metadata.extFiles)) {
       const dest = join(nextExtTempDir, name)
+      mkdirSync(dirname(dest), { recursive: true })
       copyFileSync(join(metadata.extOutDir, name), dest)
       const actual = sha256File(dest)
       if (actual.sha256 !== expected.sha256 || actual.bytes !== expected.bytes) {
