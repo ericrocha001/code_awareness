@@ -13,8 +13,8 @@ const TEXT_LIMIT = 1024 * 1024
 interface ParsedEditRequest {
   worktreeId: string
   generation: string
-  leaseId: string
-  leaseCredential: string
+  leaseId?: string
+  leaseCredential?: string
   operationId: string
   snapshot: WorktreeSnapshot
   intent: FileMutationIntent
@@ -32,15 +32,22 @@ function hasExactKeys(object: Record<string, unknown>, keys: string[]): boolean 
 
 function parseEditRequest(args: unknown): { ok: true; value: ParsedEditRequest } | { ok: false; code: 'INVALID_ARGUMENT' | 'REQUEST_TOO_LARGE' } {
   if (!isPlainObject(args)) return { ok: false, code: 'INVALID_ARGUMENT' }
-  if (!hasExactKeys(args, ['worktreeId', 'generation', 'leaseId', 'leaseCredential', 'operationId', 'snapshot', 'intent', 'changes'])) {
+  const requiredKeys = ['worktreeId', 'generation', 'operationId', 'snapshot', 'intent', 'changes']
+  const allowedKeys = [...requiredKeys, 'leaseId', 'leaseCredential']
+  if (requiredKeys.some(key => !Object.hasOwn(args, key)) || Object.keys(args).some(key => !allowedKeys.includes(key))) {
     return { ok: false, code: 'INVALID_ARGUMENT' }
   }
   const { worktreeId, generation, leaseId, leaseCredential, operationId, snapshot, intent, changes } = args
+  const hasLeaseId = leaseId !== undefined
+  const hasLeaseCredential = leaseCredential !== undefined
+  if (hasLeaseId !== hasLeaseCredential) {
+    return { ok: false, code: 'INVALID_ARGUMENT' }
+  }
   if (
     typeof worktreeId !== 'string' || !HEX64.test(worktreeId) ||
     typeof generation !== 'string' || !HEX64.test(generation) ||
-    typeof leaseId !== 'string' || !leaseId.length ||
-    typeof leaseCredential !== 'string' || !HEX64.test(leaseCredential) ||
+    (hasLeaseId && (typeof leaseId !== 'string' || !leaseId.length)) ||
+    (hasLeaseCredential && (typeof leaseCredential !== 'string' || !HEX64.test(leaseCredential))) ||
     typeof operationId !== 'string' || !OPERATION_ID.test(operationId)
   ) {
     return { ok: false, code: 'INVALID_ARGUMENT' }
@@ -108,8 +115,7 @@ function parseEditRequest(args: unknown): { ok: true; value: ParsedEditRequest }
     value: {
       worktreeId,
       generation,
-      leaseId,
-      leaseCredential,
+      ...(hasLeaseId ? { leaseId: leaseId as string, leaseCredential: leaseCredential as string } : {}),
       operationId,
       snapshot: {
         branch: snapshot.branch as string | null,
@@ -127,7 +133,16 @@ function parseEditRequest(args: unknown): { ok: true; value: ParsedEditRequest }
 export async function editWorktreeText(
   service: GitOperationsService,
   args: unknown,
-  options?: { sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness }
+  options?: {
+    sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
+    authority?: {
+      repositoryId: string
+      transport: string
+      worktreeId?: string
+      deliveryContext?: import('../../shared/types/delivery-context-types').DeliveryContextRequest
+      isActive: () => boolean
+    }
+  }
 ): Promise<McpToolResult> {
   const parsed = parseEditRequest(args)
   if (!parsed.ok) {
@@ -137,7 +152,7 @@ export async function editWorktreeText(
   const fingerprintArgs = {
     worktreeId: req.worktreeId,
     generation: req.generation,
-    leaseId: req.leaseId,
+    ...(req.leaseId !== undefined ? { leaseId: req.leaseId } : {}),
     snapshot: req.snapshot,
     intent: req.intent,
     changes: req.changes
@@ -149,8 +164,7 @@ export async function editWorktreeText(
       {
         worktreeId: req.worktreeId,
         generation: req.generation,
-        leaseId: req.leaseId,
-        leaseCredential: req.leaseCredential,
+        ...(req.leaseId !== undefined ? { leaseId: req.leaseId, leaseCredential: req.leaseCredential } : {}),
         operationId: req.operationId,
         snapshot: req.snapshot,
         paths: req.changes.map(item => item.path)
