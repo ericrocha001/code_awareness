@@ -7,22 +7,14 @@ import { insertDraftText } from './chat-context-adapter'
 import type { ContextPickerSite as ChatSite } from '../shared/web-activation/context-picker-sites'
 export { contextPickerSite as detectChatSite } from '../shared/web-activation/context-picker-sites'
 
-export const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right'] as const
-type Position = typeof positions[number]
-export const defaultPosition: Position = 'bottom-right'
-export const floatingBarVisibleKey = 'floatingBarVisible'
-
-export function positionKey(site?: ChatSite): string {
-  return site ? `floatingBarPosition.${site}` : 'floatingBarPosition'
-}
-
-export function readPosition(value: unknown): Position | undefined {
-  return positions.find((position) => position === value)
-}
+import { compactKey, defaultPosition, positionKey, resolveBarPreferences, visibilityKey, type Position } from './floating-bar-preferences'
+export { defaultPosition, positions, positionKey, readPosition, floatingBarVisibleKey } from './floating-bar-preferences'
 
 export class FloatingBar {
   private readonly host: HTMLElement
   private readonly controls: HTMLElement
+  private readonly brand: HTMLButtonElement
+  private compact = false
   private readonly onStorageChanged: ChromeStorageChangeListener
   private disposed = false
   private visible = false
@@ -60,13 +52,23 @@ export class FloatingBar {
         font: 12px/1.35 system-ui, sans-serif;
         box-shadow: inset 0 1px 3px #b6caff44, 0 7px 18px #25285f70;
       }
+      .bar { inline-size: max-content; interpolate-size: allow-keywords; transition: inline-size 140ms ease, padding 140ms ease; }
+      .bar[data-compact] { inline-size: 38px; block-size: 38px; padding: 0; justify-content: center; }
+      .bar[data-compact] .activation, .bar[data-compact] .context-trigger { display: none; }
+      .bar[data-compact] .brand { inline-size: 36px; block-size: 36px; margin: 0; border-radius: 50%; }
+      .bar[data-compact] .brand::after { display: none; }
+      :host([data-ca-state="READY"]) .bar[data-compact] .brand::before {
+        content: ''; position: absolute; bottom: 4px; right: 4px; width: 5px; height: 5px;
+        border-radius: 50%; background: #8be4be;
+      }
+      @media (prefers-reduced-motion: reduce) { .bar { transition: none; } }
       .activation { display: contents; }
       .identity { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
       .product { font-weight: 720; white-space: nowrap; }
       .state { display: inline-flex; align-items: baseline; gap: 5px; color: #b4bde0; overflow-wrap: anywhere; }
       .state::before { content: ''; width: 6px; height: 6px; flex: none; border-radius: 50%; background: #a2abd6; align-self: center; }
       :host([data-ca-state="READY"]) .state::before { background: #8be4be; }
-      .brand { display: grid; place-items: center; inline-size: 26px; block-size: 26px;
+      button.brand { display: grid; padding: 0; position: relative; place-items: center; inline-size: 26px; block-size: 26px;
         flex: none; border-radius: 8px; border: 1px solid #535d9766;
         background: linear-gradient(#2b345b, #20294a); color: #b7a9ff; }
       .brand svg { width: 17px; height: 17px; }
@@ -92,7 +94,9 @@ export class FloatingBar {
     this.controls.className = 'bar'
     this.activation = doc.createElement('div')
     this.activation.className = 'activation'
-    const brand = doc.createElement('span')
+    const brand = doc.createElement('button')
+    this.brand = brand
+    brand.type = 'button'
     brand.className = 'brand'
     const icon = doc.createElementNS('http://www.w3.org/2000/svg', 'svg')
     icon.setAttribute('viewBox', '0 0 24 24')
@@ -106,11 +110,17 @@ export class FloatingBar {
     layers.setAttribute('stroke-linecap', 'round')
     icon.append(layers)
     brand.append(icon)
+    this.setCompact(false)
+    brand.addEventListener('click', event => {
+      if (!event.isTrusted || !this.visible) return
+      this.setCompact(!this.compact)
+      this.storage?.local?.set({ [compactKey(this.site)]: this.compact })
+    })
     this.controls.append(brand, this.activation)
     root.append(style, this.controls)
     this.setPosition(defaultPosition)
     this.onStorageChanged = (changes, area) => {
-      if (area === 'local' && (positionKey() in changes || positionKey(site) in changes || floatingBarVisibleKey in changes)) {
+      if (area === 'local' && ([positionKey(), positionKey(site), visibilityKey(), visibilityKey(site), compactKey(site)].some(key => key in changes))) {
         this.refreshPreferences()
       }
     }
@@ -134,13 +144,28 @@ export class FloatingBar {
       this.setVisible(true)
       return
     }
-    const keys = [positionKey(), positionKey(this.site), floatingBarVisibleKey]
+    const keys = [positionKey(), positionKey(this.site), visibilityKey(), visibilityKey(this.site), compactKey(this.site)]
     const version = ++this.preferencesVersion
     local.get(keys, (items) => {
       if (this.disposed || version !== this.preferencesVersion) return
-      this.setPosition(readPosition(items[keys[1]]) ?? readPosition(items[keys[0]]) ?? defaultPosition)
-      this.setVisible(items[floatingBarVisibleKey] !== false)
+      const preferences = resolveBarPreferences(items, this.site)
+      this.setPosition(preferences.position)
+      this.setCompact(preferences.compact)
+      this.setVisible(preferences.visible)
     })
+  }
+
+  private setCompact(compact: boolean): void {
+    this.compact = compact
+    const active = this.host.shadowRoot?.activeElement
+    const restoreFocus = compact && active && active !== this.brand && this.controls.contains(active)
+    this.controls.toggleAttribute('data-compact', compact)
+    this.brand.setAttribute('aria-expanded', String(!compact))
+    const label = compact ? pt.expandBar : pt.collapseBar
+    this.brand.setAttribute('aria-label', label)
+    this.brand.title = label
+    if (restoreFocus) this.brand.focus({ preventScroll: true })
+    this.positionPanel()
   }
 
   private setVisible(visible: boolean): void {

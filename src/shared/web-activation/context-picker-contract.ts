@@ -13,7 +13,27 @@ export interface PickerFilters {
   cursor?: string
 }
 
+export type PickerTagRequest =
+  | { action: 'tag-membership'; scope: PickerScope; artifactId: string }
+  | { action: 'tag-assign'; scope: PickerScope; target: ContinuumSelectedArtifact; slug: string; operation: 'add' | 'remove' }
+  | { action: 'tag-create'; scope: PickerScope; target: ContinuumSelectedArtifact; name: string; description?: string }
+
+export type PickerTagMutation = Exclude<PickerTagRequest, { action: 'tag-membership' }>
+
+export interface PickerTagView {
+  artifact: PickerArtifact
+  assigned: string[]
+  tags: NonNullable<PickerCatalog['tags']>
+  receipt?: { state: 'PERSISTED'; artifactId: string; revision: number }
+}
+
+export function isPickerTagMutation(value: unknown): value is PickerTagMutation {
+  return value !== null && typeof value === 'object' && 'action' in value &&
+    (value.action === 'tag-assign' || value.action === 'tag-create')
+}
+
 export type PickerRequest =
+  | PickerTagRequest
   | { action: 'catalog'; scope?: PickerScope; filters: PickerFilters }
   | {
       action: 'preview' | 'copy' | 'download' | 'attach' | 'text'
@@ -64,7 +84,7 @@ export interface PickerAttachment {
   failed?: string[]
 }
 
-export type PickerResult = PickerCatalog | PickerPreview | PickerDownload | { outcome: 'copied' } |
+export type PickerResult = PickerCatalog | PickerPreview | PickerDownload | PickerTagView | { outcome: 'copied' } |
   { markdown: string } | { files: PickerFile[] }
 export type PickerResponse = { ok: true; result: PickerResult } | { ok: false; error: { code: string; message: string } }
 
@@ -75,5 +95,5 @@ export type DraftOutcome =
 export function isPopupPickerRequest(value: unknown): value is PickerRequest {
   if (value === null || typeof value !== 'object' || !('action' in value)) return false
   return value.action === 'catalog' || value.action === 'preview' ||
-    value.action === 'copy' || value.action === 'download'
+    value.action === 'copy' || value.action === 'download' || value.action === 'tag-membership' || isPickerTagMutation(value)
 }

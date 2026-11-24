@@ -66,7 +66,7 @@ export class PickerRouter {
     if (message.type !== 'PICKER_REQUEST' || !sender.frameId || !sender.documentId ||
       sender.url !== panel || sender.origin !== `chrome-extension://${this.runtimeId}` ||
       (binding.documentId && binding.documentId !== sender.documentId) ||
-      !message.request || !['catalog', 'preview', 'copy', 'download', 'attach', 'text'].includes(message.request.action)) {
+      !message.request || !['catalog', 'preview', 'copy', 'download', 'attach', 'text', 'tag-membership', 'tag-assign', 'tag-create'].includes(message.request.action)) {
       return rejected('PICKER_SENDER_NOT_AUTHORIZED')
     }
 

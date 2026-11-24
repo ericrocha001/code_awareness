@@ -39,6 +39,9 @@
       #picker-view iframe { width: 100%; flex: 1; min-height: 0; border: 0; }
       select { color-scheme: dark; background: #202b40; color: #f8fafc; border: 1px solid #64728d; border-radius: 6px; padding: 3px 5px; }
       select option { background: #202b40; color: #f8fafc; }
+      #bar-settings fieldset { margin: 6px 0; border: 1px solid #475569; border-radius: 8px; }
+      #bar-settings .card { margin-top: 7px; }
+      #bar-settings summary { cursor: pointer; font-weight: 650; }
       .badge {
         padding: 2px 8px;
         border-radius: 9999px;
@@ -111,18 +114,19 @@
     <div id="status-message" class="error"></div>
     </section>
 
-    <div class="card">
+    <details id="bar-settings">
+      <summary data-label="floatingBarSettings"></summary>
+      <div class="card">
       <label class="toggle">
         <span data-label="floatingBarVisible"></span>
         <input type="checkbox" id="floating-bar-visible" checked disabled />
       </label>
       <div class="hint" data-label="floatingBarHint"></div>
       <label class="row"><span data-label="barPosition"></span><select id="floating-bar-global"></select></label>
-      <label class="row" id="floating-bar-site-row" hidden>
-        <span id="floating-bar-site-label"></span>
-        <select id="floating-bar-site"></select>
-      </label>
-    </div>
+      <p id="floating-bar-suspended" class="hint" hidden data-label="barPreferencesSaved"></p>
+      <div id="floating-bar-sites"></div>
+      </div>
+    </details>
     </main>
     <section id="picker-view" hidden>
       <button type="button" id="back-to-settings" class="secondary" data-label="back"></button>

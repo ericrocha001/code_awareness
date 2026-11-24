@@ -1,6 +1,6 @@
 import { labelFor, localize, messages as pt, number, pickerError, selectedCount, tokens } from './locale'
 import type {
-  DraftOutcome, PickerAttachment, PickerDownload, PickerArtifact, PickerCatalog, PickerFilters, PickerPreview, PickerRequest, PickerResponse
+  DraftOutcome, PickerAttachment, PickerDownload, PickerArtifact, PickerCatalog, PickerFilters, PickerPreview, PickerRequest, PickerResponse, PickerTagMutation, PickerTagView
 } from '../shared/web-activation/context-picker-contract'
 import { getChromeApi } from './chrome-api'
 import { contextPickerSite, supportsDraftInsertion } from '../shared/web-activation/context-picker-sites'
@@ -34,6 +34,16 @@ const visible = new Map<string, PickerArtifact>()
 let catalog: PickerCatalog | undefined
 let ready = false
 let popupHost = false
+const tagEditor = document.querySelector<HTMLElement>('#tag-editor')!
+const tagDocument = document.querySelector<HTMLElement>('#tag-document')!
+const tagOptions = document.querySelector<HTMLElement>('#tag-options')!
+const tagQuery = document.querySelector<HTMLInputElement>('#tag-query')!
+const tagFeedback = document.querySelector<HTMLElement>('#tag-feedback')!
+const tagForm = document.querySelector<HTMLFormElement>('#create-tag')!
+let tagView: PickerTagView | undefined
+let tagTrigger: HTMLButtonElement | undefined
+let tagGeneration = 0
+let tagPending = false
 let popupRequestId = 0
 const popupPending = new Map<number, (response: unknown) => void>()
 let actionPending = false
@@ -53,7 +63,7 @@ const selection = () => Array.from(selected.values(), ({ artifactId, revision })
 const shouldDownload = () => popupHost || site !== 'chatgpt' || attachmentFallback || [...selected.values()].some(item => item.kind === 'VISUAL_REFERENCE')
 
 function renderActions() {
-  const disabled = actionPending || !catalog || selected.size === 0
+  const disabled = actionPending || tagPending || !catalog || selected.size === 0
   copy.disabled = disabled
   attach.disabled = disabled
   attach.querySelector('span')!.textContent = shouldDownload() ? pt.download : pt.attach
@@ -98,7 +108,9 @@ function renderSelection() {
       detail.textContent = ` · ≈ ${tokens(amount)}`
       title.append(detail)
     }
-    line.append(title, remove)
+    const actions = document.createElement('span')
+    actions.append(tagsButton(item), remove)
+    line.append(title, actions)
     li.append(line)
     return li
   }))
@@ -170,6 +182,7 @@ function invalidate(code: string): boolean {
   const scopeLost = ['PROJECT_CONTEXT_CHANGED', 'NO_ACTIVE_PROJECT', 'PICKER_SESSION_EXPIRED', 'PICKER_SENDER_NOT_AUTHORIZED'].includes(code)
   const stale = code === 'REVISION_CONFLICT' || code === 'BUNDLE_SNAPSHOT_STALE'
   if (!scopeLost && !stale) return false
+  closeTags(false)
   if (scopeLost) {
     catalog = undefined
     projectName.textContent = ''
@@ -227,9 +240,151 @@ function row(item: PickerArtifact) {
   kind.textContent = item.kind === 'VISUAL_REFERENCE' ? ' · WebP' : ` · ${labelFor(item.kind)}`
   name.append(item.name, kind)
   label.append(checkbox, badge, name)
-  li.append(label)
+  li.append(label, tagsButton(item))
   return li
 }
+
+function tagsButton(item: PickerArtifact): HTMLButtonElement {
+  const button = document.createElement('button')
+  button.type = 'button'
+  button.className = 'tag-trigger'
+  button.dataset.tagArtifact = item.artifactId
+  button.textContent = pt.editTags
+  button.setAttribute('aria-label', pt.editTags + ' · ' + item.name)
+  button.setAttribute('aria-controls', 'tag-editor')
+  button.addEventListener('click', event => {
+    if (event.isTrusted && !tagPending) void openTags(item, button)
+  })
+  return button
+}
+
+function closeTags(restoreFocus = true): void {
+  ++tagGeneration
+  tagEditor.hidden = true
+  tagView = undefined
+  if (restoreFocus) {
+    const replacement = [...document.querySelectorAll<HTMLButtonElement>('.tag-trigger')]
+      .find(button => button.dataset.tagArtifact === tagTrigger?.dataset.tagArtifact)
+    ;(tagTrigger?.isConnected ? tagTrigger : replacement ?? form.querySelector('input'))?.focus({ preventScroll: true })
+  }
+  tagTrigger = undefined
+}
+
+function renderTags(): void {
+  tagOptions.replaceChildren()
+  const query = tagQuery.value.trim().toLocaleLowerCase('pt-BR')
+  for (const [slug, name] of (tagView?.tags ?? [])
+    .filter(tag => tagView!.assigned.includes(tag.slug) || !query || tag.name.toLocaleLowerCase('pt-BR').includes(query) || tag.slug.includes(query))
+    .sort((a, b) => Number(tagView!.assigned.includes(b.slug)) - Number(tagView!.assigned.includes(a.slug)))
+    .map(tag => [tag.slug, tag.name])) {
+    const selected = tagView!.assigned.includes(slug)
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.textContent = (selected ? '✓ ' : '+ ') + name
+    button.setAttribute('aria-pressed', String(selected))
+    button.disabled = tagPending
+    button.addEventListener('click', event => {
+      if (event.isTrusted) void changeTags({ action: 'tag-assign', slug, operation: selected ? 'remove' : 'add' })
+    })
+    tagOptions.append(button)
+  }
+  const submit = tagForm.querySelector<HTMLButtonElement>('button')!
+  submit.disabled = !tagView || tagPending
+}
+
+async function openTags(item: PickerArtifact, trigger: HTMLButtonElement): Promise<void> {
+  const scope = catalog?.scope
+  if (!scope) return
+  const version = ++tagGeneration
+  tagView = undefined
+  tagTrigger = trigger
+  tagDocument.textContent = item.name
+  tagQuery.value = ''
+  tagForm.reset()
+  tagEditor.hidden = false
+  tagFeedback.textContent = pt.working
+  tagEditor.scrollIntoView({ block: 'nearest' })
+  tagQuery.focus({ preventScroll: true })
+  renderTags()
+  try {
+    const view = await request<PickerTagView>({ action: 'tag-membership', scope, artifactId: item.artifactId })
+    if (version !== tagGeneration) return
+    tagView = view
+    tagFeedback.textContent = ''
+    renderTags()
+  } catch {
+    if (version === tagGeneration) tagFeedback.textContent = pt.tagCheck
+  }
+}
+
+async function changeTags(change: { action: 'tag-assign'; slug: string; operation: 'add' | 'remove' } |
+  { action: 'tag-create'; name: string; description?: string }): Promise<void> {
+  const view = tagView
+  const scope = catalog?.scope
+  if (!scope || !view || tagPending || actionPending) return
+  const generation = tagGeneration
+  tagPending = true
+  clearTimeout(searchTimer)
+  ++searchGeneration
+  renderActions()
+  renderTags()
+  tagFeedback.textContent = popupHost ? pt.working : pt.tagConfirmDesktop
+  const target = { artifactId: view.artifact.artifactId, expectedRevision: view.artifact.revision }
+  let reconciled: PickerTagView | undefined
+  let confirmed = false
+  try {
+    const response = await request<PickerTagView>({ ...change, scope, target } satisfies PickerTagMutation)
+    if (response.receipt?.state !== 'PERSISTED' || response.receipt.artifactId !== target.artifactId) {
+      throw new Error('PICKER_TAG_UNCONFIRMED')
+    }
+    reconciled = response
+    confirmed = true
+  } catch (error) {
+    const code = codeOf(error)
+    if (code === 'PROJECT_CONTEXT_CHANGED' || code === 'NO_ACTIVE_PROJECT') invalidate(code)
+    else if (code !== 'PICKER_TAG_CANCELLED') {
+      try {
+        reconciled = await request<PickerTagView>({ action: 'tag-membership', scope, artifactId: target.artifactId })
+      } catch {
+        tagView = undefined
+      }
+    }
+    if (generation === tagGeneration) {
+      tagFeedback.textContent = code === 'PICKER_TAG_CANCELLED' ? pt.PICKER_TAG_CANCELLED : pt.tagCheck
+    }
+  } finally {
+    if (reconciled && catalog?.scope.binding === scope.binding) {
+      if (selected.has(target.artifactId)) {
+        selected.set(target.artifactId, reconciled.artifact)
+        selectionChanged()
+      }
+      catalog.tags = reconciled.tags
+      setupFilters(catalog)
+      if (generation === tagGeneration) {
+        tagView = reconciled
+        if (confirmed) {
+          tagFeedback.textContent = pt.tagSaved
+          tagForm.reset()
+        }
+      }
+    }
+    tagPending = false
+    if (catalog?.scope.binding === scope.binding) search()
+    renderActions()
+    renderTags()
+  }
+}
+
+tagQuery.addEventListener('input', renderTags)
+document.querySelector('#close-tags')?.addEventListener('click', () => closeTags())
+tagForm.addEventListener('submit', event => {
+  event.preventDefault()
+  if (!event.isTrusted) return
+  const data = new FormData(tagForm)
+  const name = String(data.get('name') ?? '').trim()
+  const description = String(data.get('description') ?? '').trim()
+  if (name) void changeTags({ action: 'tag-create', name, ...(description && { description }) })
+})
 
 function currentFilters(): PickerFilters {
   const fields = new FormData(form)
@@ -253,7 +408,7 @@ async function load(generation: number, filters: PickerFilters, cursor?: string)
       action: 'catalog', scope: catalog?.scope, filters: { ...filters, ...(cursor && { cursor }) }
     })
     if (generation !== searchGeneration) return
-    catalog = page
+    catalog = { ...page, tags: page.tags ?? catalog?.tags, facets: page.facets ?? catalog?.facets }
     if (opening) setupFilters(page)
     projectName.textContent = page.projectName
     if (!cursor) {
@@ -290,13 +445,13 @@ function search(delay = 0) {
   const generation = ++searchGeneration
   const filters = currentFilters()
   more.hidden = true
-  if (!ready) return
+  if (!ready || tagPending) return
   if (delay) searchTimer = setTimeout(() => void load(generation, filters), delay)
   else void load(generation, filters)
 }
 
 async function doSelection(action: 'copy' | 'download' | 'attach' | 'text') {
-  if (!catalog || !selected.size || actionPending) return
+  if (!catalog || !selected.size || actionPending || tagPending) return
   const generation = estimateGeneration
   const scope = catalog.scope
   const requested = selection()
@@ -346,7 +501,7 @@ form.addEventListener('submit', event => event.preventDefault())
 form.querySelector('input')?.addEventListener('input', () => search(250))
 for (const field of form.querySelectorAll('select')) field.addEventListener('change', () => search())
 more.addEventListener('click', event => {
-  if (event.isTrusted && !more.disabled && catalog?.nextCursor) {
+  if (event.isTrusted && !tagPending && !more.disabled && catalog?.nextCursor) {
     void load(++searchGeneration, currentFilters(), catalog.nextCursor)
   }
 })
@@ -361,7 +516,11 @@ selectionToggle.addEventListener('click', () => {
   selectedList.hidden = !expanded
 })
 close.addEventListener('click', closePanel)
-document.addEventListener('keydown', event => { if (event.key === 'Escape') closePanel() })
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return
+  if (!tagEditor.hidden) closeTags()
+  else closePanel()
+})
 renderSelection()
 window.addEventListener('message', event => {
   if (event.source !== window.parent) return

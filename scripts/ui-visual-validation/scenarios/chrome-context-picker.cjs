@@ -65,7 +65,7 @@ exports.run = async ctx => {
     };
     globalThis.chrome = {
       storage: {
-        local: { get: (_keys, reply) => reply({ floatingBarPosition: globalThis.pickerPosition, floatingBarVisible: globalThis.pickerBarVisible }) },
+        local: { get: (_keys, reply) => reply({ floatingBarPosition: globalThis.pickerPosition, floatingBarVisible: globalThis.pickerBarVisible, ...globalThis.barPreferences }), set: items => { globalThis.barPreferences = {...globalThis.barPreferences, ...items}; storageListener?.(items, "local"); } },
         onChanged: { addListener: listener => { storageListener = listener }, removeListener() {} }
       },
       runtime: {
@@ -77,6 +77,11 @@ exports.run = async ctx => {
           if (message.type === 'PICKER_REQUEST') {
             if (message.request.action === 'download') {
               fetch('/fixture-download', { method: 'POST' }).then(response => response.json()).then(reply);
+              return;
+            }
+            if (message.request.action === 'tag-membership') {
+              const { artifacts, tags } = ${JSON.stringify(fixture)};
+              reply?.({ ok: true, result: { artifact: artifacts[0], assigned: [tags[0].slug], tags } });
               return;
             }
 
@@ -119,14 +124,14 @@ exports.run = async ctx => {
 
   try {
     await ctx.window.loadURL('https://chatgpt.com/')
-    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill')?.shadowRoot.querySelector('button'))
+    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill')?.shadowRoot.querySelector('.context-trigger'))
     const click = ({ x, y, width, height }) => {
       const point = { x: Math.round(x + width / 2), y: Math.round(y + height / 2) }
       ctx.window.webContents.sendInputEvent({ type: 'mouseDown', button: 'left', clickCount: 1, ...point })
       ctx.window.webContents.sendInputEvent({ type: 'mouseUp', button: 'left', clickCount: 1, ...point })
     }
     const trigger = await ctx.evaluate(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
-      .querySelector('button').getBoundingClientRect().toJSON())
+      .querySelector('.context-trigger').getBoundingClientRect().toJSON())
     click(trigger)
     await ctx.waitFor(() => Boolean(document.querySelector('#code-awareness-activation-pill').shadowRoot.querySelector('iframe')))
     const evaluation = async expression => {
@@ -183,6 +188,11 @@ exports.run = async ctx => {
       "document.activeElement.id === 'selection-toggle' && document.querySelector('#selected').children.length === 8 && document.querySelector('#preview').textContent.includes('412 tokens') && !document.querySelector('#copy').disabled"
     ))
     await ctx.capture('context-picker-split')
+    await activatePanelControl('#results li:first-child .tag-trigger')
+    await until("document.querySelector('#tag-options [aria-pressed=true]') !== null")
+    ctx.check('Tag editor keeps the selected artifacts', await evaluation("document.querySelector('#selected').children.length === 8"))
+    await ctx.capture('context-picker-tags')
+    await activatePanelControl('#close-tags')
     for (const position of ['top-left', 'top-right', 'bottom-left', 'bottom-right']) {
       await ctx.evaluate(position => window.setPickerPosition(position), position)
       ctx.check(`Picker fits the ${position} corner`, await ctx.evaluate(position => {
@@ -211,17 +221,26 @@ exports.run = async ctx => {
     ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' })
     await ctx.waitFor(() => {
       const host = document.querySelector('#code-awareness-activation-pill')
-      return !host.shadowRoot.querySelector('iframe') && host.shadowRoot.activeElement === host.shadowRoot.querySelector('button')
+      return !host.shadowRoot.querySelector('iframe') && host.shadowRoot.activeElement === host.shadowRoot.querySelector('.context-trigger')
     })
     ctx.check('Escape closes picker and restores trigger focus', true)
     await ctx.window.loadURL('https://chat.deepseek.com/')
-    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill')?.shadowRoot.querySelectorAll('button').length === 2)
+    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill')?.shadowRoot.querySelectorAll('button').length === 3)
     ctx.check('Floating bar fits split viewport with both actions', await ctx.evaluate(() => {
       const bar = document.querySelector('#code-awareness-activation-pill')
       const bounds = bar.getBoundingClientRect()
       return bounds.left >= 0 && bounds.right <= innerWidth
     }))
     await ctx.capture('floating-bar-split')
+    const brand = () => ctx.evaluate(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
+      .querySelector('.brand').getBoundingClientRect().toJSON())
+    click(await brand())
+    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
+      .querySelector('.brand').getAttribute('aria-expanded') === 'false')
+    await ctx.capture('floating-bar-compact')
+    click(await brand())
+    await ctx.waitFor(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
+      .querySelector('.brand').getAttribute('aria-expanded') === 'true')
     const contextButton = await ctx.evaluate(() => document.querySelector('#code-awareness-activation-pill').shadowRoot
       .querySelector('.context-trigger').getBoundingClientRect().toJSON())
     click(contextButton)
@@ -251,6 +270,8 @@ exports.run = async ctx => {
           reply({ ok: true, result })
         }
       }, fixture)
+      await ctx.click('#bar-settings summary')
+      await ctx.waitFor(() => document.querySelectorAll('#floating-bar-sites fieldset').length === 5)
       await ctx.capture('context-picker-popup-settings')
       await ctx.click('#open-picker')
       await ctx.waitFor(() => document.querySelector('iframe')?.contentDocument?.querySelectorAll('#results input').length === 20)

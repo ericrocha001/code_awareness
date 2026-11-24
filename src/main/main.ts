@@ -222,6 +222,16 @@ const localAgentChannel = new LocalChannelHost(
       }, origin => {
         const enrollment = extensionManagerService.getEnrollment()
         return Boolean(enrollment?.enabled && !enrollment.revokedAt && enrollment.allowedOrigin === origin)
+      }, async (artifact, project, request) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return false
+        const change = request.action === 'tag-create' ? 'Criar e atribuir ' + request.name
+          : (request.operation === 'add' ? 'Atribuir ' : 'Remover ') + request.slug
+        const result = await dialog.showMessageBox(mainWindow, {
+          type: 'question', title: 'Contexto do Continuum', message: 'Confirmar alteração de tag?',
+          detail: change + '\nDocumento: ' + artifact + '\nProjeto: ' + project,
+          buttons: ['Cancelar', 'Confirmar'], cancelId: 0, defaultId: 0, noLink: true
+        })
+        return result.response === 1
       })
     )
   ],
