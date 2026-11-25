@@ -775,7 +775,7 @@ export class ChannelMcpAdapter {
     }
     if (ACADEMY_MCP_TOOLS.some((tool) => tool.name === name)) {
       if (!this.academy) return { content: [{ type: 'text', text: 'ACADEMY_UNAVAILABLE' }], isError: true }
-      const toolResult = await executeAcademyTool(this.academy, name, args)
+      const toolResult = await executeAcademyTool(this.academy, name, args, { authority })
       if (this.skillObserver && (name === 'list_academy_skills' || name === 'get_academy_skill' || name === 'get_academy_skill_history')) {
         this.observeAcademyToolResult(name, args, toolResult, invocationContext?.requestId, authority)
       }

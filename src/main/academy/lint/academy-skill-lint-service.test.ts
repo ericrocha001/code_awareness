@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../../continuum/agent-authority'
 import { getCanonicalTokenizer, type TokenizerPort } from '../../core/tokenizer'
 import { AcademyService } from '../academy-service'
 import { executeAcademyTool } from '../academy-mcp'
@@ -169,6 +170,150 @@ describe('AcademySkillLintService & U1 opt-in list/history', () => {
       const deletedFacts = service.lint.factsFor(created.id, 4)
       expect(deletedFacts.coverage).toBe('UNAVAILABLE')
       expect(deletedFacts.facts).toBeNull()
+    } finally {
+      await service.close()
+    }
+  })
+
+  it('supports U2 focal/catalog lint reports, authenticated review lifecycle, HIGH priority pinning, stagnation, and recurrence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-lint-u2-'))
+    roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    const principal = authenticatedAgentPrincipal('MCP', () => true)
+    const authority = authorizeArtifactAgent(principal, 'repo-1', () => true)
+    try {
+      const makePkg = (bodyExtra: string, refExtra = '') => ({
+        skillMd: [
+          '---',
+          'name: u2-skill',
+          'description: ' + 'Trigger activation keyword phrase '.repeat(35) + 'end',
+          '---',
+          '# Main',
+          '[broken](references/missing.md)',
+          bodyExtra
+        ].join('\n'),
+        artifacts: {
+          'scripts/old.sh': '#!/bin/sh\necho old\n',
+          ...(refExtra ? { 'references/other.md': refExtra } : {})
+        }
+      })
+
+      const s = await service.create({ package: makePkg('v1'), scope: 'GLOBAL', origin: 'MCP' })
+      // v2 edits SKILL.md without fixing metadata or broken ref, and adds a new script -> HIGH priority capability + unchanged transitions
+      await service.update({
+        skillId: s.id,
+        expectedVersion: 1,
+        package: {
+          ...makePkg('v2'),
+          artifacts: {
+            'scripts/old.sh': '#!/bin/sh\necho old\n',
+            'scripts/new.py': 'print(1)\n'
+          }
+        },
+        origin: 'MCP'
+      })
+      // v3 edits SKILL.md again without fixing metadata -> 2nd consecutive unchanged transition -> stagnationNotice
+      await service.update({
+        skillId: s.id,
+        expectedVersion: 2,
+        package: {
+          ...makePkg('v3'),
+          artifacts: {
+            'scripts/old.sh': '#!/bin/sh\necho old\n',
+            'scripts/new.py': 'print(1)\n'
+          }
+        },
+        origin: 'MCP'
+      })
+      // v4 edits ONLY unrelated reference file -> skipped for SKILL.md findings, series NOT broken
+      await service.update({
+        skillId: s.id,
+        expectedVersion: 3,
+        package: {
+          ...makePkg('v3', 'unrelated note'),
+          artifacts: {
+            'scripts/old.sh': '#!/bin/sh\necho old\n',
+            'scripts/new.py': 'print(1)\n',
+            'references/other.md': 'unrelated note'
+          }
+        },
+        origin: 'MCP'
+      })
+
+      // Focal report with limit 1 still keeps HIGH findings visible on page 0 when present (test on v2 where new.py was added)
+      const v2RepRes = await executeAcademyTool(service, 'get_academy_skill_lint', {
+        skillId: s.id,
+        version: 2,
+        limit: 1,
+        includeInventory: true
+      })
+      const v2Rep = JSON.parse(v2RepRes.content[0].text)
+      expect(v2Rep.findings[0].ruleId).toBe('CAPABILITY_SURFACE_CHANGE')
+      expect(v2Rep.findings[0].priority).toBe('HIGH')
+      expect(v2Rep.counts.total).toBeGreaterThan(1)
+      expect(v2Rep.inventory.scripts.map((x: { path: string }) => x.path)).toEqual([
+        'scripts/new.py',
+        'scripts/old.sh'
+      ])
+
+      // Focal report on v4 shows stagnationNotice for SKILL.md findings even after unrelated v4 edit
+      const v4RepRes = await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: s.id })
+      const v4Rep = JSON.parse(v4RepRes.content[0].text)
+      expect(v4Rep.lintHealth).toBe('REVIEW_OPEN')
+      expect(v4Rep.stagnationNotice).toBeDefined()
+      expect(v4Rep.stagnationNotice.message).toContain('Do not repeat the same strategy')
+
+      // Unauthenticated review is rejected
+      const metaFinding = v4Rep.findings.find((f: { ruleId: string }) => f.ruleId === 'METADATA_REVIEW')
+      const unauth = await executeAcademyTool(service, 'review_academy_skill_lint', {
+        skillId: s.id,
+        expectedVersion: 4,
+        findingId: metaFinding.findingId,
+        evidenceFingerprint: metaFinding.evidenceFingerprint,
+        action: 'RECORD',
+        rationale: 'Keep descriptive triggers'
+      })
+      expect(unauth.isError).toBe(true)
+      expect(JSON.parse(unauth.content[0].text).error).toBe('AUTHENTICATION_REQUIRED')
+
+      // Authenticated review records all open REVIEWs -> REVIEWED without changing skill version
+      for (const f of v4Rep.findings.filter((x: { category: string }) => x.category === 'REVIEW')) {
+        const rec = await executeAcademyTool(
+          service,
+          'review_academy_skill_lint',
+          {
+            skillId: s.id,
+            expectedVersion: 4,
+            findingId: f.findingId,
+            evidenceFingerprint: f.evidenceFingerprint,
+            action: 'RECORD',
+            rationale: 'Reviewed explicitly'
+          },
+          { authority }
+        )
+        expect(rec.isError).toBeUndefined()
+      }
+      expect(service.get(s.id).currentVersion).toBe(4)
+
+      const reviewedRep = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: s.id })).content[0].text
+      )
+      expect(reviewedRep.lintHealth).toBe('REVIEWED')
+
+      // Catalog mode analyzes page only and exposes catalogPressure
+      const catRes = await executeAcademyTool(service, 'get_academy_skill_lint', { limit: 10 })
+      const cat = JSON.parse(catRes.content[0].text)
+      expect(cat.pageAnalyzed).toBe(1)
+      expect(cat.items[0].lintHealth).toBe('REVIEWED')
+      expect(cat.catalogPressure.ruleId).toBe('CATALOG_PRESSURE')
+
+      // Recurrence cycle A -> B -> A detected (v2 -> v3 -> v2)
+      const v2Pkg = service.history(s.id, { version: 2 }).package
+      await service.update({ skillId: s.id, expectedVersion: 4, package: v2Pkg, origin: 'MCP' })
+      const v5Rep = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: s.id })).content[0].text
+      )
+      expect(v5Rep.recurrence).toMatchObject({ state: 'CYCLE_DETECTED', matchedVersion: 2 })
     } finally {
       await service.close()
     }

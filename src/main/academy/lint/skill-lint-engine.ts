@@ -432,7 +432,7 @@ export function compareMagnitude(
     return { delta: 'NOT_COMPARABLE', improved: false, worsened: false, dimensions }
   }
   if (anyIncreased && anyReduced) {
-    return { delta: 'INCREASED', improved: false, worsened: true, dimensions }
+    return { delta: 'NOT_COMPARABLE', improved: false, worsened: false, dimensions }
   }
   if (anyIncreased) {
     return { delta: 'INCREASED', improved: false, worsened: true, dimensions }
