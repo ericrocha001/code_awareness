@@ -383,9 +383,12 @@ export class ChannelMcpAdapter {
     const isHistoryMetadataOnly =
       name === 'get_academy_skill_history' &&
       (argObj?.metadataOnly === true || !(parsed?.package && typeof parsed.package === 'object'))
+    const isGetManifestOrOutline =
+      name === 'get_academy_skill' &&
+      (argObj?.view === 'manifest' || argObj?.view === 'outline')
     const observationClass = isErr
       ? 'ATTEMPT_FAILED_OR_REFUSED'
-      : name === 'list_academy_skills' || isHistoryMetadataOnly
+      : name === 'list_academy_skills' || isHistoryMetadataOnly || isGetManifestOrOutline
         ? 'DISCOVERED_MANIFEST_FETCHED'
         : 'CONTENT_DELIVERED'
     try {

@@ -396,10 +396,42 @@ export async function executeAcademyTool(
       case 'create_academy_skill': {
         if (values.keepPrivate !== undefined && typeof values.keepPrivate !== 'boolean') throw new Error('INVALID_ARGUMENT')
         const created = await service.saveNewSkill({ package: pkg(values.package), scope: enumValue(values.scope, ['GLOBAL', 'PROJECT'], 'scope') as AcademySkillScope, projectIds: strings(values.projectIds), keepPrivate: values.keepPrivate, expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined, origin: 'MCP' })
-        result = 'id' in created ? { ...created, publication: service.describePublication(created) } : created
+        if ('id' in created) {
+          const lint = safeInFlowLint(service, null, {
+            skillId: created.id,
+            version: created.currentVersion,
+            packageHash: created.current.packageHash
+          })
+          result = { ...created, publication: service.describePublication(created), lint }
+        } else {
+          result = created
+        }
         break
       }
-      case 'update_academy_skill': result = await service.saveSkill({ skillId: string(values.skillId, 'skillId'), expectedVersion: integer(values.expectedVersion, 'expectedVersion'), package: pkg(values.package), scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined, projectIds: values.projectIds === undefined ? undefined : strings(values.projectIds), expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined, origin: 'MCP' }); break
+      case 'update_academy_skill': {
+        const skillId = string(values.skillId, 'skillId')
+        const base = captureBaseMeta(service, skillId)
+        const updated = await service.saveSkill({
+          skillId,
+          expectedVersion: integer(values.expectedVersion, 'expectedVersion'),
+          package: pkg(values.package),
+          scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined,
+          projectIds: values.projectIds === undefined ? undefined : strings(values.projectIds),
+          expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined,
+          origin: 'MCP'
+        })
+        if ('id' in updated) {
+          const lint = safeInFlowLint(service, base, {
+            skillId: updated.id,
+            version: updated.currentVersion,
+            packageHash: updated.current.packageHash
+          })
+          result = { ...updated, lint }
+        } else {
+          result = updated
+        }
+        break
+      }
       case 'archive_academy_skill': result = await service.archive(string(values.skillId, 'skillId'), integer(values.expectedVersion, 'expectedVersion')); break
       case 'restore_academy_skill': result = await service.restore(string(values.skillId, 'skillId'), integer(values.expectedVersion, 'expectedVersion')); break
       case 'list_academy_conflicts': result = service.store.conflictSummaries(); break
@@ -525,7 +557,11 @@ export async function executeAcademyTool(
             prep.editResult.validationError?.message ?? 'Invalid candidate package'
           )
         }
-        result = await service.saveSkill(
+        const base = {
+          version: prep.skill.currentVersion,
+          packageHash: prep.skill.current.packageHash
+        }
+        const applied = await service.saveSkill(
           {
             skillId,
             expectedVersion,
@@ -534,6 +570,16 @@ export async function executeAcademyTool(
           },
           'RECEIPT'
         )
+        if ('skillId' in applied && applied.state === 'PERSISTED') {
+          const lint = safeInFlowLint(service, base, {
+            skillId: applied.skillId,
+            version: applied.version,
+            packageHash: applied.packageHash
+          })
+          result = { ...applied, lint }
+        } else {
+          result = applied
+        }
         break
       }
       default: throw new Error('METHOD_NOT_FOUND')
@@ -563,4 +609,38 @@ function pkg(value: unknown): AcademyPackage {
   const object = objectArgs(value)
   if (typeof object.skillMd !== 'string' || !object.artifacts || typeof object.artifacts !== 'object' || Array.isArray(object.artifacts) || Object.values(object.artifacts).some((item) => typeof item !== 'string')) throw new Error('INVALID_PACKAGE')
   return { skillMd: object.skillMd, artifacts: object.artifacts as Record<string, string> }
+}
+
+function captureBaseMeta(service: AcademyService, skillId: string): { version: number; packageHash: string } | null {
+  try {
+    const hist = service.store.history(skillId, { metadataOnly: true })
+    const summary = service.store.list().find(item => item.id === skillId)
+    const meta = summary ? hist.find(item => item.version === summary.currentVersion) : hist[0]
+    return meta ? { version: meta.version, packageHash: meta.packageHash } : null
+  } catch {
+    return null
+  }
+}
+
+function safeInFlowLint(
+  service: AcademyService,
+  base: { version: number; packageHash: string } | null,
+  persisted: { skillId: string; version: number; packageHash: string }
+) {
+  try {
+    return service.lint.inFlow(base, persisted)
+  } catch {
+    return {
+      identity: {
+        skillId: persisted.skillId,
+        version: persisted.version,
+        packageHash: persisted.packageHash,
+        ruleSetVersion: service.lint.ruleSetVersion,
+        tokenizerId: service.lint.tokenizerId
+      },
+      base,
+      coverage: 'UNAVAILABLE',
+      reason: 'ANALYSIS_FAILED'
+    }
+  }
 }

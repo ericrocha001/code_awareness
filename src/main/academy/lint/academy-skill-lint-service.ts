@@ -701,7 +701,7 @@ export class AcademySkillLintService {
       const meta: Pick<AcademySkillVersionMetadata, 'version' | 'packageHash' | 'contentState'> = {
         version: skill.currentVersion,
         packageHash: hashInfo?.packageHash ?? '',
-        contentState: hashInfo?.contentState ?? 'PRESENT'
+        contentState: hashInfo?.contentState === 'DELETED' ? 'DELETED' : undefined
       }
       const res = this.factsForVersionMeta(skill.id, meta, memo)
       if (!res.facts) {
@@ -1080,6 +1080,151 @@ export class AcademySkillLintService {
         ...(candidateProjected.capabilityNotice
           ? { capabilityNotice: candidateProjected.capabilityNotice }
           : {})
+      }
+    }
+  }
+
+  inFlow(
+    base: { version: number; packageHash: string } | null,
+    persisted: { skillId: string; version: number; packageHash: string }
+  ) {
+    const baseIdentity = {
+      skillId: persisted.skillId,
+      version: persisted.version,
+      packageHash: persisted.packageHash,
+      ruleSetVersion: this.ruleSetVersion,
+      tokenizerId: this.tokenizer.id,
+      lineConvention: LINE_CONVENTION
+    }
+
+    try {
+      if (base && persisted.version === base.version && persisted.packageHash === base.packageHash) {
+        return {
+          state: 'NO_CHANGE' as const,
+          identity: baseIdentity,
+          base,
+          coverage: 'COMPLETE' as LintCoverage,
+          recurrence: {
+            state: 'NO_CHANGE' as const,
+            matchedVersion: base.version,
+            packageHash: persisted.packageHash,
+            windowVersions: 0
+          },
+          next: {
+            tool: 'get_academy_skill_lint' as const,
+            args: { skillId: persisted.skillId, version: persisted.version }
+          }
+        }
+      }
+
+      const memo = new Map<string, PackageFacts>()
+      const skill = this.store.get(persisted.skillId)
+      const historyMeta = this.store.history(persisted.skillId, { metadataOnly: true })
+      const currRes = this.factsFor(persisted.skillId, persisted.version, memo)
+      if (!currRes.facts) {
+        return {
+          identity: baseIdentity,
+          base,
+          coverage: 'UNAVAILABLE' as LintCoverage,
+          reason: 'ANALYSIS_FAILED' as const
+        }
+      }
+
+      const baseMeta = base ? historyMeta.find(m => m.version === base.version) ?? null : null
+      const baseRes = baseMeta ? this.factsForVersionMeta(persisted.skillId, baseMeta, memo) : null
+      const activeCatalog = this.store.list('ACTIVE')
+      const reviews = this.store.lint.listActiveReviews(persisted.skillId)
+
+      const projected = projectReportFindings(currRes.facts, {
+        targetSkill: skill,
+        activeCatalog,
+        baseFacts: baseRes?.facts ?? null,
+        reviews
+      })
+
+      const baseProjectedFindings = baseRes?.facts
+        ? projectReportFindings(baseRes.facts, {
+            targetSkill: skill,
+            activeCatalog,
+            reviews
+          }).findings
+        : null
+
+      const comparison = compareReports(
+        baseRes?.facts ?? null,
+        baseProjectedFindings,
+        currRes.facts,
+        projected.findings
+      )
+
+      const targetIdx = historyMeta.findIndex(m => m.version === persisted.version)
+      const olderMeta = targetIdx >= 0 ? historyMeta.slice(targetIdx + 1) : []
+      const stagnation = this.computePersistenceAndStagnation(
+        persisted.skillId,
+        persisted.version,
+        currRes.facts,
+        projected.findings,
+        baseMeta ? { version: baseMeta.version, facts: baseRes?.facts ?? null } : null,
+        olderMeta,
+        memo
+      )
+
+      const recurrence = this.computeRecurrence(
+        persisted.version,
+        persisted.packageHash,
+        baseMeta?.version ?? null,
+        baseMeta?.packageHash ?? null,
+        olderMeta
+      )
+
+      const compact = (f: SkillLintFinding) => ({
+        findingId: f.findingId,
+        ruleId: f.ruleId,
+        category: f.category,
+        priority: f.priority,
+        path: f.path,
+        ...(f.range ? { range: f.range } : {}),
+        ...(f.selector ? { selector: f.selector } : {}),
+        action: f.action,
+        ...(f.magnitude ? { magnitude: f.magnitude } : {}),
+        evidenceFingerprint: f.evidenceFingerprint,
+        ...(f.state ? { state: f.state } : {}),
+        ...(f.improved !== undefined ? { improved: f.improved } : {}),
+        fact: f.fact
+      })
+
+      return {
+        identity: baseIdentity,
+        base,
+        coverage: currRes.coverage,
+        lintHealth: projected.lintHealth,
+        counts: projected.counts,
+        delta: {
+          comparable: comparison.comparable,
+          ...(comparison.reason ? { reason: comparison.reason } : {}),
+          introduced: comparison.introduced.map(compact),
+          worsened: comparison.worsened.map(compact),
+          resolved: comparison.resolved.map(compact),
+          persistent: {
+            count: comparison.persistent.length,
+            top: comparison.persistent.slice(0, 5).map(compact)
+          }
+        },
+        measuresDelta: comparison.measuresDelta,
+        ...(stagnation.stagnationNotice ? { stagnationNotice: stagnation.stagnationNotice } : {}),
+        recurrence,
+        ...(projected.capabilityNotice ? { capabilityNotice: projected.capabilityNotice } : {}),
+        next: {
+          tool: 'get_academy_skill_lint' as const,
+          args: { skillId: persisted.skillId, version: persisted.version }
+        }
+      }
+    } catch {
+      return {
+        identity: baseIdentity,
+        base,
+        coverage: 'UNAVAILABLE' as LintCoverage,
+        reason: 'ANALYSIS_FAILED' as const
       }
     }
   }
