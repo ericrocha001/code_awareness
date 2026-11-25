@@ -441,14 +441,18 @@ export class ExtensionBackgroundRouter {
       const getContexts = this.chromeApi?.runtime?.getContexts
       const unauthorized = { ok: false, error: { code: 'PICKER_SENDER_NOT_AUTHORIZED', message: 'PICKER_SENDER_NOT_AUTHORIZED' } }
       if (!this.runtimeId || sender.id !== this.runtimeId || sender.url !== url ||
-        sender.origin !== `chrome-extension://${this.runtimeId}` || !sender.documentId ||
+        sender.origin !== `chrome-extension://${this.runtimeId}` ||
         sender.tab || (sender.frameId !== undefined && sender.frameId !== 0) ||
         !getContexts || !isPopupPickerRequest(request)) return unauthorized
       const contexts = await getContexts.call(this.chromeApi?.runtime, {
-        contextTypes: ['POPUP'], documentIds: [sender.documentId], documentUrls: [url]
+        contextTypes: ['POPUP'],
+        documentUrls: [url],
+        ...(sender.documentId === undefined ? {} : { documentIds: [sender.documentId] })
       }).catch(() => [])
-      if (!contexts.some(context => context.contextType === 'POPUP' &&
-        context.documentId === sender.documentId && context.documentUrl === url)) return unauthorized
+      const popups = contexts.filter(context => context.contextType === 'POPUP' &&
+        context.documentUrl === url && context.frameId === 0 && context.tabId === -1)
+      if (popups.length !== 1 || !popups[0].documentId ||
+        (sender.documentId !== undefined && popups[0].documentId !== sender.documentId)) return unauthorized
       return this.sendNative({ id: this.nextId(), action: 'context_picker', surface: 'extension-ui', request })
     }
 
