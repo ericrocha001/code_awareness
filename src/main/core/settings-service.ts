@@ -143,12 +143,17 @@ export class SettingsService {
 
   saveSettings(settings: AppSettings): void {
     const current = this.loadSettings()
-    this.writeSettings({ ...settings, lastActiveRepositoryId: current.lastActiveRepositoryId, cliAutonomy: current.cliAutonomy })
+    this.writeSettings({ ...settings, lastActiveRepositoryId: current.lastActiveRepositoryId, cliAutonomy: current.cliAutonomy, gitDeliveryAutonomy: current.gitDeliveryAutonomy })
   }
 
   setLocalCliTrust(repositoryId: string, grant: import('../../shared/types/cli-policy-types').CliTrustGrant): void {
     const settings = this.loadSettings()
     this.writeSettings({ ...settings, cliAutonomy: { ...settings.cliAutonomy, [repositoryId]: grant } })
+  }
+
+  setLocalGitDeliveryTrust(repositoryId: string, grant: import('../../shared/types/git-delivery-policy-types').GitDeliveryTrustGrant): void {
+    const settings = this.loadSettings()
+    this.writeSettings({ ...settings, gitDeliveryAutonomy: { ...settings.gitDeliveryAutonomy, [repositoryId]: grant } })
   }
 
   rememberActiveRepository(repositoryId: string): void {

@@ -722,7 +722,17 @@ export class ChannelMcpAdapter {
         deliveryContextError: authority?.deliveryContextError,
         defaultWorktreeId: authority?.worktreeId,
         isActive: this.githubContext.githubPrIsActive ?? (() => false),
-        inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined
+        inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined,
+        ...(invocationContext?.deadlineAtMs !== undefined ? { deadlineAtMs: invocationContext.deadlineAtMs } : {}),
+        ...(authority ? {
+          authority: {
+            repositoryId: authority.repositoryId,
+            transport: authority.principal.transport,
+            ...(authority.worktreeId ? { worktreeId: authority.worktreeId } : {}),
+            ...(authority.deliveryContext ? { deliveryContext: authority.deliveryContext } : {}),
+            isActive: () => authority.isActive() && authority.principal.isActive()
+          }
+        } : {})
       })
     }
     if (name === 'get_visual_artifact' || name === 'publish_visual_artifact') {
@@ -753,7 +763,8 @@ export class ChannelMcpAdapter {
           return anchor
         },
         authority,
-        worktreeId => this.prepareDelivery(authority, undefined, worktreeId, { optional: true })
+        worktreeId => this.prepareDelivery(authority, undefined, worktreeId, { optional: true }),
+        invocationContext?.deadlineAtMs
       )
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
     }

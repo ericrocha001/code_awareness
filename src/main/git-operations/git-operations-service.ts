@@ -29,6 +29,7 @@ import type { GitWorktreeCommitsQuery, GitCommitWorktreesQuery } from '../../sha
 import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, reconcileAutonomousWorktreeOwnership, withWorktreeTransaction, type WorktreeApprovalPort, type WorktreeIntent, type WorktreeObservation, type WorktreeScope, type WorktreeSnapshot } from './git-worktree-ownership'
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
+import type { GitDeliveryPolicy } from '../../shared/types/git-delivery-policy-types'
 import type { CapturedText, WorktreeStructureCapture, WorktreeStructureRequest } from './git-worktree-capture'
 import type { GitDecoration, GitHistoryPage, GitCommitDetail, GitCommitFile, GitPatch, GitOperationalResult, GitMutationRequest, GitCheckoutSynchronization, GitManagementState } from '../../shared/types/git-management-types'
 
@@ -53,10 +54,21 @@ export interface GitChange {
 }
 interface ScopedWorktreeRequest {
   worktreeId: string
-  leaseId: string
-  leaseCredential: string
+  leaseId?: string
+  leaseCredential?: string
   operationId: string
   snapshot: WorktreeSnapshot
+}
+export interface GitWorktreeAuthorityContext {
+  sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
+  deadlineAtMs?: number
+  authority?: {
+    repositoryId: string
+    transport: string
+    worktreeId?: string
+    deliveryContext?: import('../../shared/types/delivery-context-types').DeliveryContextRequest
+    isActive: () => boolean
+  }
 }
 export interface WorktreeValidationPort {
   inspectIntegrationProof?(id: string, commit: string, profileId: string, proofId: string): Promise<import('../../shared/types/worktree-integration-evidence-types').IntegrationEvidence['proofs'][number]>
@@ -313,21 +325,35 @@ export class GitOperationsService {
   bindNativeHookPreparation(prepare: (record: WorktreeRecord, registry: GitWorktreeRegistry) => Promise<unknown>): void {
     this.nativeHookPreparation = prepare
   }
+  private gitDeliveryPolicy?: (targetPath: string) => GitDeliveryPolicy
+  bindGitDeliveryPolicy(policy: (targetPath: string) => GitDeliveryPolicy): void {
+    this.gitDeliveryPolicy = policy
+  }
   private pendingCorrelation: Promise<unknown> = Promise.resolve()
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport, identity?: WorktreeIdentity, private readonly readOnlyWorktree = false, approval?: WorktreeApprovalPort, private readonly transactionAlreadyHeld = false, private readonly worktreeValidation?: WorktreeValidationPort) {
     this.worktreeRepositoryId = identity?.repositoryId
     this.coordinationIdentity = identity
     if (identity) this.worktrees = new GitWorktreeRegistry(repoRoot, git, identity)
-    if (identity && approval) this.ownership = new GitWorktreeOwnership(async id => {
-      const { record, service } = await this.selectWorktree(id)
-      const state = await service.getState()
-      for (const change of await service.getChanges()) service.paths([change.path])
-      const contentRevision = await this.git.getWorktreeRevision(record.path)
-      if (state.worktreeRevision !== (await service.getState()).worktreeRevision) fail('GIT_STATE_CHANGED')
-      return { repositoryId: identity.repositoryId, worktreeId: id, generation: record.generation, path: record.path,
-        commonDirectory: realpathSync(await this.git.getCommonDirectory(record.path)), administrativeDirectory: realpathSync(await this.git.getWorktreeDirectory(record.path)),
-        snapshot: { branch: state.branch, head: state.head, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision, operation: state.operation }, contentRevision }
-    }, approval)
+    if (identity && approval) this.ownership = new GitWorktreeOwnership(id => this.observeWorktree(id), approval)
+  }
+
+  private async observeWorktree(id: string): Promise<WorktreeObservation> {
+    if (!this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    const { record, service } = await this.selectWorktree(id)
+    const state = await service.getState()
+    for (const change of await service.getChanges()) service.paths([change.path])
+    const contentRevision = await this.git.getWorktreeRevision(record.path)
+    if (state.worktreeRevision !== (await service.getState()).worktreeRevision) fail('GIT_STATE_CHANGED')
+    return {
+      repositoryId: this.worktreeRepositoryId,
+      worktreeId: id,
+      generation: record.generation,
+      path: record.path,
+      commonDirectory: realpathSync(await this.git.getCommonDirectory(record.path)),
+      administrativeDirectory: realpathSync(await this.git.getWorktreeDirectory(record.path)),
+      snapshot: { branch: state.branch, head: state.head, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision, operation: state.operation },
+      contentRevision
+    }
   }
 
   async handoffWorktree(request: { action: 'REQUEST' | 'RECOVER' | 'ACCEPT' | 'RELEASE'; worktreeId?: string; snapshot?: WorktreeSnapshot; scope?: WorktreeScope; durationSeconds?: number; requestId?: string; requestCredential?: string; leaseId?: string; leaseCredential?: string }) {
@@ -344,63 +370,70 @@ export class GitOperationsService {
     } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_APPROVAL_FAILED') }
   }
 
-  async mutateWorktree(request: { action: 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH'; worktreeId: string; leaseId: string; leaseCredential: string; operationId: string; snapshot: WorktreeSnapshot; paths?: string[]; message?: string; branch?: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<McpToolResult> {
-    if (!this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
-    const { leaseCredential, operationId, ...fingerprint } = request
-    try {
-      const selectedForReceipt = await this.selectWorktree(request.worktreeId)
-      const receiptArgs = { ...fingerprint, credentialHash: ownershipDigest(leaseCredential), repositoryId: this.worktreeRepositoryId, generation: selectedForReceipt.record.generation, commonDirectory: realpathSync(await this.git.getCommonDirectory(selectedForReceipt.record.path)) }
-      const receipts = new GitOperationReceipts(this.repoRoot, this.git)
-      if (await this.git.readOperationReceipt(this.repoRoot, operationId)) return receipts.execute(operationId, 'mutate_worktree', receiptArgs, async () => { throw new Error('RECEIPT_REPLAY_REQUIRED') }, prepareDelivery)
-      const out = await this.ownership!.execute(request.worktreeId, request.leaseId, leaseCredential, request.action, async (observed, scope, assertCurrent) => {
-        if (this.worktreeValidation && new GitWorktreeLifecycle(observed.commonDirectory).get(selectedForReceipt.record) && await this.worktreeValidation.busy(request.worktreeId)) fail('WORKTREE_VALIDATION_BUSY')
-        return receipts.execute(operationId, 'mutate_worktree', receiptArgs, async () => {
-          try {
-            if (ownershipDigest(request.snapshot) !== ownershipDigest(observed.snapshot)) fail('GIT_STATE_CHANGED')
-            const selected = await this.selectWorktree(request.worktreeId)
-            const service = new GitOperationsService(selected.record.path, this.git, this.transport, undefined, false, undefined, true)
-            let commitInfo: { sha: string; parent: string | null } | undefined
-            if (request.action === 'STAGE' || request.action === 'UNSTAGE') {
-              const paths = service.paths(request.paths!)
-              if (paths.some(path => !scope.paths.includes(path))) fail('WORKTREE_SCOPE_NOT_GRANTED')
-              await assertCurrent()
-              await service.stage({ mode: request.action, paths, expectedIndexRevision: observed.snapshot.indexRevision, expectedWorktreeRevision: observed.contentRevision })
-            } else if (request.action === 'COMMIT') {
-              if (!observed.snapshot.branch) fail('WORKTREE_BRANCH_REQUIRED')
-              if ((await service.getChanges('STAGED')).some(change => !scope.paths.includes(change.path) || change.previousPath && !scope.paths.includes(change.previousPath))) fail('WORKTREE_SCOPE_NOT_GRANTED')
-              await assertCurrent()
-              const result = await service.commit({ message: request.message!, expectedHead: observed.snapshot.head, expectedIndexRevision: observed.snapshot.indexRevision })
-              commitInfo = { sha: result.sha, parent: result.parent }
-              if (this.commitObservation) void this.commitObservation({ worktreeId: selected.record.worktreeId, generation: selected.record.generation }, result.sha).catch(() => {})
-            } else {
-              if (!scope.branches.includes(request.branch!)) fail('WORKTREE_SCOPE_NOT_GRANTED')
-              if ((await this.worktrees!.discover()).worktrees.some(w => w.branch === request.branch)) fail('WORKTREE_BRANCH_OCCUPIED')
-              const branch = await service.branch(request.branch!)
-              if ((await this.git.listBranches(selected.record.path)).split('\n').some(existing => existing.split('\0')[0] === branch)) fail('BRANCH_ALREADY_EXISTS')
-              await assertCurrent()
-              const createdAt = new Date().toISOString()
-              await this.git.createAndSwitchBranch(selected.record.path, branch)
-              await recordBranchCreation(selected.record.path, this.git, `refs/heads/${branch}`, createdAt)
-            }
-            const current = await this.selectWorktree(request.worktreeId)
-            return { content: [{ type: 'text', text: JSON.stringify({ worktreeId: request.worktreeId, ...await current.service.getState(), ...(commitInfo ?? {}) }) }] }
-          } catch (error) {
-            return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error ? error.message : 'GIT_OPERATION_FAILED' }) }], isError: true }
-          }
-        }, request.action === 'COMMIT' ? prepareDelivery : undefined)
-      })
-      if (!out.isError && prepareDelivery && request.action === 'COMMIT' && this.coordinationIdentity?.repositoryId) {
-        try { this.deliveryObservation?.(this.coordinationIdentity.repositoryId) } catch {}
+  async mutateWorktree(request: { action: 'STAGE' | 'UNSTAGE' | 'COMMIT' | 'CREATE_BRANCH'; worktreeId: string; leaseId?: string; leaseCredential?: string; operationId: string; snapshot: WorktreeSnapshot; paths?: string[]; message?: string; branch?: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: GitWorktreeAuthorityContext): Promise<McpToolResult> {
+    if (request.action === 'CREATE_BRANCH' && ['main', 'master'].includes(request.branch!)) fail('WORKTREE_BRANCH_PROTECTED')
+    return this.scopedWorktreeMutation('mutate_worktree', request, request.action, async (observed, scope, assertCurrent) => {
+      const selected = await this.selectWorktree(request.worktreeId)
+      const service = new GitOperationsService(selected.record.path, this.git, this.transport, undefined, false, undefined, true)
+      let commitInfo: { sha: string; parent: string | null } | undefined
+      if (request.action === 'STAGE' || request.action === 'UNSTAGE') {
+        const paths = service.paths(request.paths!)
+        if (paths.some(path => !scope.paths.includes(path))) fail('WORKTREE_SCOPE_NOT_GRANTED')
+        await assertCurrent()
+        await service.stage({ mode: request.action, paths, expectedIndexRevision: observed.snapshot.indexRevision, expectedWorktreeRevision: observed.contentRevision })
+      } else if (request.action === 'COMMIT') {
+        if (!observed.snapshot.branch) fail('WORKTREE_BRANCH_REQUIRED')
+        if ((await service.getChanges('STAGED')).some(change => !scope.paths.includes(change.path) || change.previousPath && !scope.paths.includes(change.previousPath))) fail('WORKTREE_SCOPE_NOT_GRANTED')
+        await assertCurrent()
+        const result = await service.commit({ message: request.message!, expectedHead: observed.snapshot.head, expectedIndexRevision: observed.snapshot.indexRevision })
+        commitInfo = { sha: result.sha, parent: result.parent }
+        if (this.commitObservation) void this.commitObservation({ worktreeId: selected.record.worktreeId, generation: selected.record.generation }, result.sha).catch(() => {})
+      } else {
+        if (!scope.branches.includes(request.branch!)) fail('WORKTREE_SCOPE_NOT_GRANTED')
+        if ((await this.worktrees!.discover()).worktrees.some(w => w.branch === request.branch)) fail('WORKTREE_BRANCH_OCCUPIED')
+        const branch = await service.branch(request.branch!)
+        if ((await this.git.listBranches(selected.record.path)).split('\n').some(existing => existing.split('\0')[0] === branch)) fail('BRANCH_ALREADY_EXISTS')
+        await assertCurrent()
+        const createdAt = new Date().toISOString()
+        await this.git.createAndSwitchBranch(selected.record.path, branch)
+        await recordBranchCreation(selected.record.path, this.git, `refs/heads/${branch}`, createdAt)
       }
-      return out
-    } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED') }
+      const current = await this.selectWorktree(request.worktreeId)
+      return { worktreeId: request.worktreeId, ...await current.service.getState(), ...(commitInfo ?? {}) }
+    }, request.action === 'COMMIT' ? prepareDelivery : undefined, options, async observed => {
+      const selected = await this.selectWorktree(request.worktreeId)
+      if (request.action === 'STAGE' || request.action === 'UNSTAGE') {
+        return { operations: [request.action], paths: selected.service.paths(request.paths!), branches: [] }
+      }
+      if (request.action === 'COMMIT') {
+        const staged = await selected.service.getChanges('STAGED')
+        const paths = [...new Set(staged.flatMap(c => c.previousPath ? [c.path, c.previousPath] : [c.path]))]
+        return { operations: ['COMMIT'], paths, branches: observed.snapshot.branch ? [observed.snapshot.branch] : [] }
+      }
+      return { operations: ['CREATE_BRANCH'], paths: [], branches: [request.branch!] }
+    })
   }
 
-  private async scopedWorktreeMutation<T extends ScopedWorktreeRequest>(operation: string, request: T, intent: WorktreeIntent,
+  private async scopedWorktreeMutation<T extends ScopedWorktreeRequest>(
+    operation: string,
+    request: T,
+    intent: WorktreeIntent,
     effect: (observation: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>) => Promise<unknown>,
-    prepareDelivery?: () => Promise<DeliveryAnchor | undefined>): Promise<McpToolResult> {
-    if (!this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
-    const { leaseCredential, operationId, ...values } = request
+    prepareDelivery?: () => Promise<DeliveryAnchor | undefined>,
+    options?: GitWorktreeAuthorityContext,
+    buildAutonomousScope?: (observed: WorktreeObservation, policy: GitDeliveryPolicy) => Promise<WorktreeScope> | WorktreeScope
+  ): Promise<McpToolResult> {
+    const hasLease = request.leaseId !== undefined || request.leaseCredential !== undefined
+    if (hasLease && (!request.leaseId || !request.leaseCredential)) fail('INVALID_ARGUMENT')
+    if (hasLease && !this.ownership) fail('WORKTREE_LOCAL_APPROVAL_UNAVAILABLE')
+    if (!hasLease) {
+      const eligible = intent === 'CREATE_WORKTREE' || intent === 'CREATE_BRANCH' || intent === 'STAGE' || intent === 'UNSTAGE' || intent === 'COMMIT' || intent === 'PUSH' || operation === 'start_worktree_validation'
+      if (!eligible || !buildAutonomousScope) fail('WORKTREE_OWNERSHIP_REQUIRED')
+      if (options?.deadlineAtMs !== undefined && Date.now() >= options.deadlineAtMs) fail('REQUEST_TIMEOUT')
+      if (!options?.authority || !options.authority.isActive()) fail('AGENT_UNAUTHORIZED')
+      if (!this.worktreeRepositoryId || options.authority.repositoryId !== this.worktreeRepositoryId) fail('REPOSITORY_MISMATCH')
+    }
+    const { leaseId, leaseCredential, operationId, ...values } = request
     const existing = await this.git.readOperationReceipt(this.repoRoot, operationId)
     const common = realpathSync(await this.git.getCommonDirectory(this.repoRoot))
     const discovery = await this.worktrees!.discover()
@@ -408,11 +441,27 @@ export class GitOperationsService {
     if (closed && closed.repositoryId !== this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_MISMATCH')
     const record = discovery.worktrees.find(w => w.worktreeId === request.worktreeId) ?? closed
     if (!record) fail('WORKTREE_STALE')
-    const args = { ...values, credentialHash: ownershipDigest(leaseCredential), repositoryId: this.worktreeRepositoryId, generation: record.generation, commonDirectory: common }
+    const policy = !hasLease ? this.gitDeliveryPolicy?.(record.path) : undefined
+    if (!hasLease && (!policy || policy.mode !== 'AUTONOMOUS')) fail('WORKTREE_OWNERSHIP_REQUIRED')
+    const authorityScope = !hasLease && options?.authority ? {
+      transport: options.authority.transport,
+      repositoryId: options.authority.repositoryId,
+      worktreeId: options.authority.worktreeId ?? null,
+      deliveryContext: options.authority.deliveryContext ?? null,
+      policyRevision: policy!.revision
+    } : null
+    const args = {
+      ...values,
+      mode: hasLease ? 'LEASE' : 'AUTONOMOUS',
+      ...(hasLease ? { credentialHash: ownershipDigest(leaseCredential!) } : { authorityScope }),
+      repositoryId: this.worktreeRepositoryId,
+      generation: record.generation,
+      commonDirectory: common
+    }
     const receipts = new GitOperationReceipts(this.repoRoot, this.git)
-    if (existing) return receipts.execute(operationId, operation, args, async () => { throw new Error('RECEIPT_REPLAY_REQUIRED') }, prepareDelivery)
+    if (existing) return receipts.execute(operationId, operation, args, async () => { throw new Error('RECEIPT_REPLAY_REQUIRED') }, prepareDelivery, options)
     try {
-      const out = await this.ownership!.execute(request.worktreeId, request.leaseId, leaseCredential, intent, async (observed, scope, assertCurrent) => receipts.execute(operationId, operation, args, async () => {
+      const runEffect = async (observed: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>) => receipts.execute(operationId, operation, args, async () => {
         try {
           if (ownershipDigest(request.snapshot) !== ownershipDigest(observed.snapshot)) fail('GIT_STATE_CHANGED')
           if (operation !== 'start_worktree_validation' && this.worktreeValidation && new GitWorktreeLifecycle(observed.commonDirectory).get(record) && await this.worktreeValidation.busy(request.worktreeId)) fail('WORKTREE_VALIDATION_BUSY')
@@ -421,8 +470,58 @@ export class GitOperationsService {
         } catch (error) {
           return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED' }) }], isError: true }
         }
-      }, prepareDelivery))
-      if (!out.isError && prepareDelivery && this.coordinationIdentity?.repositoryId) {
+      }, prepareDelivery, options)
+
+      const out = hasLease
+        ? await this.ownership!.execute(request.worktreeId, leaseId!, leaseCredential!, intent, runEffect)
+        : await withWorktreeTransaction(common, realpathSync(await this.git.getWorktreeDirectory(record.path)), async () => {
+            const assertAutonomous = () => {
+              if (options?.deadlineAtMs !== undefined && Date.now() >= options.deadlineAtMs) fail('REQUEST_TIMEOUT')
+              if (!options?.authority?.isActive()) fail('AGENT_UNAUTHORIZED')
+              if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+              const currentPolicy = this.gitDeliveryPolicy?.(record.path)
+              if (!currentPolicy || currentPolicy.mode !== 'AUTONOMOUS') fail('WORKTREE_OWNERSHIP_REQUIRED')
+              return currentPolicy
+            }
+            const currentPolicy = assertAutonomous()
+            if (intent !== 'CREATE_WORKTREE') {
+              if (this.worktrees!.isReference(request.worktreeId)) fail('WORKTREE_PRIMARY_PROTECTED')
+              const managed = new GitWorktreeLifecycle(common).get(record)
+              if (!managed || managed.repositoryId !== this.worktreeRepositoryId) fail('WORKTREE_NOT_MANAGED')
+              if (managed.sessionId && options?.sessionWitness?.sessionId && managed.sessionId !== options.sessionWitness.sessionId) {
+                fail('WORKTREE_OWNERSHIP_REQUIRED')
+              }
+              if (managed.executionId && options?.authority?.deliveryContext?.executionId && managed.executionId !== options.authority.deliveryContext.executionId) {
+                fail('DELIVERY_CONTEXT_CONFLICT')
+              }
+              if (intent !== 'CREATE_BRANCH' && request.snapshot.branch && ['main', 'master'].includes(request.snapshot.branch)) {
+                fail('WORKTREE_BRANCH_PROTECTED')
+              }
+            }
+            reconcileAutonomousWorktreeOwnership({
+              commonDirectory: common,
+              worktreeId: request.worktreeId,
+              generation: record.generation,
+              path: record.path,
+              operation: request.snapshot.operation
+            })
+            const observed = await this.observeWorktree(request.worktreeId)
+            const scope = await buildAutonomousScope!(observed, currentPolicy)
+            const assertCurrent = async () => {
+              assertAutonomous()
+              reconcileAutonomousWorktreeOwnership({
+                commonDirectory: common,
+                worktreeId: request.worktreeId,
+                generation: record.generation,
+                path: record.path,
+                operation: observed.snapshot.operation
+              })
+              const latest = await this.observeWorktree(request.worktreeId)
+              if (ownershipDigest(observed) !== ownershipDigest(latest)) fail('GIT_STATE_CHANGED')
+            }
+            return runEffect(observed, scope, assertCurrent)
+          })
+      if (!out.isError && prepareDelivery && (intent === 'COMMIT' || operation !== 'mutate_worktree') && this.coordinationIdentity?.repositoryId) {
         try { this.deliveryObservation?.(this.coordinationIdentity.repositoryId) } catch {}
       }
       return out
@@ -578,7 +677,8 @@ export class GitOperationsService {
     }
   }
 
-  async manageWorktree(request: ScopedWorktreeRequest & ({ action: 'CREATE'; branch: string; startPoint: string } | { action: 'CLOSE'; preservedBranch: string })) {
+  async manageWorktree(request: ScopedWorktreeRequest & ({ action: 'CREATE'; branch: string; startPoint: string } | { action: 'CLOSE'; preservedBranch: string }), options?: GitWorktreeAuthorityContext) {
+    if (request.action === 'CREATE' && ['main', 'master'].includes(request.branch)) fail('WORKTREE_BRANCH_PROTECTED')
     return this.scopedWorktreeMutation('manage_worktree', request, request.action === 'CREATE' ? 'CREATE_WORKTREE' : 'CLOSE', async (observed, scope, assertCurrent) => {
       const lifecycle = new GitWorktreeLifecycle(observed.commonDirectory)
       const { record, service } = await this.selectWorktree(request.worktreeId)
@@ -595,7 +695,16 @@ export class GitOperationsService {
         await recordBranchCreation(this.repoRoot, this.git, `refs/heads/${request.branch}`, createdAt)
         const created = (await this.worktrees!.discover()).worktrees.find(w => w.path === destination)
         if (!created) fail('OPERATION_OUTCOME_UNKNOWN')
-        lifecycle.save({ ...created, repositoryId: observed.repositoryId, startPoint, createdAt: new Date().toISOString() })
+        const isAutonomous = !request.leaseId && !!options?.authority
+        lifecycle.save({
+          ...created,
+          repositoryId: observed.repositoryId,
+          startPoint,
+          createdAt: new Date().toISOString(),
+          origin: isAutonomous ? 'AUTONOMOUS' : 'LEASE',
+          ...(isAutonomous && options?.sessionWitness?.sessionId ? { sessionId: options.sessionWitness.sessionId } : {}),
+          ...(isAutonomous && options?.authority?.deliveryContext?.executionId ? { executionId: options.authority.deliveryContext.executionId } : {})
+        })
         const nativeHooks = await this.nativeHookPreparation?.(created, this.worktrees!)
         return { result: 'CREATED', managed: true, worktree: created, projectChanged: false, ...(nativeHooks ? { nativeHooks } : {}) }
       }
@@ -612,14 +721,19 @@ export class GitOperationsService {
       await this.git.removeWorktree(this.repoRoot, record.path)
       lifecycle.save({ ...managed, closedAt: new Date().toISOString() })
       return { result: 'CLOSED', worktreeId: record.worktreeId, preservedBranch: request.preservedBranch, preservedHead: preserved }
-    })
+    }, undefined, options, request.action === 'CREATE' ? () => ({
+      operations: ['CREATE_WORKTREE'],
+      paths: [],
+      branches: [request.branch],
+      startPoints: [request.startPoint]
+    }) : undefined)
   }
 
   private snapshot(state: WorktreeSnapshot): WorktreeSnapshot {
     return { branch: state.branch, head: state.head, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision, operation: state.operation }
   }
 
-  async startWorktreeValidation(request: ScopedWorktreeRequest & { profileId: string; targets?: string[]; evidenceFor?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>) {
+  async startWorktreeValidation(request: ScopedWorktreeRequest & { profileId: string; targets?: string[]; evidenceFor?: string[] }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: GitWorktreeAuthorityContext) {
     const anchor = prepareDelivery ? await prepareDelivery() : undefined
     return this.scopedWorktreeMutation('start_worktree_validation', request, 'INTEGRATE', async (observed, scope, assertCurrent) => {
       if (!this.worktreeValidation) fail('WORKTREE_VALIDATION_UNAVAILABLE')
@@ -629,7 +743,12 @@ export class GitOperationsService {
       await assertCurrent()
       const evidenceFor = request.evidenceFor?.length ? request.evidenceFor : (anchor && request.targets?.length ? [anchor.planArtifactId] : request.evidenceFor)
       return this.worktreeValidation!.start(request.worktreeId, { profileId: request.profileId, targets: request.targets, evidenceFor, ...(anchor ? { deliveryContext: anchor } : {}) })
-    }, prepareDelivery)
+    }, prepareDelivery, options, observed => ({
+      operations: ['INTEGRATE'],
+      paths: [],
+      branches: observed.snapshot.branch ? [observed.snapshot.branch] : [],
+      startPoints: observed.snapshot.head ? [observed.snapshot.head] : []
+    }))
   }
 
   getWorktreeValidation(runId: string) {
@@ -798,14 +917,18 @@ export class GitOperationsService {
     }, prepareDelivery)
   }
 
-  async publishWorktree(request: ScopedWorktreeRequest & { branch: string; remote: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>) {
+  async publishWorktree(request: ScopedWorktreeRequest & { branch: string; remote: string }, prepareDelivery?: () => Promise<DeliveryAnchor | undefined>, options?: GitWorktreeAuthorityContext) {
+    if (!request.leaseId && ['main', 'master'].includes(request.branch)) fail('WORKTREE_BRANCH_PROTECTED')
     return this.scopedWorktreeMutation('publish_worktree', request, 'PUSH', async (observed, scope, assertCurrent) => {
       if (!scope.branches.includes(request.branch) || observed.snapshot.branch !== request.branch || !observed.snapshot.head) fail('WORKTREE_SCOPE_NOT_GRANTED')
       if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(request.remote) || !await this.git.getRemoteUrl(this.repoRoot, request.remote)) fail('REMOTE_NOT_FOUND')
       await assertCurrent()
       await this.transport.push(observed.path, request.branch, request.remote, observed.snapshot.head)
       return { result: 'PUBLISHED', branch: request.branch, pushedHead: observed.snapshot.head, remote: request.remote, integrated: false }
-    }, prepareDelivery)
+    }, prepareDelivery, options, (_observed, policy) => {
+      if (!policy.allowedRemotes.includes(request.remote)) fail('WORKTREE_SCOPE_NOT_GRANTED')
+      return { operations: ['PUSH'], paths: [], branches: [request.branch] }
+    })
   }
 
   async discoverWorktrees(request: { cursor?: string } = {}) {

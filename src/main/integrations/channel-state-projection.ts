@@ -23,7 +23,8 @@ export class ChannelStateProjection {
     private readonly installationConfigured: () => boolean,
     private readonly settings: { loadSettings?(): import('../../shared/types').AppSettings; getCliExecutionEnabled?(): boolean; onChanged(listener: () => void): () => void },
     private readonly functional: { getState(): ChannelFunctionalHealth; onChanged(listener: () => void): () => void },
-    private readonly cliPolicy?: () => import('../../shared/types/cli-policy-types').CliPolicy
+    private readonly cliPolicy?: () => import('../../shared/types/cli-policy-types').CliPolicy,
+    private readonly gitDeliveryPolicy?: () => import('../../shared/types/git-delivery-policy-types').GitDeliveryPolicy
   ) {
     this.refreshCliEnabled()
     this.getState()
@@ -72,6 +73,7 @@ export class ChannelStateProjection {
       availability, remoteAccessEnabled: enabled, cliExecutionEnabled: this.cliExecutionEnabled, installationConfigured: configured, transport,
       cliMode: policy?.mode ?? 'SUPERVISED',
       cliScope: policy?.scope ?? 'ACTIVE_CHECKOUT_ONLY',
+      gitDeliveryMode: this.gitDeliveryPolicy?.()?.mode ?? 'SUPERVISED',
       connectionStatus: remote.status, mcpStatus: mcp.status,
       activeProject: project ? { id: project.id, name: project.name } : null,
       lastError,

@@ -9,6 +9,7 @@ export interface ChannelState {
   cliExecutionEnabled: boolean
   cliMode?: import('./cli-policy-types').CliMode
   cliScope?: import('./cli-policy-types').CliTrustScope
+  gitDeliveryMode?: import('./git-delivery-policy-types').GitDeliveryMode
   installationConfigured: boolean
   transport: 'relay' | 'ngrok'
   connectionStatus: string

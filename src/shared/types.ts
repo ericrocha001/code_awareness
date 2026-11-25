@@ -43,6 +43,7 @@ export interface AppSettings {
   remoteAccessEnabled?: boolean
   cliExecutionEnabled?: boolean
   cliAutonomy?: Record<string, import('./types/cli-policy-types').CliTrustGrant>
+  gitDeliveryAutonomy?: Record<string, import('./types/git-delivery-policy-types').GitDeliveryTrustGrant>
   transportKind?: 'relay' | 'ngrok'
   rootFolders: string[]
   individualProjects: string[]
