@@ -1,6 +1,7 @@
 import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { AcademyService } from './academy-service'
+import { AcademyError } from './academy-package'
 import { academyImpactFreshnessSchema, academyImpactSchema } from './academy-impact-schema'
 import { projectAcademyGitStatus } from './git/academy-git-sync-service'
 
@@ -28,7 +29,16 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('publish_academy_git_drafts', 'Publish reviewed local Academy commits with normal fast-forward push. Supply the workspace and remote SHA from get_academy_git_status. Protected branches remain pending review; never creates or merges a PR.', { type: 'object', properties: { confirmed: { const: true }, localHead: id, remoteHead: id }, required: ['confirmed', 'localHead', 'remoteHead'], additionalProperties: false }),
   tool('verify_academy_change_impact', 'Read-only advisory freshness of an impact snapshot: CURRENT/STALE/UNKNOWN with observed reasons. Supply candidateHash to compare a changed candidate without resending its package. Without it, candidate mode checks only the previous content identity. No lock or atomic guarantee until update; expectedVersion protects only the source.', academyImpactFreshnessSchema),
   tool('analyze_academy_change_impact', 'Read-only package change evidence and possible DIRECT consumers from ACTIVE canonical Skills. Mentions are not dependencies or compatibility verdicts. Use changes/consumers/evidence offsets and consumerId for bounded detail. Candidate mode requires expectedVersion plus complete package; retrospective mode requires baseVersion and targetVersion.', academyImpactSchema),
-  tool('list_academy_skills', 'List ACTIVE and DISABLED canonical skills by default, including stateRevision for activation CAS. Discovery does not mean installation. ARCHIVED is a legacy input alias for DISABLED.', { type: 'object', properties: { status: { type: 'string', enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'] } }, additionalProperties: false }),
+  tool('list_academy_skills', 'List ACTIVE and DISABLED canonical skills by default, including stateRevision for activation CAS. Discovery does not mean installation. ARCHIVED is a legacy input alias for DISABLED. Opt in with includeEfficiency:true, limit, or cursor for paged efficiency measures and predecessor deltas without changing the legacy array default.', {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'] },
+      includeEfficiency: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 50 },
+      cursor: { type: 'string', minLength: 1 }
+    },
+    additionalProperties: false
+  }),
   tool('set_academy_skill_enabled', 'Set activation with independent stateRevision CAS. Returns persisted status and stateRevision; local reconciliation is scheduled separately. Does not publish an installed plugin.', { type: 'object', properties: { skillId: id, enabled: { type: 'boolean' }, expectedStateRevision: version }, required: ['skillId', 'enabled', 'expectedStateRevision'], additionalProperties: false }),
   tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
   tool('list_academy_changes', 'Discover immutable Academy skill version events globally in descending persistence order (createdAt DESC, skillId ASC, version DESC) without reading packages. Intersecting filters narrow results: skillId, query (case-insensitive literal substring on current skillName, not body), after/before (inclusive ISO 8601 UTC-normalized persistence timestamps), origin, limit (default 20, max 50), and cursor. skillName reflects the current canonical skill name; previousVersion is the actual persisted predecessor of that skill regardless of date filters. contentState/previousContentState distinguish tombstone deletion and reintroduction. Cursor binds filters, order and limit; visibility matches Academy catalog permissions and does not guarantee an immutable snapshot across pages. Inspect deltas with get_academy_change_diff or read a full package with get_academy_skill_history.', {
@@ -59,7 +69,20 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
     required: ['skillId', 'targetVersion'],
     additionalProperties: false
   }),
-  tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order.', { type: 'object', properties: { skillId: id, metadataOnly: { type: 'boolean' }, version: { ...version, maximum: Number.MAX_SAFE_INTEGER } }, required: ['skillId'], not: { required: ['metadataOnly', 'version'] }, additionalProperties: false }),
+  tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order. Optional includeEfficiency, limit, and cursor require metadataOnly:true.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      metadataOnly: { type: 'boolean' },
+      version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      includeEfficiency: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 50 },
+      cursor: { type: 'string', minLength: 1 }
+    },
+    required: ['skillId'],
+    not: { required: ['metadataOnly', 'version'] },
+    additionalProperties: false
+  }),
   tool('create_academy_skill', 'After CRS cutover, save GLOBAL locally with version CAS and catalogRevision. Content and eligibility persist atomically: the new skill is APPROVED for the public plugin only when the operator previously enabled auto-include for new GLOBAL skills in Academy (not changeable through MCP); otherwise it stays PRIVATE and the result states the reason and approval action. keepPrivate:true opts this skill out. PROJECT is never published. Before cutover, preserves legacy Git drafts.', { type: 'object', properties: { expectedDraftCommitSha: id, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true }, keepPrivate: { type: 'boolean' } }, required: ['package', 'scope'], additionalProperties: false }),
   tool('update_academy_skill', 'Save canonical content with expectedVersion CAS. After CRS cutover, GLOBAL persists offline in SQLite; synchronization and distribution are separate. Legacy drafts remain until reviewed cutover.', { type: 'object', properties: { expectedDraftCommitSha: id, skillId: id, expectedVersion: version, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true } }, required: ['skillId', 'expectedVersion', 'package'], additionalProperties: false }),
   tool('get_academy_skill_delivery_status', 'Inspect the compact, version-aware delivery and convergence status of one Academy skill without downloading packages or scanning the filesystem.', { type: 'object', properties: { skillId: id, expectedVersion: version }, required: ['skillId'], additionalProperties: false }),
@@ -87,7 +110,29 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'publish_academy_git_drafts': if (values.confirmed !== true) throw new Error('PUBLICATION_AUTHORIZATION_REQUIRED'); if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); result = projectAcademyGitStatus(await service.gitSync.publish({ localHead: string(values.localHead, 'localHead'), remoteHead: string(values.remoteHead, 'remoteHead') })); break
       case 'verify_academy_change_impact': result = service.verifyChangeImpact(args); break
       case 'analyze_academy_change_impact': result = service.analyzeChangeImpact(args); break
-      case 'list_academy_skills': result = service.list(optionalEnum(values.status, ['ACTIVE', 'DISABLED', 'ARCHIVED']) as 'ACTIVE' | 'DISABLED' | 'ARCHIVED' | undefined); break
+      case 'list_academy_skills': {
+        if (Object.keys(values).some(key => !['status', 'includeEfficiency', 'limit', 'cursor'].includes(key))) {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        const statusRaw = optionalEnum(values.status, ['ACTIVE', 'DISABLED', 'ARCHIVED']) as 'ACTIVE' | 'DISABLED' | 'ARCHIVED' | undefined
+        if (values.includeEfficiency === undefined && values.limit === undefined && values.cursor === undefined) {
+          result = service.list(statusRaw)
+          break
+        }
+        if (values.includeEfficiency !== undefined && typeof values.includeEfficiency !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor)) {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        result = service.lint.efficiencyForList({
+          status: statusRaw === 'ARCHIVED' ? 'DISABLED' : statusRaw,
+          includeEfficiency: values.includeEfficiency,
+          limit: values.limit as number | undefined,
+          cursor: values.cursor
+        })
+        break
+      }
       case 'set_academy_skill_enabled': {
         if (Object.keys(values).some(key => !['skillId', 'enabled', 'expectedStateRevision'].includes(key)) || typeof values.enabled !== 'boolean') throw new Error('INVALID_ARGUMENT')
         result = await service.setEnabled(string(values.skillId, 'skillId'), values.enabled, integer(values.expectedStateRevision, 'expectedStateRevision'))
@@ -97,6 +142,22 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'list_academy_changes': result = service.listChanges(values); break
       case 'get_academy_change_diff': result = service.getChangeDiff(values); break
       case 'get_academy_skill_history': {
+        if (values.includeEfficiency !== undefined || values.limit !== undefined || values.cursor !== undefined) {
+          if (
+            Object.keys(values).some(key => !['skillId', 'metadataOnly', 'includeEfficiency', 'limit', 'cursor'].includes(key)) ||
+            values.metadataOnly !== true ||
+            (values.includeEfficiency !== undefined && typeof values.includeEfficiency !== 'boolean') ||
+            (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor))
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.efficiencyForHistory(string(values.skillId, 'skillId'), {
+            includeEfficiency: values.includeEfficiency,
+            limit: values.limit as number | undefined,
+            cursor: values.cursor
+          })
+          break
+        }
         const { skillId, ...options } = values
         result = service.history(string(skillId, 'skillId'), options as AcademyHistoryOptions)
         break

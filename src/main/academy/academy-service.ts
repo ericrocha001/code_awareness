@@ -8,6 +8,7 @@ import { AcademyProjectionService } from './academy-projection-service'
 import { AcademyStore } from './academy-store'
 import { AcademyWatcher } from './academy-watcher'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
+import { AcademySkillLintService } from './lint/academy-skill-lint-service'
 import { observeStableSkillDirectory, readSkillDirectory, removeSkillDirectory, replaceSkillDirectory } from './academy-filesystem'
 import { AcademyDistributionService } from './distribution/academy-distribution-service'
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
@@ -34,6 +35,7 @@ const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE'
 
 export class AcademyService {
   readonly store: AcademyStore
+  readonly lint: AcademySkillLintService
   readonly projections: AcademyProjectionService
   readonly importer: AcademyImporter
   readonly watcher: AcademyWatcher
@@ -55,6 +57,7 @@ export class AcademyService {
 
   constructor(databasePath: string, downloadsPath?: string, private readonly closeTimeoutMs = 2000, pluginWorkerPath?: string) {
     this.store = new AcademyStore(databasePath)
+    this.lint = new AcademySkillLintService(this.store)
     this.projections = new AcademyProjectionService(this.store)
     this.distribution = new AcademyDistributionService(this.store)
     this.packageRevisions = new AcademyPluginPackageRevisionService(this.store)

@@ -89,6 +89,8 @@ const nativeTestFiles = Object.freeze([
   'src/main/academy/academy-conflicts.test.ts',
   'src/main/academy/academy-mcp.test.ts',
   'src/main/academy/academy-mcp-skills.test.ts',
+  'src/main/academy/lint/academy-skill-lint-service.test.ts',
+  'src/main/academy/lint/academy-skill-lint-acceptance.test.ts',
   'src/main/academy/academy-real-migration.test.ts',
   'src/main/academy/academy-acceptance.test.ts',
   'src/main/academy/academy-distribution.test.ts',

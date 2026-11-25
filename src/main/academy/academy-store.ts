@@ -4,9 +4,10 @@ import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
 import type { AcademyBuildProjection, AcademyGitSnapshotHeader } from '../../shared/types/academy-publication-types'
 import type { AcademyGitAuthority, AcademyGitSkillSource, AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
-import type { AcademyChangeListResult, AcademyChangeRecord, AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
+import type { AcademyChangeListResult, AcademyChangeRecord, AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata, AcademyVersionContentState } from '../../shared/types/academy-types'
 import type { AcademyConflict, AcademyCreateInput, AcademyPublicationPreference, AcademyPublicationSource, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
+import { AcademyLintRepository } from './lint/academy-lint-repository'
 import { validateAcademyIdentities, type AcademyIdentityCatalog } from '../../shared/academy-identity.cjs'
 import { buildOpenAiManifest, canonicalJson, sha256 } from './publication/openai-plugin-model'
 import { mergeAcademyPackages } from './git/academy-git-reconciliation'
@@ -44,6 +45,7 @@ function gitSnapshotHeader(source: AcademyGitSourceSnapshot): AcademyGitSnapshot
 
 export class AcademyStore {
   private readonly db: Database.Database
+  readonly lint: AcademyLintRepository
   private ingestingGit = false
   private gitFirstRequired = false
   enforceGitFirst(): void { this.gitFirstRequired = true }
@@ -491,6 +493,7 @@ export class AcademyStore {
     for (const column of ['authored_json', 'metadata_conflict_json']) if (!catalogColumns.some(item => item.name === column)) this.db.exec(`ALTER TABLE academy_catalog ADD COLUMN ${column} TEXT`)
     const eligibilityColumns = this.db.prepare('PRAGMA table_info(academy_publication_eligibility)').all() as Row[]
     for (const [column, type] of [['source', 'TEXT'], ['preference_revision', 'INTEGER'], ['decided_at', 'TEXT']]) if (!eligibilityColumns.some(item => item.name === column)) this.db.exec(`ALTER TABLE academy_publication_eligibility ADD COLUMN ${column} ${type}`)
+    this.lint = new AcademyLintRepository(this.db)
   }
 
   private migrateDistributionTargets(): void {
@@ -610,6 +613,25 @@ export class AcademyStore {
       ? this.db.prepare('SELECT * FROM academy_skills WHERE status=? ORDER BY lower(name)').all(status) as Row[]
       : this.db.prepare('SELECT * FROM academy_skills ORDER BY lower(name)').all() as Row[]
     return rows.map((row) => this.summary(row))
+  }
+
+  currentVersionHashes(): Array<{
+    skillId: string
+    version: number
+    packageHash: string
+    contentState: AcademyVersionContentState
+  }> {
+    return (this.db.prepare(
+      `SELECT s.id AS skill_id, s.current_version AS version, v.package_hash, v.content_state
+       FROM academy_skills s
+       JOIN academy_versions v ON v.skill_id = s.id AND v.version = s.current_version
+       ORDER BY lower(s.name), s.id`
+    ).all() as Row[]).map(row => ({
+      skillId: row.skill_id,
+      version: row.version,
+      packageHash: row.package_hash,
+      contentState: row.content_state === 'DELETED' ? 'DELETED' : 'PRESENT'
+    }))
   }
 
   findByName(name: string): AcademySkillDetail | null {
