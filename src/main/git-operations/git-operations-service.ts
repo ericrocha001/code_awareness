@@ -441,14 +441,11 @@ export class GitOperationsService {
     if (closed && closed.repositoryId !== this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_MISMATCH')
     const record = discovery.worktrees.find(w => w.worktreeId === request.worktreeId) ?? closed
     if (!record) fail('WORKTREE_STALE')
-    const policy = !hasLease ? this.gitDeliveryPolicy?.(record.path) : undefined
-    if (!hasLease && (!policy || policy.mode !== 'AUTONOMOUS')) fail('WORKTREE_OWNERSHIP_REQUIRED')
     const authorityScope = !hasLease && options?.authority ? {
       transport: options.authority.transport,
       repositoryId: options.authority.repositoryId,
       worktreeId: options.authority.worktreeId ?? null,
-      deliveryContext: options.authority.deliveryContext ?? null,
-      policyRevision: policy!.revision
+      deliveryContext: options.authority.deliveryContext ?? null
     } : null
     const args = {
       ...values,
@@ -460,6 +457,8 @@ export class GitOperationsService {
     }
     const receipts = new GitOperationReceipts(this.repoRoot, this.git)
     if (existing) return receipts.execute(operationId, operation, args, async () => { throw new Error('RECEIPT_REPLAY_REQUIRED') }, prepareDelivery, options)
+    const initialPolicy = !hasLease ? this.gitDeliveryPolicy?.(record.path) : undefined
+    if (!hasLease && (!initialPolicy || initialPolicy.mode !== 'AUTONOMOUS')) fail('WORKTREE_OWNERSHIP_REQUIRED')
     try {
       const runEffect = async (observed: WorktreeObservation, scope: WorktreeScope, assertCurrent: () => Promise<void>) => receipts.execute(operationId, operation, args, async () => {
         try {
@@ -480,18 +479,23 @@ export class GitOperationsService {
               if (!options?.authority?.isActive()) fail('AGENT_UNAUTHORIZED')
               if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
               const currentPolicy = this.gitDeliveryPolicy?.(record.path)
-              if (!currentPolicy || currentPolicy.mode !== 'AUTONOMOUS') fail('WORKTREE_OWNERSHIP_REQUIRED')
+              if (
+                !currentPolicy ||
+                currentPolicy.mode !== 'AUTONOMOUS' ||
+                currentPolicy.revision !== initialPolicy!.revision ||
+                JSON.stringify(currentPolicy.allowedRemotes) !== JSON.stringify(initialPolicy!.allowedRemotes)
+              ) fail('WORKTREE_OWNERSHIP_REQUIRED')
               return currentPolicy
             }
             const currentPolicy = assertAutonomous()
             if (intent !== 'CREATE_WORKTREE') {
               if (this.worktrees!.isReference(request.worktreeId)) fail('WORKTREE_PRIMARY_PROTECTED')
               const managed = new GitWorktreeLifecycle(common).get(record)
-              if (!managed || managed.repositoryId !== this.worktreeRepositoryId) fail('WORKTREE_NOT_MANAGED')
-              if (managed.sessionId && options?.sessionWitness?.sessionId && managed.sessionId !== options.sessionWitness.sessionId) {
+              if (!managed || managed.repositoryId !== this.worktreeRepositoryId || managed.origin !== 'AUTONOMOUS') fail('WORKTREE_NOT_MANAGED')
+              if (managed.sessionId && options?.sessionWitness?.sessionId !== managed.sessionId) {
                 fail('WORKTREE_OWNERSHIP_REQUIRED')
               }
-              if (managed.executionId && options?.authority?.deliveryContext?.executionId && managed.executionId !== options.authority.deliveryContext.executionId) {
+              if (managed.executionId && options?.authority?.deliveryContext?.executionId !== managed.executionId) {
                 fail('DELIVERY_CONTEXT_CONFLICT')
               }
               if (intent !== 'CREATE_BRANCH' && request.snapshot.branch && ['main', 'master'].includes(request.snapshot.branch)) {
@@ -660,6 +664,12 @@ export class GitOperationsService {
       }
       const adminDir = realpathSync(await this.git.getWorktreeDirectory(record.path))
       return await withWorktreeTransaction(common, adminDir, async () => {
+        const managed = new GitWorktreeLifecycle(common).get(record)
+        if (managed) {
+          if (managed.origin === 'LEASE') fail('WORKTREE_OWNERSHIP_REQUIRED')
+          if (managed.sessionId && options?.sessionWitness?.sessionId !== managed.sessionId) fail('WORKTREE_OWNERSHIP_REQUIRED')
+          if (managed.executionId && options?.authority?.deliveryContext?.executionId !== managed.executionId) fail('DELIVERY_CONTEXT_CONFLICT')
+        }
         const normalizedPaths = selected.service.paths(request.paths, 16)
         const entry = await this.git.captureWorktreeEditObservation(record.path, normalizedPaths, { worktreeRevisionMetadataOnly: true })
         const guardAutonomous = () => reconcileAutonomousWorktreeOwnership({
@@ -947,6 +957,46 @@ export class GitOperationsService {
       return { repositoryId: discovered.repositoryId, worktrees: discovered.worktrees.slice(offset, end), revision, nextCursor: end < discovered.worktrees.length ? `${revision}:${end}` : null }
     }
     catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_IDENTITY_MISMATCH') }
+  }
+
+  async resolveAutonomousPrLine(criteria: {
+    worktreeId?: string
+    headBranch: string
+    expectedHeadSha: string
+    remote?: string
+  }): Promise<{
+    worktreeId: string
+    generation: string
+    origin?: string
+    sessionId?: string
+    executionId?: string
+    remoteUrl: string | null
+  } | null> {
+    if (!this.worktrees || !this.worktreeRepositoryId) return null
+    if (['main', 'master'].includes(criteria.headBranch)) return null
+    const discovery = await this.worktrees.discover()
+    let record: WorktreeRecord | undefined
+    if (criteria.worktreeId) {
+      record = discovery.worktrees.find(w => w.worktreeId === criteria.worktreeId)
+      if (!record || record.branch !== criteria.headBranch || record.head !== criteria.expectedHeadSha) return null
+    } else {
+      const matches = discovery.worktrees.filter(w => w.branch === criteria.headBranch && w.head === criteria.expectedHeadSha)
+      if (matches.length !== 1) return null
+      record = matches[0]
+    }
+    if (this.worktrees.isReference(record.worktreeId)) return null
+    const common = realpathSync(await this.git.getCommonDirectory(record.path))
+    const managed = new GitWorktreeLifecycle(common).get(record)
+    if (!managed || managed.repositoryId !== this.worktreeRepositoryId || managed.origin !== 'AUTONOMOUS') return null
+    const remoteUrl = await this.git.getRemoteUrl(this.repoRoot, criteria.remote ?? 'origin').catch(() => null)
+    return {
+      worktreeId: record.worktreeId,
+      generation: record.generation,
+      origin: managed.origin,
+      sessionId: managed.sessionId,
+      executionId: managed.executionId,
+      remoteUrl
+    }
   }
 
   async inspectWorktree(worktreeId: string) {

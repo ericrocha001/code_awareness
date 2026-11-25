@@ -4,6 +4,7 @@ import { PullRequestError, type PullRequestContext, type PullRequestMutationInpu
 import type { GitHubApiClient } from './github-api-client'
 import { claim, hash, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
 import { summarizePullRequestChecks } from './github-pr-evidence'
+import { normalizeGitHubOrigin } from './github-integration-service'
 
 type Operation = PullRequestMutationApproval['operation']
 interface Receipt {
@@ -29,43 +30,56 @@ export class GitHubPrIntegration {
   async mutate(operation: Operation, input: PullRequestMutationInput, execution: PullRequestExecutionContext): Promise<PullRequestOperationResult> {
     validateMutation(input, operation === 'MERGE_PULL_REQUEST')
     const context = await this.resolve()
-    const policy = this.dependencies?.getDeliveryPolicy?.(context.repositoryId)
-    const isAutonomous = operation === 'MERGE_PULL_REQUEST' && Boolean(execution.authority && policy?.mode === 'AUTONOMOUS')
+    const hasAuthority = Boolean(execution.authority)
+    const isAutonomous = operation === 'MERGE_PULL_REQUEST' && hasAuthority
     if (execution.authority) {
       if (execution.deadlineAtMs !== undefined && Date.now() >= execution.deadlineAtMs) throw new PullRequestError('AUTHORIZATION_EXPIRED')
       if (!execution.authority.isActive()) throw new PullRequestError('AUTHORIZATION_DENIED')
       if (execution.authority.repositoryId !== context.repositoryId) throw new PullRequestError('PROJECT_CHANGED')
     }
-    if (!isAutonomous && !this.dependencies?.approveMutation) throw new PullRequestError('AUTHORIZATION_REQUIRED')
-    const directory = join(this.dependencies!.receiptDirectory, hash(context.repositoryId))
+    if (!this.dependencies) throw new PullRequestError('AUTHORIZATION_REQUIRED')
+    const directory = join(this.dependencies.receiptDirectory, hash(context.repositoryId))
     const path = join(directory, `${hash(input.operationId)}.json`)
-    const fingerprint = hash(JSON.stringify([isAutonomous ? 'AUTONOMOUS' : 'SUPERVISED', operation, context.repositoryId, context.repository.toLowerCase(), input.prNumber, input.expectedHeadSha, input.expectedBaseSha]))
+    const fingerprint = hash(JSON.stringify([operation, context.repositoryId, context.repository.toLowerCase(), input.prNumber, input.expectedHeadSha, input.expectedBaseSha]))
     const existing = this.read(path)
     if (existing) {
       if (existing.fingerprint !== fingerprint) throw new PullRequestError('IDEMPOTENCY_CONFLICT')
       return this.reconcile(existing, path)
     }
+    const policy = isAutonomous ? this.dependencies.getDeliveryPolicy?.(context.repositoryId) : undefined
+    if (isAutonomous && policy?.mode !== 'AUTONOMOUS') throw new PullRequestError('AUTHORIZATION_DENIED')
+    if (!isAutonomous && !this.dependencies.approveMutation) throw new PullRequestError('AUTHORIZATION_REQUIRED')
     const before = await this.preflight(operation, input, context)
     if (isAutonomous) {
-      if (['main', 'master'].includes(before.pr.head.ref)) throw new PullRequestError('PR_IDENTITY_CONFLICT')
-      const worktreeId = execution.authority?.worktreeId ?? execution.defaultWorktreeId
-      if (worktreeId && execution.inspectWorktree) {
-        const worktree = await execution.inspectWorktree(worktreeId)
-        if (worktree.branch !== before.pr.head.ref || worktree.head !== before.pr.head.sha) throw new PullRequestError('PR_IDENTITY_CONFLICT')
+      if (['main', 'master'].includes(before.pr.head.ref) || !['main', 'master'].includes(before.pr.base.ref)) {
+        throw new PullRequestError('PR_IDENTITY_CONFLICT')
       }
+      const worktreeId = execution.authority?.worktreeId ?? execution.defaultWorktreeId
+      const remote = policy?.allowedRemotes?.[0] ?? 'origin'
+      const line = execution.resolveAutonomousLine
+        ? await execution.resolveAutonomousLine({ worktreeId, headBranch: before.pr.head.ref, expectedHeadSha: before.pr.head.sha, remote })
+        : null
+      if (!line || line.origin !== 'AUTONOMOUS') throw new PullRequestError('PR_IDENTITY_CONFLICT')
+      if (line.sessionId && execution.sessionWitness?.sessionId !== line.sessionId) throw new PullRequestError('AUTHORIZATION_DENIED')
+      if (line.executionId && execution.authority?.deliveryContext?.executionId !== line.executionId) throw new PullRequestError('DELIVERY_CONTEXT_INVALID')
+      const normalizedRemote = line.remoteUrl ? normalizeGitHubOrigin(line.remoteUrl) : null
+      if (!normalizedRemote || normalizedRemote.toLowerCase() !== context.repository.toLowerCase()) throw new PullRequestError('PR_IDENTITY_CONFLICT')
     }
     const boundInput = { ...input, expectedBaseSha: before.pr.base.sha }
     const expiresAt = new Date(Date.now() + 120_000).toISOString()
     const approval: PullRequestMutationApproval = { ...boundInput, ...context, operation, headBranch: before.pr.head.ref, baseBranch: before.pr.base.ref, observedState: 'OPEN', mayEnqueue: before.queue, baseConcurrency: concurrency, expiresAt,
       ...(operation === 'MERGE_PULL_REQUEST' ? { mergeMethod: before.queue ? 'QUEUE_CONTROLLED' as const : 'merge' as const, mergeAction: 'default' as const } : {}) }
-    if (!isAutonomous && !await this.dependencies!.approveMutation!(approval)) throw new PullRequestError('AUTHORIZATION_DENIED')
+    if (!isAutonomous && !await this.dependencies.approveMutation!(approval)) throw new PullRequestError('AUTHORIZATION_DENIED')
     const assertActive = () => {
       if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
       if (!execution.isActive()) throw new PullRequestError('PROJECT_CHANGED')
       if (isAutonomous) {
         if (execution.deadlineAtMs !== undefined && Date.now() >= execution.deadlineAtMs) throw new PullRequestError('AUTHORIZATION_EXPIRED')
         if (!execution.authority?.isActive()) throw new PullRequestError('AUTHORIZATION_DENIED')
-        if (this.dependencies?.getDeliveryPolicy?.(context.repositoryId)?.mode !== 'AUTONOMOUS') throw new PullRequestError('AUTHORIZATION_DENIED')
+        const currentPolicy = this.dependencies?.getDeliveryPolicy?.(context.repositoryId)
+        if (!currentPolicy || currentPolicy.mode !== 'AUTONOMOUS' || currentPolicy.revision !== policy!.revision) {
+          throw new PullRequestError('AUTHORIZATION_DENIED')
+        }
       }
     }
     assertActive()

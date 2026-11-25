@@ -723,6 +723,8 @@ export class ChannelMcpAdapter {
         defaultWorktreeId: authority?.worktreeId,
         isActive: this.githubContext.githubPrIsActive ?? (() => false),
         inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined,
+        resolveAutonomousLine: this.gitOperations ? criteria => this.gitOperations!.resolveAutonomousPrLine(criteria) : undefined,
+        ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}),
         ...(invocationContext?.deadlineAtMs !== undefined ? { deadlineAtMs: invocationContext.deadlineAtMs } : {}),
         ...(authority ? {
           authority: {

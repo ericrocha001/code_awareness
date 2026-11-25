@@ -136,7 +136,7 @@ import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
-import { confirmCliExecution, confirmCliAutonomy, confirmGitDeliveryAutonomy } from './cli-execution/cli-authorization'
+import { confirmCliExecution, confirmCliAutonomy } from './cli-execution/cli-authorization'
 import { createCliProjectAuthority, createCliProjectRuntimeAuthority } from './cli-execution/cli-project-authority'
 import { resolveCliWorktree } from './cli-execution/cli-worktree-authority'
 import { CliTrustPolicy } from './cli-execution/cli-trust-policy'
@@ -636,7 +636,7 @@ app.whenReady().then(async () => {
     return { repositoryId: repository.id, path: project.path, revision: state.revision }
   }
   const cliTrustPolicy = new CliTrustPolicy(settingsService, resolveLocalTrustContext, (mode, context, scope) => confirmCliAutonomy(mainWindow, mode, context, scope))
-  const gitDeliveryTrustPolicy = new GitDeliveryTrustPolicy(settingsService, resolveLocalTrustContext, context => confirmGitDeliveryAutonomy(mainWindow, context))
+  const gitDeliveryTrustPolicy = new GitDeliveryTrustPolicy(settingsService, resolveLocalTrustContext)
   registerCliPolicyHandlers(cliTrustPolicy, () => mainWindow, () => activeCliExecution, gitDeliveryTrustPolicy)
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
