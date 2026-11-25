@@ -187,16 +187,16 @@ export function ChannelView({ active = true }: { active?: boolean }) {
         </div>
       </section>}
       {state && <section className="channel-panel" aria-labelledby="git-delivery-autonomy-title">
-        <div className="channel-section-heading"><h2 id="git-delivery-autonomy-title"><GitBranch size={19} aria-hidden="true" />Autonomia Git e PR</h2><StatusBadge tone={state.gitDeliveryMode === 'AUTONOMOUS' ? 'warning' : 'neutral'}>{state.gitDeliveryMode === 'AUTONOMOUS' ? 'Autônomo' : 'Supervisionado'}</StatusBadge></div>
+        <div className="channel-section-heading"><h2 id="git-delivery-autonomy-title"><GitBranch size={19} aria-hidden="true" />Autonomia Git e PR</h2><StatusBadge tone={(state.gitDeliveryMode ?? (state.activeProject ? 'AUTONOMOUS' : 'SUPERVISED')) === 'AUTONOMOUS' ? 'healthy' : 'neutral'}>{(state.gitDeliveryMode ?? (state.activeProject ? 'AUTONOMOUS' : 'SUPERVISED')) === 'AUTONOMOUS' ? 'Autônomo' : 'Supervisionado'}</StatusBadge></div>
         <p className="channel-panel-description">Repositório autorizado: {state.activeProject?.name ?? 'Nenhum projeto identificado'}. Abrangência: Git local em worktrees gerenciadas (criar worktree/branch, stage, unstage, commit, validação fixa), push normal, Pull Request e merge elegível em remoto/base configurados.</p>
         <label className="channel-label" htmlFor="git-delivery-mode">Modo de entrega Git e PR</label>
-        <select id="git-delivery-mode" className="channel-action" value={state.gitDeliveryMode ?? 'SUPERVISED'} disabled={!state.activeProject || cliPending} onChange={event => void chooseGitDeliveryMode(event.target.value as GitDeliveryMode)}>
+        <select id="git-delivery-mode" className="channel-action" value={state.gitDeliveryMode ?? (state.activeProject ? 'AUTONOMOUS' : 'SUPERVISED')} disabled={!state.activeProject || cliPending} onChange={event => void chooseGitDeliveryMode(event.target.value as GitDeliveryMode)}>
+          <option value="AUTONOMOUS">Autônomo (padrão no Channel autorizado)</option>
           <option value="SUPERVISED">Supervisionado (aprovação por operação)</option>
-          <option value="AUTONOMOUS">Autônomo (entrega ordinária sem diálogos)</option>
         </select>
         <p className="channel-note">Ações destrutivas ou fora de escopo (CLOSE de worktree, integração/resolução de conflitos, fechamento de PR e force push) permanecem supervisionadas.</p>
         <div className="channel-header-controls">
-          <button type="button" className="channel-action" disabled={cliPending || (state.gitDeliveryMode ?? 'SUPERVISED') === 'SUPERVISED'} onClick={() => void chooseGitDeliveryMode('SUPERVISED')}>Desativar autonomia Git</button>
+          <button type="button" className="channel-action" disabled={cliPending || !state.activeProject || state.gitDeliveryMode === 'SUPERVISED'} onClick={() => void chooseGitDeliveryMode('SUPERVISED')}>Revogar autonomia Git</button>
         </div>
       </section>}
       {!state && !loadError && <p className="channel-loading" role="status"><Loader2 className="channel-spinner" size={18} aria-hidden="true" />Carregando estado operacional…</p>}

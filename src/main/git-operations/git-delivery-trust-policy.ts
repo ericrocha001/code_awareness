@@ -19,7 +19,7 @@ export class GitDeliveryTrustPolicy {
   constructor(
     private readonly settings: Pick<SettingsService, 'loadSettings' | 'setLocalGitDeliveryTrust'>,
     private readonly context: () => GitDeliveryLocalContext | null,
-    private readonly confirm: (context: GitDeliveryLocalContext) => Promise<boolean>
+    private readonly confirm?: (context: GitDeliveryLocalContext) => Promise<boolean>
   ) {}
 
   getPolicy(expected?: { repositoryId: string | null; path: string }): GitDeliveryPolicy {
@@ -32,26 +32,37 @@ export class GitDeliveryTrustPolicy {
     const context = this.context()
     if (!context) return supervised
     if (expected && expected.repositoryId !== context.repositoryId) return supervised
-    const grant = this.settings.loadSettings().gitDeliveryAutonomy?.[context.repositoryId]
-    if (!grant || !GIT_DELIVERY_MODES.includes(grant.mode) || typeof grant.revision !== 'string') return supervised
-    if (grant.mode === 'SUPERVISED') {
-      return { ...supervised, revision: grant.revision }
-    }
-    if (typeof grant.commonIdentity !== 'string' || !grant.commonIdentity) {
-      return { ...supervised, revision: `invalid:${grant.revision}` }
-    }
+
+    let currentCommon: string
     try {
-      if (cliGitCommonIdentity(context.repositoryId, context.path, { verifyWorktreeBackpointer: true }) !== grant.commonIdentity) {
-        return { ...supervised, revision: `invalid:${grant.revision}` }
-      }
+      currentCommon = cliGitCommonIdentity(context.repositoryId, context.path, { verifyWorktreeBackpointer: true })
       if (expected) {
         const expectedPhysical = realpathSync(expected.path)
-        if (cliGitCommonIdentity(context.repositoryId, expectedPhysical, { verifyWorktreeBackpointer: true }) !== grant.commonIdentity) {
-          return { ...supervised, revision: `invalid:${grant.revision}` }
+        if (cliGitCommonIdentity(context.repositoryId, expectedPhysical, { verifyWorktreeBackpointer: true }) !== currentCommon) {
+          return { ...supervised, revision: 'checkout-unavailable' }
         }
       }
     } catch {
-      return expected ? { ...supervised, revision: 'checkout-unavailable' } : { ...supervised, revision: `invalid:${grant.revision}` }
+      return expected ? { ...supervised, revision: 'checkout-unavailable' } : { ...supervised, revision: 'untrusted' }
+    }
+
+    const grant = this.settings.loadSettings().gitDeliveryAutonomy?.[context.repositoryId]
+    if (!grant) {
+      return {
+        mode: 'AUTONOMOUS',
+        revision: 'default',
+        rule: 'local-repository-git-delivery-default',
+        allowedRemotes: [...DEFAULT_ALLOWED_REMOTES]
+      }
+    }
+    if (!GIT_DELIVERY_MODES.includes(grant.mode) || typeof grant.revision !== 'string' || !grant.revision) {
+      return { ...supervised, revision: `invalid:${String(grant.revision ?? '')}` }
+    }
+    if (typeof grant.commonIdentity !== 'string' || grant.commonIdentity !== currentCommon) {
+      return { ...supervised, revision: `invalid:${grant.revision}` }
+    }
+    if (grant.mode === 'SUPERVISED') {
+      return { ...supervised, revision: grant.revision }
     }
     const allowedRemotes = Array.isArray(grant.allowedRemotes) && grant.allowedRemotes.length
       ? grant.allowedRemotes.filter((remote): remote is string => typeof remote === 'string' && remote.length > 0)
@@ -71,7 +82,7 @@ export class GitDeliveryTrustPolicy {
     if (!context) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
     const commonIdentity = cliGitCommonIdentity(context.repositoryId, context.path, { verifyWorktreeBackpointer: true })
     const previous = JSON.stringify(this.settings.loadSettings().gitDeliveryAutonomy?.[context.repositoryId])
-    if (mode === 'AUTONOMOUS' && !await this.confirm(context)) return false
+    if (mode === 'AUTONOMOUS' && this.confirm && !await this.confirm(context)) return false
     const current = this.context()
     if (choice !== this.choiceRevision || previous !== JSON.stringify(this.settings.loadSettings().gitDeliveryAutonomy?.[context.repositoryId])) {
       throw new Error('POLICY_CHANGED')
