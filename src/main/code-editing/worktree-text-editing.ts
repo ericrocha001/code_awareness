@@ -172,7 +172,7 @@ export async function editWorktreeText(
       },
       fingerprintArgs,
       async ctx => {
-        const editor = new RepositoryFileEditing(ctx.root, { isActive: ctx.isActive, deadlineAtMs: ctx.deadlineAtMs })
+        const editor = new RepositoryFileEditing(ctx.root, { isActive: ctx.isActive })
         const batch = await editor.applyTextBatch(req.changes, req.intent, () => ctx.beforePublish())
         let state = batch.state
         let code = batch.code
