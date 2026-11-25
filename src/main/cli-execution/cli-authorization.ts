@@ -29,6 +29,21 @@ export async function confirmCliAutonomy(window: BrowserWindow | null, mode: Cli
   return response.response === 1
 }
 
+export async function confirmGitDeliveryAutonomy(window: BrowserWindow | null, context: { repositoryId: string; path: string }): Promise<boolean> {
+  if (!window || window.isDestroyed()) return false
+  const response = await dialog.showMessageBox(window, {
+    type: 'warning',
+    title: 'Autorizar autonomia Git e PR neste repositório',
+    message: 'Permitir entrega Git ordinária (Worktree, branch, validação, commit, push, PR e merge elegível) sem aprovações por etapa?',
+    detail: `Repositório: ${context.repositoryId}\nCheckout: ${context.path}\n\nAbrangência autorizada pelo Channel autenticado:\n• Git local em worktrees gerenciadas: criar worktree/branch, stage, unstage, commit e validação fixa.\n• Remoto configurado (origin): push normal (sem force), abrir Pull Request e solicitar merge elegível (sem bypass).\n\nContinuam exigindo aprovação humana explícita: CLOSE de worktree, resolução/integração de conflitos, fechamento de PR e qualquer operação fora do escopo.\n\nA confiança persiste neste perfil local para este repositório até revogação no Channel.`,
+    buttons: ['Manter supervisionado', 'Autorizar autonomia Git e PR'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  })
+  return response.response === 1
+}
+
 export async function confirmCliExecution(
   window: BrowserWindow | null,
   request: CliApprovalRequest

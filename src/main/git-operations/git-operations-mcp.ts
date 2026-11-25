@@ -18,20 +18,21 @@ const credential = { type: 'string', pattern: '^[a-f0-9]{64}$' }
 const snapshot = { type: 'object', properties: { branch: { type: ['string', 'null'] }, head: expectedHead, indexRevision: revision, worktreeRevision: revision, operation: { type: ['string', 'null'] } }, required: ['branch', 'head', 'indexRevision', 'worktreeRevision', 'operation'], additionalProperties: false }
 const scope = { type: 'object', properties: { operations: { type: 'array', items: choice('STAGE', 'UNSTAGE', 'COMMIT', 'CREATE_BRANCH', 'CREATE_WORKTREE', 'PUSH', 'INTEGRATE', 'CLOSE', 'EDIT_TEXT'), minItems: 1, maxItems: 9 }, paths: { type: 'array', items: string, minItems: 0, maxItems: 500 }, branches: { type: 'array', items: string, minItems: 0, maxItems: 20 }, startPoints: { type: 'array', items: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, minItems: 0, maxItems: 20 } }, required: ['operations', 'paths', 'branches'], additionalProperties: false }
 const scopedMutation = { worktreeId: revision, leaseId: string, leaseCredential: credential, operationId: { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' }, snapshot }
+const autonomousScopedRequired = ['worktreeId', 'operationId', 'snapshot']
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {
   return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false }, securitySchemes: [{ type: 'oauth2', scopes: [] }] }
 }
 export const GIT_OPERATIONS_TOOLS = [
   tool('get_worktree_conflict', 'Read explicit conflict metadata or one bounded conflict side in a discovered worktree.', { worktreeId: revision, path: string, side: choice('BASE', 'OURS', 'THEIRS', 'WORKTREE'), cursor: string }, ['worktreeId', 'path']),
   tool('resolve_worktree_conflict', 'Resolve one explicitly scoped conflict in a managed integration checkout, against the observed conflict revision. Stages only that resolution under local ownership.', { ...scopedMutation, path: string, resolution: choice('OURS', 'THEIRS', 'CONTENT', 'DELETE'), expectedConflictRevision: revision, content: { type: 'string', maxLength: 1024 * 1024 } }, ['path', 'resolution', 'expectedConflictRevision', ...Object.keys(scopedMutation)]),
-  tool('start_worktree_validation', 'Execute an existing fixed validation profile in a managed clean checkout under explicit local ownership. Proofs bind the actual checkout generation, HEAD, index and dirty contents; accepts no arbitrary command or cwd.', { ...scopedMutation, profileId: string, targets: paths(100), evidenceFor: paths(100) }, ['profileId', ...Object.keys(scopedMutation)]),
+  tool('start_worktree_validation', 'Execute an existing fixed validation profile in a managed clean checkout under host Git delivery autonomy or explicit local ownership. Proofs bind the actual checkout generation, HEAD, index and dirty contents; accepts no arbitrary command or cwd.', { ...scopedMutation, profileId: string, targets: paths(100), evidenceFor: paths(100) }, ['profileId', ...autonomousScopedRequired]),
   tool('get_worktree_validation', 'Read the bounded result and genuine proofId of an authorized checkout validation run.', { runId: string }, ['runId']),
   tool('preview_worktree_integration', 'Bind a read-only integration preview to source and target snapshots, merge base and commits. Reports promotion blockers without changing refs.', { sourceWorktreeId: revision, targetBranch: string }, ['sourceWorktreeId', 'targetBranch']),
   tool('integrate_worktree', 'APPLY only in a managed integration checkout; conflicts remain isolated there. PROMOTE requires explicit target ownership and genuine validation proofs for the managed integration commit. Never force updates occupied branches.', { ...scopedMutation, action: choice('APPLY', 'PROMOTE'), previewId: string, integrationWorktreeId: revision, proofIds: paths(20) }, ['action', 'previewId', ...Object.keys(scopedMutation)]),
-  tool('publish_worktree', 'Push the explicitly approved current branch and exact inspected HEAD without force. PUBLISHED does not mean integrated.', { ...scopedMutation, branch: string, remote: string }, ['branch', 'remote', ...Object.keys(scopedMutation)]),
-  tool('manage_worktree', 'CREATE a managed worktree on a new explicit branch at an approved exact commit; no directory selector or project switch. CLOSE refuses external, dirty, locked, conflicted or unpreserved worktrees and never force-removes. Both actions require a local grant and operationId.', { ...scopedMutation, action: choice('CREATE', 'CLOSE'), branch: string, startPoint: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, preservedBranch: string }, ['action', ...Object.keys(scopedMutation)]),
+  tool('publish_worktree', 'Push the current branch and exact inspected HEAD without force under host Git delivery autonomy or explicit local ownership. PUBLISHED does not mean integrated.', { ...scopedMutation, branch: string, remote: string }, ['branch', 'remote', ...autonomousScopedRequired]),
+  tool('manage_worktree', 'CREATE a managed worktree on a new explicit branch at an approved exact commit under host Git delivery autonomy or explicit local ownership; no directory selector or project switch. CLOSE always requires an explicit local lease and refuses external, dirty, locked, conflicted or unpreserved worktrees.', { ...scopedMutation, action: choice('CREATE', 'CLOSE'), branch: string, startPoint: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, preservedBranch: string }, ['action', ...autonomousScopedRequired]),
   tool('handoff_worktree_for_git', 'REQUEST/RECOVER records a pending request for native desktop operator approval; cannot self-approve remotely. ACCEPT requires the private request credential. RELEASE explicitly returns ownership. Pause confirmation is cooperative, not an IDE writer lock. Keep credentials private.', { action: choice('REQUEST', 'RECOVER', 'ACCEPT', 'RELEASE'), worktreeId: revision, snapshot, scope, durationSeconds: { type: 'integer', minimum: 30, maximum: 300 }, requestId: string, requestCredential: credential, leaseId: string, leaseCredential: credential }, ['action']),
-  tool('mutate_worktree', 'Perform STAGE/UNSTAGE explicit paths, COMMIT exactly the inspected index, or CREATE_BRANCH and checkout an exclusive branch after local approval and explicit ACCEPT. Requires scoped lease, fresh snapshot and caller-created operationId; recover with the same ID. No implicit push.', { action: choice('STAGE', 'UNSTAGE', 'COMMIT', 'CREATE_BRANCH'), worktreeId: revision, leaseId: string, leaseCredential: credential, operationId: { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' }, snapshot, paths: paths(500), message: { ...string, maxLength: 10000 }, branch: string }, ['action', 'worktreeId', 'leaseId', 'leaseCredential', 'operationId', 'snapshot']),
+  tool('mutate_worktree', 'Perform STAGE/UNSTAGE explicit paths, COMMIT exactly the inspected index, or CREATE_BRANCH and checkout an exclusive branch under host Git delivery autonomy or explicit local lease. Requires fresh snapshot and caller-created operationId; recover with the same ID. No implicit push.', { action: choice('STAGE', 'UNSTAGE', 'COMMIT', 'CREATE_BRANCH'), worktreeId: revision, leaseId: string, leaseCredential: credential, operationId: { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' }, snapshot, paths: paths(500), message: { ...string, maxLength: 10000 }, branch: string }, ['action', 'worktreeId', 'operationId', 'snapshot']),
   tool('discover_worktrees', 'Discover up to 100 compact Git worktree records in the canonical repository. No source, patches or mutation permission. Discover before selecting an opaque worktreeId; drift rejects continuation.', { cursor: string }),
   tool('inspect_worktree', 'Inspect one discovered worktree without changing active project, index or HEAD. Git locked is not ownership.', { worktreeId: revision }, ['worktreeId']),
   tool('get_worktree_changes', 'Page changed path metadata only; no source or patches. Optional literal repository-relative pathPrefixes match a path or directory descendants; categories use OR. Filters apply before pagination. Cursor binds filters, pageSize and Git state; reuse identical arguments. Default/maximum pageSize 100.', { worktreeId: revision, cursor: string, pathPrefixes: paths(20), categories: { type: 'array', items: choice('STAGED', 'UNSTAGED', 'UNTRACKED', 'DELETED', 'CONFLICTED'), minItems: 1, maxItems: 5, uniqueItems: true }, pageSize: { type: 'integer', minimum: 1, maximum: 100 } }, ['worktreeId']),
@@ -74,16 +75,22 @@ function validate(schema: Record<string, any>, value: unknown): boolean {
   return false
 }
 
-export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareScopedDelivery, authority?: AgentAuthority, resolveDelivery?: ResolveOptionalDelivery): Promise<McpToolResult> {
+export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown, prepareDelivery?: PrepareScopedDelivery, authority?: AgentAuthority, resolveDelivery?: ResolveOptionalDelivery, deadlineAtMs?: number): Promise<McpToolResult> {
   const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
   if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   const { operationId, ...values } = args as Record<string, unknown>
   if (['mutate_worktree', 'manage_worktree', 'integrate_worktree', 'publish_worktree', 'start_worktree_validation', 'resolve_worktree_conflict'].includes(name)) {
+    const hasLeaseId = values.leaseId !== undefined
+    const hasLeaseCredential = values.leaseCredential !== undefined
+    if (hasLeaseId !== hasLeaseCredential) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
     const expectedFields: Record<string, string[]> = { STAGE: ['paths'], UNSTAGE: ['paths'], COMMIT: ['message'], CREATE_BRANCH: ['branch'] }
     if (name === 'manage_worktree') Object.assign(expectedFields, { CREATE: ['branch', 'startPoint'], CLOSE: ['preservedBranch'] })
     if (name === 'integrate_worktree') Object.assign(expectedFields, { APPLY: ['previewId'], PROMOTE: ['previewId', 'integrationWorktreeId', 'proofIds'] })
     const extra = name === 'resolve_worktree_conflict' ? ['path', 'resolution', 'expectedConflictRevision'] : name === 'start_worktree_validation' ? ['profileId'] : name === 'publish_worktree' ? ['branch', 'remote'] : expectedFields[String(values.action)]
     if (!extra || extra.some(key => !Object.prototype.hasOwnProperty.call(values, key)) || ['paths', 'message', 'branch', 'startPoint', 'preservedBranch', 'previewId', 'integrationWorktreeId', 'proofIds', 'remote'].some(key => Object.prototype.hasOwnProperty.call(values, key) && !extra.includes(key))) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+    if (name === 'manage_worktree' && values.action === 'CLOSE' && !hasLeaseId) {
+      return { content: [{ type: 'text', text: '{"code":"WORKTREE_OWNERSHIP_REQUIRED"}' }], isError: true }
+    }
     const resolved = resolveEffectiveDeliveryContext(undefined, authority?.deliveryContext, authority?.deliveryContextError)
     if (!resolved.ok || (authority?.worktreeId && typeof values.worktreeId === 'string' && authority.worktreeId !== values.worktreeId)) {
       return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID', ...(!resolved.ok ? { reason: resolved.reason } : { reason: 'WORKTREE_SCOPE_CONFLICT' }) }) }], isError: true }
@@ -93,16 +100,29 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
       ? (prepareDelivery ? () => prepareDelivery(resolved.request!, worktreeId) : null)
       : (resolveDelivery && worktreeId ? () => resolveDelivery(worktreeId) : undefined)
     if (prepareScoped === null) return { content: [{ type: 'text', text: JSON.stringify({ code: 'DELIVERY_CONTEXT_INVALID' }) }], isError: true }
+    const authorityOptions = {
+      ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}),
+      ...(deadlineAtMs !== undefined ? { deadlineAtMs } : {}),
+      ...(authority ? {
+        authority: {
+          repositoryId: authority.repositoryId,
+          transport: authority.principal.transport,
+          ...(authority.worktreeId ? { worktreeId: authority.worktreeId } : {}),
+          ...(authority.deliveryContext ? { deliveryContext: authority.deliveryContext } : {}),
+          isActive: () => authority.isActive() && authority.principal.isActive()
+        }
+      } : {})
+    }
     try {
       if (name === 'resolve_worktree_conflict') {
         if (values.resolution === 'CONTENT' ? typeof values.content !== 'string' : Object.prototype.hasOwnProperty.call(values, 'content')) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
         return await service.resolveWorktreeConflict(args as Parameters<GitOperationsService['resolveWorktreeConflict']>[0])
       }
-      if (name === 'start_worktree_validation') return await service.startWorktreeValidation(args as Parameters<GitOperationsService['startWorktreeValidation']>[0], prepareScoped)
-      if (name === 'mutate_worktree') return await service.mutateWorktree(args as Parameters<GitOperationsService['mutateWorktree']>[0], prepareScoped)
+      if (name === 'start_worktree_validation') return await service.startWorktreeValidation(args as Parameters<GitOperationsService['startWorktreeValidation']>[0], prepareScoped, authorityOptions)
+      if (name === 'mutate_worktree') return await service.mutateWorktree(args as Parameters<GitOperationsService['mutateWorktree']>[0], prepareScoped, authorityOptions)
       if (name === 'integrate_worktree') return await service.integrateWorktree(args as Parameters<GitOperationsService['integrateWorktree']>[0], prepareScoped)
-      if (name === 'publish_worktree') return await service.publishWorktree(args as Parameters<GitOperationsService['publishWorktree']>[0], prepareScoped)
-      return await service.manageWorktree(args as Parameters<GitOperationsService['manageWorktree']>[0])
+      if (name === 'publish_worktree') return await service.publishWorktree(args as Parameters<GitOperationsService['publishWorktree']>[0], prepareScoped, authorityOptions)
+      return await service.manageWorktree(args as Parameters<GitOperationsService['manageWorktree']>[0], authorityOptions)
     }
     catch (error) { return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED' }) }], isError: true } }
   }

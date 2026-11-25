@@ -7,6 +7,7 @@ import './ChannelView.css'
 import { LocalMcpSetup } from './LocalMcpSetup'
 import { updateSettings } from '../../utils/update-settings'
 import type { CliMode, CliTrustScope } from '../../../../shared/types/cli-policy-types'
+import type { GitDeliveryMode } from '../../../../shared/types/git-delivery-policy-types'
 
 type CliModeOption = CliMode | 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES'
 const cliModeOptions: Array<{ value: CliModeOption; label: string; mode: CliMode; scope?: CliTrustScope }> = [
@@ -131,6 +132,16 @@ export function ChannelView({ active = true }: { active?: boolean }) {
     catch { setError('Não foi possível alterar a autonomia CLI. Confira o repositório ativo.') }
     finally { if (mounted.current) setCliPending(false) }
   }
+  const chooseGitDeliveryMode = async (mode: GitDeliveryMode) => {
+    if (cliPending || !window.codeAwareness.chooseGitDeliveryMode) return
+    setCliPending(true); setError(null)
+    try {
+      await window.codeAwareness.chooseGitDeliveryMode(mode)
+      receive(await window.codeAwareness.getChannelState())
+    }
+    catch { setError('Não foi possível alterar a autonomia Git e PR. Confira o repositório ativo.') }
+    finally { if (mounted.current) setCliPending(false) }
+  }
   const stopCli = async () => {
     setCliPending(true); setError(null)
     try { if (!(await window.codeAwareness.stopCliExecution()).stopped) setError('Término da árvore de processos ainda não confirmado.') }
@@ -173,6 +184,19 @@ export function ChannelView({ active = true }: { active?: boolean }) {
         <div className="channel-header-controls">
           <button type="button" className="channel-action" disabled={cliPending || (state.cliMode ?? 'SUPERVISED') === 'SUPERVISED'} onClick={() => void chooseCliMode('SUPERVISED')}>Desativar autonomia</button>
           <button type="button" className="channel-action" disabled={cliPending} onClick={() => void stopCli()}>Interromper execução CLI</button>
+        </div>
+      </section>}
+      {state && <section className="channel-panel" aria-labelledby="git-delivery-autonomy-title">
+        <div className="channel-section-heading"><h2 id="git-delivery-autonomy-title"><GitBranch size={19} aria-hidden="true" />Autonomia Git e PR</h2><StatusBadge tone={state.gitDeliveryMode === 'AUTONOMOUS' ? 'warning' : 'neutral'}>{state.gitDeliveryMode === 'AUTONOMOUS' ? 'Autônomo' : 'Supervisionado'}</StatusBadge></div>
+        <p className="channel-panel-description">Repositório autorizado: {state.activeProject?.name ?? 'Nenhum projeto identificado'}. Abrangência: Git local em worktrees gerenciadas (criar worktree/branch, stage, unstage, commit, validação fixa), push normal, Pull Request e merge elegível em remoto/base configurados.</p>
+        <label className="channel-label" htmlFor="git-delivery-mode">Modo de entrega Git e PR</label>
+        <select id="git-delivery-mode" className="channel-action" value={state.gitDeliveryMode ?? 'SUPERVISED'} disabled={!state.activeProject || cliPending} onChange={event => void chooseGitDeliveryMode(event.target.value as GitDeliveryMode)}>
+          <option value="SUPERVISED">Supervisionado (aprovação por operação)</option>
+          <option value="AUTONOMOUS">Autônomo (entrega ordinária sem diálogos)</option>
+        </select>
+        <p className="channel-note">Ações destrutivas ou fora de escopo (CLOSE de worktree, integração/resolução de conflitos, fechamento de PR e force push) permanecem supervisionadas.</p>
+        <div className="channel-header-controls">
+          <button type="button" className="channel-action" disabled={cliPending || (state.gitDeliveryMode ?? 'SUPERVISED') === 'SUPERVISED'} onClick={() => void chooseGitDeliveryMode('SUPERVISED')}>Desativar autonomia Git</button>
         </div>
       </section>}
       {!state && !loadError && <p className="channel-loading" role="status"><Loader2 className="channel-spinner" size={18} aria-hidden="true" />Carregando estado operacional…</p>}

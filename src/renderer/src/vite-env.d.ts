@@ -134,6 +134,7 @@ declare global {
       revealAcademyGeminiExport: () => Promise<string>
       getChannelState: () => Promise<ChannelState>
       chooseCliMode: (mode: import('../../shared/types/cli-policy-types').CliMode, scope?: import('../../shared/types/cli-policy-types').CliTrustScope) => Promise<{ accepted: boolean }>
+      chooseGitDeliveryMode?: (mode: import('../../shared/types/git-delivery-policy-types').GitDeliveryMode) => Promise<{ accepted: boolean }>
       stopCliExecution: () => Promise<{ stopped: boolean }>
       localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
       codexUserHooks?: import('../../shared/types/codex-hooks-types').CodexUserHooksApi

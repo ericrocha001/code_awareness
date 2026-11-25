@@ -8,6 +8,9 @@ export interface ManagedWorktree extends WorktreeRecord {
   startPoint: string
   createdAt: string
   closedAt?: string
+  origin?: 'LEASE' | 'AUTONOMOUS'
+  sessionId?: string
+  executionId?: string
 }
 
 export class GitWorktreeLifecycle {

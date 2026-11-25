@@ -7,10 +7,13 @@ import type { GitHubApiClient } from './github-api-client'
 import type { PullRequestMutationApproval } from '../../shared/types/github-pr-types'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
+import type { GitDeliveryPolicy } from '../../shared/types/git-delivery-policy-types'
+
 export interface PullRequestDependencies {
   receiptDirectory: string
   approve(request: PullRequestApproval): Promise<boolean>
   approveMutation?(request: PullRequestMutationApproval): Promise<boolean>
+  getDeliveryPolicy?(repositoryId: string): GitDeliveryPolicy
   onDeliveryObserved?(repositoryId: string): void
 }
 
@@ -22,6 +25,14 @@ export interface PullRequestExecutionContext {
   defaultWorktreeId?: string
   isActive(): boolean
   inspectWorktree?(id: string): Promise<{ branch: string | null; head: string | null }>
+  deadlineAtMs?: number
+  authority?: {
+    repositoryId: string
+    transport: string
+    worktreeId?: string
+    deliveryContext?: DeliveryContextRequest
+    isActive: () => boolean
+  }
 }
 
 export class GitHubPullRequests {
@@ -42,7 +53,14 @@ export class GitHubPullRequests {
       ...(input.worktreeId ?? execution.defaultWorktreeId ? { worktreeId: input.worktreeId ?? execution.defaultWorktreeId } : {})
     }
     const context = await this.resolve()
-    const fingerprint = hash(JSON.stringify([context.repositoryId, context.repository.toLowerCase(), effectiveInput.headBranch, effectiveInput.baseBranch, effectiveInput.expectedHeadSha, effectiveInput.title, effectiveInput.body, effectiveInput.worktreeId ?? null, ...(effectiveInput.deliveryContext ? [deliveryContextRequest.parse(effectiveInput.deliveryContext)] : [])]))
+    const policy = this.dependencies?.getDeliveryPolicy?.(context.repositoryId)
+    const isAutonomous = Boolean(execution.authority && policy?.mode === 'AUTONOMOUS')
+    if (execution.authority) {
+      if (execution.deadlineAtMs !== undefined && Date.now() >= execution.deadlineAtMs) throw new PullRequestError('AUTHORIZATION_EXPIRED')
+      if (!execution.authority.isActive()) throw new PullRequestError('AUTHORIZATION_DENIED')
+      if (execution.authority.repositoryId !== context.repositoryId) throw new PullRequestError('PROJECT_CHANGED')
+    }
+    const fingerprint = hash(JSON.stringify([isAutonomous ? 'AUTONOMOUS' : 'SUPERVISED', context.repositoryId, context.repository.toLowerCase(), effectiveInput.headBranch, effectiveInput.baseBranch, effectiveInput.expectedHeadSha, effectiveInput.title, effectiveInput.body, effectiveInput.worktreeId ?? null, ...(effectiveInput.deliveryContext ? [deliveryContextRequest.parse(effectiveInput.deliveryContext)] : [])]))
     if (!this.dependencies) throw new PullRequestError('AUTHORIZATION_REQUIRED')
     const directory = join(this.dependencies.receiptDirectory, hash(context.repositoryId))
     const operationPath = join(directory, `${hash(effectiveInput.operationId)}.json`)
@@ -74,8 +92,17 @@ export class GitHubPullRequests {
     if (previous) throw new PullRequestError('OUTCOME_UNKNOWN')
     await this.verify(context, effectiveInput, execution)
     const expiresAt = new Date(Date.now() + 120_000).toISOString()
-    const granted = await this.dependencies.approve({ ...effectiveInput, ...context, operation: 'CREATE_PULL_REQUEST', expiresAt })
-    if (!granted) throw new PullRequestError('AUTHORIZATION_DENIED')
+    if (!isAutonomous) {
+      const granted = await this.dependencies.approve({ ...effectiveInput, ...context, operation: 'CREATE_PULL_REQUEST', expiresAt })
+      if (!granted) throw new PullRequestError('AUTHORIZATION_DENIED')
+    }
+    const assertAutonomousActive = () => {
+      if (!isAutonomous) return
+      if (execution.deadlineAtMs !== undefined && Date.now() >= execution.deadlineAtMs) throw new PullRequestError('AUTHORIZATION_EXPIRED')
+      if (!execution.authority?.isActive()) throw new PullRequestError('AUTHORIZATION_DENIED')
+      if (this.dependencies?.getDeliveryPolicy?.(context.repositoryId)?.mode !== 'AUTONOMOUS') throw new PullRequestError('AUTHORIZATION_DENIED')
+    }
+    assertAutonomousActive()
     if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
     const current = await this.resolve()
     if (current.repositoryId !== context.repositoryId || current.repository !== context.repository) throw new PullRequestError('PROJECT_CHANGED')
@@ -106,6 +133,7 @@ export class GitHubPullRequests {
       const created = await this.api.createPullRequest(context.repository, effectiveInput, () => {
         if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
         if (!execution.isActive()) throw new PullRequestError('PROJECT_CHANGED')
+        assertAutonomousActive()
       })
       try {
         const currentReceipt = JSON.parse(readFileSync(operationPath, 'utf8'))

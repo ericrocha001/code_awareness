@@ -192,6 +192,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   openAcademyGitRepository: (): Promise<boolean> => ipcRenderer.invoke('academy:git-open-repo'),
   getChannelState: (): Promise<ChannelState> => ipcRenderer.invoke('channel:get-state'),
   chooseCliMode: (mode: import('../shared/types/cli-policy-types').CliMode, scope?: import('../shared/types/cli-policy-types').CliTrustScope): Promise<{ accepted: boolean }> => ipcRenderer.invoke('cli:choose-mode', mode, scope),
+  chooseGitDeliveryMode: (mode: import('../shared/types/git-delivery-policy-types').GitDeliveryMode): Promise<{ accepted: boolean }> => ipcRenderer.invoke('git:choose-delivery-mode', mode),
   stopCliExecution: (): Promise<{ stopped: boolean }> => ipcRenderer.invoke('cli:stop'),
   onChannelChanged: (callback: (state: ChannelState) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: ChannelState): void => callback(state)

@@ -136,10 +136,11 @@ import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
-import { confirmCliExecution, confirmCliAutonomy } from './cli-execution/cli-authorization'
+import { confirmCliExecution, confirmCliAutonomy, confirmGitDeliveryAutonomy } from './cli-execution/cli-authorization'
 import { createCliProjectAuthority, createCliProjectRuntimeAuthority } from './cli-execution/cli-project-authority'
 import { resolveCliWorktree } from './cli-execution/cli-worktree-authority'
 import { CliTrustPolicy } from './cli-execution/cli-trust-policy'
+import { GitDeliveryTrustPolicy } from './git-operations/git-delivery-trust-policy'
 import { registerCliPolicyHandlers } from './ipc/cli-policy-handler'
 import { locateCliJobOwner } from './cli-execution/windows/cli-job-owner-locator'
 
@@ -627,14 +628,16 @@ app.whenReady().then(async () => {
     continuumSession.deactivate()
   })
   let boundProjectRevision = -1
-  const cliTrustPolicy = new CliTrustPolicy(settingsService, () => {
+  const resolveLocalTrustContext = () => {
     const state = activeProjects?.getState(), project = state?.project
     if (!project || state?.context?.identity !== 'IDENTITY_BOUND') return null
     const repository = repositoryCatalog?.findByPath(project.path)
     if (!repository || repository.id !== project.id || state.context.repositoryId !== repository.id || repository.localCheckout?.availability !== 'AVAILABLE') return null
     return { repositoryId: repository.id, path: project.path, revision: state.revision }
-  }, (mode, context, scope) => confirmCliAutonomy(mainWindow, mode, context, scope))
-  registerCliPolicyHandlers(cliTrustPolicy, () => mainWindow, () => activeCliExecution)
+  }
+  const cliTrustPolicy = new CliTrustPolicy(settingsService, resolveLocalTrustContext, (mode, context, scope) => confirmCliAutonomy(mainWindow, mode, context, scope))
+  const gitDeliveryTrustPolicy = new GitDeliveryTrustPolicy(settingsService, resolveLocalTrustContext, context => confirmGitDeliveryAutonomy(mainWindow, context))
+  registerCliPolicyHandlers(cliTrustPolicy, () => mainWindow, () => activeCliExecution, gitDeliveryTrustPolicy)
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
@@ -758,6 +761,7 @@ app.whenReady().then(async () => {
     gitOperations.bindAtlasRemotePolicy(() => settingsService.loadSettings().gitManagement?.automaticFetch !== false)
     gitOperations.bindManagementPublicationPolicy(branch => githubIntegration.managementPublicationPolicy(project.path, branch))
     gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))
+    gitOperations.bindGitDeliveryPolicy(targetPath => gitDeliveryTrustPolicy.getPolicy({ repositoryId: gitRepositoryId ?? null, path: targetPath }))
     const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
       gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined,
@@ -933,7 +937,7 @@ app.whenReady().then(async () => {
   registerConnectionHandlers(remoteAccess)
   channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
     () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth,
-    () => cliTrustPolicy.getPolicy())
+    () => cliTrustPolicy.getPolicy(), () => gitDeliveryTrustPolicy.getPolicy())
   const unsubscribeContextChannel = channelProjection.onChanged(state => {
     const active = activeProjects?.getState()
     if (!active?.project || state.activeProject?.id !== active.project.id) return
@@ -990,6 +994,11 @@ app.whenReady().then(async () => {
     githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell, {
       receiptDirectory: join(app.getPath('userData'), 'github', 'pr-operations'),
       onDeliveryObserved: repositoryId => requestDeliveryProjection?.(repositoryId),
+      getDeliveryPolicy: repositoryId => {
+        const project = activeProjects?.getState().project
+        if (!project) return { mode: 'SUPERVISED', revision: 'untrusted', rule: 'native-operation-consent', allowedRemotes: [] }
+        return gitDeliveryTrustPolicy.getPolicy({ repositoryId, path: project.path })
+      },
       approveMutation: async request => {
         const project = activeProjects?.getState()
         if (!mainWindow || mainWindow.isDestroyed() || !project?.project || repositoryCatalog?.findByPath(project.project.path)?.id !== request.repositoryId) return false
