@@ -33,9 +33,9 @@ export interface ChromeRuntimeApi {
   getURL?(path: string): string
   getContexts?(filter: {
     contextTypes: ['POPUP']
-    documentIds: string[]
+    documentIds?: string[]
     documentUrls: string[]
-  }): Promise<Array<{ contextType: string; documentId?: string; documentUrl?: string }>>
+  }): Promise<Array<{ contextType: string; documentId?: string; documentUrl?: string; frameId: number; tabId: number }>>
   getManifest?: () => { version?: string; [key: string]: unknown }
   reload?: () => void
   connectNative?(application: string): ChromeNativePortLike
