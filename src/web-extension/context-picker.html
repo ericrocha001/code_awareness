@@ -116,6 +116,11 @@
       .metadata, .filters { gap: 4px; }
 
     }
+    @media (max-height: 500px) {
+      body[data-surface="popup"] { gap: 6px; padding-block: 8px; }
+      body[data-surface="popup"] .metadata,
+      body[data-surface="popup"] .filters { gap: 4px; }
+    }
     [hidden] { display: none !important; }
   </style>
 </head>

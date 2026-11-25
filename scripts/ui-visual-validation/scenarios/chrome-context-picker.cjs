@@ -259,7 +259,7 @@ exports.run = async ctx => {
 
     const loaded = await ctx.window.webContents.session.extensions.loadExtension(extension)
     try {
-      await ctx.viewport(360, 560)
+      await ctx.viewport(358, 600)
       await ctx.window.loadURL(`chrome-extension://${loaded.id}/popup.html`)
       await ctx.waitFor(() => document.querySelector('#open-picker')?.textContent.includes('Continuum'))
       await ctx.evaluate((catalog) => {
@@ -274,11 +274,11 @@ exports.run = async ctx => {
       await ctx.waitFor(() => document.querySelectorAll('#floating-bar-sites fieldset').length === 5)
       await ctx.capture('context-picker-popup-settings')
       await ctx.click('#open-picker')
+      await ctx.viewport(800, 600)
       await ctx.waitFor(() => document.querySelector('iframe')?.contentDocument?.querySelectorAll('#results input').length === 20)
       await ctx.evaluate(() => {
         const view = document.querySelector('iframe').contentDocument
         for (const checkbox of [...view.querySelectorAll('#results input')].slice(0, 8)) checkbox.click()
-        view.querySelector('#selection-toggle').click()
       })
       await ctx.waitFor(() => document.querySelector('iframe')?.contentDocument?.querySelector('#preview')?.textContent.includes('412'))
       ctx.check('Shared picker has manual actions in the popup', await ctx.evaluate(() => {
@@ -287,10 +287,35 @@ exports.run = async ctx => {
           view.querySelector('#insert').hidden && !view.querySelector('#attach').disabled &&
           view.querySelector('#attach').textContent.includes('Baixar arquivos')
       }))
+      const popupFits = () => {
+        const back = document.querySelector('#back-to-settings').getBoundingClientRect()
+        const frame = document.querySelector('#picker-view iframe')
+        const rect = frame.getBoundingClientRect()
+        const view = frame.contentDocument
+        const catalog = view.querySelector('#catalog')
+        const actions = view.querySelector('#attach').getBoundingClientRect()
+        return back.top >= 0 && back.bottom <= rect.top && rect.left === 0 &&
+          rect.width === innerWidth && rect.bottom === innerHeight &&
+          view.documentElement.scrollWidth === rect.width &&
+          actions.right <= rect.width && actions.bottom <= rect.height &&
+          catalog.clientHeight >= 40 && catalog.scrollHeight > catalog.clientHeight
+      }
+      ctx.check('Wide popup uses the viewport and keeps the catalog and actions accessible', await ctx.evaluate(popupFits))
       await ctx.capture('context-picker-popup')
+      await ctx.evaluate(() => document.querySelector('iframe').contentDocument.querySelector('#selection-toggle').click())
+      await ctx.viewport(358, 480)
+      await ctx.capture('context-picker-popup-narrow')
+      ctx.check('Narrow popup has no horizontal clipping and preserves selection and footer', await ctx.evaluate(popupFits) &&
+        await ctx.evaluate(() => {
+          const view = document.querySelector('iframe').contentDocument
+          const selected = view.querySelector('#selected')
+          return view.querySelectorAll('#results input:checked').length === 8 &&
+            selected.clientHeight > 0 && selected.scrollHeight > selected.clientHeight
+        }))
       await ctx.click('#back-to-settings')
       ctx.check('Back discards popup selection instance', await ctx.evaluate(() =>
-        !document.querySelector('#picker-view iframe') && !document.querySelector('#settings-view').hidden
+        !document.querySelector('#picker-view iframe') && !document.querySelector('#settings-view').hidden &&
+        document.body.getBoundingClientRect().width === 358
       ))
     } finally {
       ctx.window.webContents.session.extensions.removeExtension(loaded.id)
