@@ -534,6 +534,7 @@ window.addEventListener('message', event => {
   if (ready) return
   if (extensionParent && event.data?.type === 'PICKER_POPUP_READY') {
     popupHost = true
+    document.body.dataset.surface = 'popup'
     close.hidden = true
     insert.hidden = true
     destination.textContent = pt.manualUse
