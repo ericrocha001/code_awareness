@@ -54,146 +54,49 @@ const same = (a: string, b: string) => process.platform === 'win32' ? a.toLowerC
 const fail = (code: string): never => { throw new RepositoryFileEditingError(code) }
 const hasErrno = (error: unknown, code: string) => !!error && typeof error === 'object' && 'code' in error && error.code === code
 
-// Fixed program; metadata JSON is line 1 on stdin and base64 payload is line 2 (avoids ConvertFrom-Json MaxJsonLength).
-// Applies destination DACL to the empty temp file before writing bytes, verifies physical handle identity/nlink/reparse/attributes,
-// checks deadline before irreversible File.Replace(..., $false), and preserves Windows DACL.
-const WINDOWS_ATOMIC_REPLACE = `
+// Fixed program; paths are JSON stdin data, never PowerShell source. File.Replace preserves the Windows DACL.
+const WINDOWS_REPLACE = `
 $ErrorActionPreference = 'Stop'
 [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
 try {
-  $metaLine = [Console]::In.ReadLine()
-  if ($null -eq $metaLine) { exit 13 }
-  $v = $metaLine | ConvertFrom-Json
-  $b64 = [Console]::In.ReadLine()
-  if ($null -eq $b64) { $b64 = '' }
-  if ($null -ne $v.deadlineEpochMs -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge [int64]$v.deadlineEpochMs) { exit 15 }
-  $checkPaths = {
-    foreach ($p in @($v.destination, $v.temporary)) {
-      $item = [System.IO.FileInfo]::new($p)
-      if (!$item.Exists -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 12 }
-      $dir = $item.Directory
-      while ($null -ne $dir) {
-        if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 12 }
-        $dir = $dir.Parent
-      }
+  $v = [Console]::In.ReadToEnd() | ConvertFrom-Json
+  foreach ($p in @($v.destination, $v.temporary)) {
+    $item = [System.IO.FileInfo]::new($p)
+    if (!$item.Exists -or (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) { exit 12 }
+    $dir = $item.Directory
+    while ($null -ne $dir) {
+      if (($dir.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { exit 12 }
+      $dir = $dir.Parent
     }
-    $attributes = [System.IO.File]::GetAttributes($v.destination)
-    if (($attributes -band ([System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System -bor [System.IO.FileAttributes]::ReadOnly)) -ne 0) { exit 14 }
   }
-  & $checkPaths
-  Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-[StructLayout(LayoutKind.Sequential)]
-public struct REPO_FILETIME { public uint Low; public uint High; }
-[StructLayout(LayoutKind.Sequential)]
-public struct REPO_FILE_INFO {
-  public uint FileAttributes;
-  public REPO_FILETIME CreationTime;
-  public REPO_FILETIME LastAccessTime;
-  public REPO_FILETIME LastWriteTime;
-  public uint VolumeSerialNumber;
-  public uint FileSizeHigh;
-  public uint FileSizeLow;
-  public uint NumberOfLinks;
-  public uint FileIndexHigh;
-  public uint FileIndexLow;
-}
-public static class RepoWin32 {
-  [DllImport("kernel32.dll", SetLastError=true)]
-  public static extern bool GetFileInformationByHandle(IntPtr h, out REPO_FILE_INFO info);
-}
-"@
-  $checkHandle = {
-    param($stream, [uint64]$expectedIno, [uint32]$expectedDev, [int]$failCode)
-    $info = New-Object REPO_FILE_INFO
-    if (![RepoWin32]::GetFileInformationByHandle($stream.SafeFileHandle.DangerousGetHandle(), [ref]$info)) { exit $failCode }
-    $ino = (([uint64]$info.FileIndexHigh) -shl 32) -bor ([uint64]$info.FileIndexLow)
-    if ($info.NumberOfLinks -ne 1 -or $ino -ne $expectedIno -or $info.VolumeSerialNumber -ne $expectedDev) { exit $failCode }
+  $attributes = [System.IO.File]::GetAttributes($v.destination)
+  if (($attributes -band ([System.IO.FileAttributes]::Hidden -bor [System.IO.FileAttributes]::System -bor [System.IO.FileAttributes]::ReadOnly)) -ne 0) { exit 14 }
+  if ($v.prepare) {
+    [System.IO.File]::SetAccessControl($v.temporary, [System.IO.File]::GetAccessControl($v.destination))
+    exit 0
   }
-  $tInit = [System.IO.File]::Open($v.temporary, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-  try {
-    & $checkHandle $tInit ([uint64]$v.expectedTempIno) ([uint32]$v.expectedDestDev) 12
-    if ($tInit.Length -ne 0) { exit 12 }
-  } finally { $tInit.Dispose() }
-  $dInit = [System.IO.File]::Open($v.destination, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-  try {
-    & $checkHandle $dInit ([uint64]$v.expectedDestIno) ([uint32]$v.expectedDestDev) 11
-  } finally { $dInit.Dispose() }
-  [System.IO.File]::SetAccessControl($v.temporary, [System.IO.File]::GetAccessControl($v.destination))
-  $bytes = [Convert]::FromBase64String($b64)
-  $tWrite = [System.IO.File]::Open($v.temporary, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
-  try {
-    & $checkHandle $tWrite ([uint64]$v.expectedTempIno) ([uint32]$v.expectedDestDev) 12
-    $tWrite.Write($bytes, 0, $bytes.Length)
-    $tWrite.Flush($true)
-    $tWrite.Position = 0
-    $shaT = [System.Security.Cryptography.SHA256]::Create()
-    try { $tHash = ([BitConverter]::ToString($shaT.ComputeHash($tWrite))).Replace('-', '').ToLowerInvariant() } finally { $shaT.Dispose() }
-    if ($tHash -ne $v.afterSha256) { exit 13 }
-  } finally { $tWrite.Dispose() }
-  & $checkPaths
-  $dFinal = [System.IO.File]::Open($v.destination, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
-  try {
-    & $checkHandle $dFinal ([uint64]$v.expectedDestIno) ([uint32]$v.expectedDestDev) 11
-    $shaD = [System.Security.Cryptography.SHA256]::Create()
-    try { $dHash = ([BitConverter]::ToString($shaD.ComputeHash($dFinal))).Replace('-', '').ToLowerInvariant() } finally { $shaD.Dispose() }
-    if ($dHash -ne $v.expected) { exit 11 }
-  } finally { $dFinal.Dispose() }
-  if ($null -ne $v.deadlineEpochMs -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge [int64]$v.deadlineEpochMs) { exit 15 }
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $stream = [System.IO.File]::OpenRead($v.destination)
+  try { $hash = ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-', '').ToLowerInvariant() } finally { $stream.Dispose(); $sha.Dispose() }
+  if ($hash -ne $v.expected) { exit 11 }
   [System.IO.File]::Replace($v.temporary, $v.destination, [NullString]::Value, $false)
   exit 0
 } catch { exit 13 }
 `
 
-export interface WindowsAtomicReplaceRequest {
-  temporary: string
-  destination: string
-  expected: string
-  afterSha256: string
-  bytes: Buffer
-  expectedDestIno: string
-  expectedDestDev: string
-  expectedTempIno: string
-  deadlineEpochMs?: number
-}
-
-export type WindowsAtomicReplaceFn = (request: WindowsAtomicReplaceRequest) => void
-
-function windowsAtomicReplace(request: WindowsAtomicReplaceRequest): void {
-  if (request.deadlineEpochMs !== undefined && Date.now() >= request.deadlineEpochMs) fail('REQUEST_TIMEOUT')
+function windowsReplace(temporary: string, destination: string, expected: string, prepare = false): void {
+  if (process.platform !== 'win32') { renameSync(temporary, destination); return }
   const executable = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-  const timeout = request.deadlineEpochMs !== undefined
-    ? Math.max(1, Math.min(10_000, request.deadlineEpochMs - Date.now()))
-    : 10_000
-  const metadata = JSON.stringify({
-    temporary: request.temporary,
-    destination: request.destination,
-    expected: request.expected,
-    afterSha256: request.afterSha256,
-    expectedDestIno: request.expectedDestIno,
-    expectedDestDev: request.expectedDestDev,
-    expectedTempIno: request.expectedTempIno,
-    ...(request.deadlineEpochMs !== undefined ? { deadlineEpochMs: request.deadlineEpochMs } : {})
-  })
-  const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_ATOMIC_REPLACE], {
-    input: `${metadata}\n${request.bytes.toString('base64')}\n`,
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout,
-    maxBuffer: 1024
+  const result = spawnSync(executable, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', WINDOWS_REPLACE], {
+    input: JSON.stringify({ temporary, destination, expected, prepare }), encoding: 'utf8', windowsHide: true, timeout: 10_000, maxBuffer: 1024
   })
   if (result.status === 11) fail('FILE_REVISION_CONFLICT')
   if (result.status === 12) fail('INVALID_PATH')
   if (result.status === 14) fail('PROTECTED_PATH')
-  if (result.status === 15) fail('REQUEST_TIMEOUT')
-  if (result.status === null && request.deadlineEpochMs !== undefined && Date.now() >= request.deadlineEpochMs) fail('REQUEST_TIMEOUT')
   if (result.status !== 0) fail('WRITE_OUTCOME_UNKNOWN')
 }
 
-function commitFile(temporary: string, destination: string, _expected: string): void {
-  renameSync(temporary, destination)
-}
+function commitFile(temporary: string, destination: string, expected: string): void { windowsReplace(temporary, destination, expected) }
 
 function applyReplacements(text: string, replacements: Array<{ oldText: string; newText: string }>): string {
   if (!Array.isArray(replacements) || replacements.length < 1 || replacements.length > 32) fail('INVALID_ARGUMENT')
@@ -217,8 +120,6 @@ export class RepositoryFileEditing {
     isActive: () => boolean
     ingress?: RepositoryFileIngress
     commit?: typeof commitFile
-    windowsReplace?: WindowsAtomicReplaceFn
-    deadlineAtMs?: number
     create?: (temporary: string, destination: string) => void
   }) { this.root = realpathSync(repositoryRoot) }
 
@@ -334,9 +235,7 @@ export class RepositoryFileEditing {
     let temporary: string | undefined
     let attempted = false
     const afterSha256 = receipt.afterSha256
-    const useWindowsAtomic = process.platform === 'win32' && !this.options.commit
     try {
-      if (this.options.deadlineAtMs !== undefined && Date.now() >= this.options.deadlineAtMs) fail('REQUEST_TIMEOUT')
       const latest = await this.snapshot(target.absolute)
       if (digest(latest.bytes) !== expected || latest.identity.ino !== before.identity.ino || latest.identity.dev !== before.identity.dev) fail('FILE_REVISION_CONFLICT')
       if (!receipt.changed) return receipt
@@ -345,15 +244,13 @@ export class RepositoryFileEditing {
       const temporaryIdentity = await handle.stat()
       try {
         if ((await handle.stat()).dev !== before.identity.dev) fail('INVALID_PATH')
-        if (!useWindowsAtomic) {
-          await handle.chmod(before.identity.mode & 0o777)
-          await handle.writeFile(bytes)
-          await handle.sync()
-        }
+        if (process.platform === 'win32') windowsReplace(temporary, target.absolute, expected, true)
+        else await handle.chmod(before.identity.mode & 0o777)
+        await handle.writeFile(bytes)
+        await handle.sync()
       } finally { await handle.close() }
-      if (!useWindowsAtomic && digest(await readFile(temporary)) !== afterSha256) fail('WRITE_FAILED')
+      if (digest(await readFile(temporary)) !== afterSha256) fail('WRITE_FAILED')
       // Synchronous final guard and commit prevent the Main active-context revision from changing between them.
-      if (this.options.deadlineAtMs !== undefined && Date.now() >= this.options.deadlineAtMs) fail('REQUEST_TIMEOUT')
       this.active()
       const publishedIdentity = lstatSync(temporary)
       if (!publishedIdentity.isFile() || publishedIdentity.isSymbolicLink() || publishedIdentity.nlink !== 1 || publishedIdentity.dev !== temporaryIdentity.dev || publishedIdentity.ino !== temporaryIdentity.ino) fail('INVALID_PATH')
@@ -361,25 +258,8 @@ export class RepositoryFileEditing {
       const identity = lstatSync(target.absolute)
       if (!identity.isFile() || identity.nlink !== 1 || identity.ino !== before.identity.ino || identity.dev !== before.identity.dev || digest(readFileSync(target.absolute)) !== expected) fail('FILE_REVISION_CONFLICT')
       attempted = true
-      if (useWindowsAtomic) {
-        const destExact = lstatSync(target.absolute, { bigint: true })
-        const tempExact = lstatSync(temporary, { bigint: true })
-        const replaceWin = this.options.windowsReplace ?? windowsAtomicReplace
-        replaceWin({
-          temporary,
-          destination: target.absolute,
-          expected,
-          afterSha256,
-          bytes,
-          expectedDestIno: destExact.ino.toString(),
-          expectedDestDev: destExact.dev.toString(),
-          expectedTempIno: tempExact.ino.toString(),
-          deadlineEpochMs: this.options.deadlineAtMs
-        })
-      } else {
-        const commit = this.options.commit ?? commitFile
-        commit(temporary, target.absolute, expected)
-      }
+      const commit = this.options.commit ?? commitFile
+      commit(temporary, target.absolute, expected)
       if (digest(readFileSync(target.absolute)) !== afterSha256) fail('WRITE_OUTCOME_UNKNOWN')
       return receipt
     } catch (error) {
@@ -388,7 +268,7 @@ export class RepositoryFileEditing {
         try {
           const observed = digest(readFileSync(target.absolute))
           if (observed === afterSha256) return receipt
-          if (observed === expected) fail(error instanceof RepositoryFileEditingError && error.code === 'REQUEST_TIMEOUT' ? 'REQUEST_TIMEOUT' : 'WRITE_FAILED')
+          if (observed === expected) fail('WRITE_FAILED')
         } catch (reconciliation) {
           if (reconciliation instanceof RepositoryFileEditingError) throw reconciliation
         }

@@ -440,7 +440,7 @@ export class GitOperationsService {
       paths: string[]
     },
     fingerprintArgs: Record<string, unknown>,
-    effect: (ctx: { root: string; repositoryId: string; isActive: () => boolean; deadlineAtMs?: number; beforePublish: () => Promise<void>; finalCheck: () => Promise<WorktreeSnapshot>; observeSnapshot: () => Promise<WorktreeSnapshot> }) => Promise<GitOperationalResult & { preserveGrant?: boolean }>,
+    effect: (ctx: { root: string; repositoryId: string; isActive: () => boolean; beforePublish: () => Promise<void>; finalCheck: () => Promise<WorktreeSnapshot>; observeSnapshot: () => Promise<WorktreeSnapshot> }) => Promise<GitOperationalResult & { preserveGrant?: boolean }>,
     options?: {
       sessionWitness?: import('../../shared/types/delivery-context-types').AuthenticatedSessionWitness
       deadlineAtMs?: number
@@ -543,7 +543,6 @@ export class GitOperationsService {
             root: observedPath,
             repositoryId: this.worktreeRepositoryId!,
             isActive: () => (!this.coordinationIdentity || this.coordinationIdentity.isActive()),
-            deadlineAtMs: options?.deadlineAtMs,
             beforePublish: async () => { await checkCurrent(false) },
             finalCheck: () => checkCurrent(true),
             observeSnapshot: async () => observedSnapshot

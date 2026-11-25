@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
-import { linkSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -138,53 +138,5 @@ describe('guarded mutations', () => {
     await expect(editor.replaceFile('rules.md', sha(bytes), { file }, intent)).rejects.toMatchObject({ code: 'REPOSITORY_CONTEXT_CHANGED' })
     expect(await readFile(path.join(root, 'rules.md'), 'utf8')).toBe('external')
     expect(await readdir(root)).toEqual(['rules.md'])
-  })
-
-  it.runIf(process.platform === 'win32')('invokes Windows atomic replace once per altered file with an empty temp file, 0 on no-op, and enforces deadline', async () => {
-    const calls: Array<{ tempSize: number; changedBytes: number }> = []
-    const mocked = new RepositoryFileEditing(root, {
-      isActive: () => true,
-      windowsReplace: req => {
-        calls.push({ tempSize: statSync(req.temporary).size, changedBytes: req.bytes.length })
-        writeFileSync(req.temporary, req.bytes)
-        renameSync(req.temporary, req.destination)
-      }
-    })
-    const noOp = await mocked.replaceFile('rules.md', sha(original), { text: original }, intent)
-    expect(noOp.changed).toBe(false)
-    expect(calls).toHaveLength(0)
-
-    const updated = await mocked.replaceFile('rules.md', sha(original), { text: 'updated\r\n' }, intent)
-    expect(updated.changed).toBe(true)
-    expect(calls).toEqual([{ tempSize: 0, changedBytes: Buffer.byteLength('updated\r\n') }])
-
-    const expired = new RepositoryFileEditing(root, {
-      isActive: () => true,
-      deadlineAtMs: Date.now() - 1,
-      windowsReplace: () => { throw new Error('must not run after deadline') }
-    })
-    await expect(expired.replaceFile('rules.md', sha('updated\r\n'), { text: 'never' }, intent)).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' })
-    expect(await readFile(path.join(root, 'rules.md'), 'utf8')).toBe('updated\r\n')
-
-    const helperTimeout = new RepositoryFileEditing(root, {
-      isActive: () => true,
-      windowsReplace: () => { throw new RepositoryFileEditingError('REQUEST_TIMEOUT') }
-    })
-    await expect(helperTimeout.replaceFile('rules.md', sha('updated\r\n'), { text: 'never' }, intent)).rejects.toMatchObject({ code: 'REQUEST_TIMEOUT' })
-    expect(await readFile(path.join(root, 'rules.md'), 'utf8')).toBe('updated\r\n')
-  })
-
-  it.runIf(process.platform === 'win32')('real Windows atomic replace handles >2 MiB payloads and rejects hardlinked targets', async () => {
-    const big = Buffer.alloc(2 * 1024 * 1024 + 4096, 0x61)
-    const file = { file_id: 'big-id', download_url: 'https://files.example/big' }
-    const ingress = new RepositoryFileIngress(root, { fetch: vi.fn(async () => new Response(big)) as typeof fetch })
-    const editor = new RepositoryFileEditing(root, { isActive: () => true, ingress })
-    const r1 = await editor.replaceFile('rules.md', sha(original), { file }, intent)
-    expect(r1.state).toBe('CONFIRMED')
-    expect(await readFile(path.join(root, 'rules.md'))).toEqual(big)
-
-    linkSync(path.join(root, 'rules.md'), path.join(root, 'rules-link.md'))
-    await expect(service().replaceFile('rules.md', sha(big), { text: 'blocked' }, intent)).rejects.toMatchObject({ code: 'INVALID_PATH' })
-    expect(await readFile(path.join(root, 'rules.md'))).toEqual(big)
   })
 })
