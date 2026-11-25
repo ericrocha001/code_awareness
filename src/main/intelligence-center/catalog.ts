@@ -103,7 +103,7 @@ export const ACQUISITION_CHANNELS: Readonly<Record<AcquisitionChannelId, Acquisi
   ACADEMY: channel(
     'ACADEMY',
     'Academy canonical Skill catalog and history',
-    ['list_academy_skills', 'get_academy_skill', 'list_academy_changes', 'get_academy_change_diff', 'analyze_academy_change_impact'],
+    ['list_academy_skills', 'get_academy_skill', 'list_academy_changes', 'get_academy_change_diff', 'analyze_academy_change_impact', 'get_academy_skill_lint'],
     'Check skill versions and triggers applicable to the period; current catalog alone does not prove past availability.'
   ),
   REPORTED_USAGE: channel(

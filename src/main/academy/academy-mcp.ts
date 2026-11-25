@@ -1,8 +1,11 @@
-import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
+import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope, AcademySkillStatus } from '../../shared/types/academy-types'
+import type { AgentAuthority } from '../continuum/agent-authority'
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { AcademyService } from './academy-service'
+import { AcademyError } from './academy-package'
 import { academyImpactFreshnessSchema, academyImpactSchema } from './academy-impact-schema'
 import { projectAcademyGitStatus } from './git/academy-git-sync-service'
+import type { FindingCategory, LintHealth } from './lint/skill-lint-types'
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] }]
 const tool = (name: string, description: string, inputSchema: Record<string, unknown>): McpToolDefinition => ({ name, description, inputSchema, securitySchemes })
@@ -28,9 +31,37 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('publish_academy_git_drafts', 'Publish reviewed local Academy commits with normal fast-forward push. Supply the workspace and remote SHA from get_academy_git_status. Protected branches remain pending review; never creates or merges a PR.', { type: 'object', properties: { confirmed: { const: true }, localHead: id, remoteHead: id }, required: ['confirmed', 'localHead', 'remoteHead'], additionalProperties: false }),
   tool('verify_academy_change_impact', 'Read-only advisory freshness of an impact snapshot: CURRENT/STALE/UNKNOWN with observed reasons. Supply candidateHash to compare a changed candidate without resending its package. Without it, candidate mode checks only the previous content identity. No lock or atomic guarantee until update; expectedVersion protects only the source.', academyImpactFreshnessSchema),
   tool('analyze_academy_change_impact', 'Read-only package change evidence and possible DIRECT consumers from ACTIVE canonical Skills. Mentions are not dependencies or compatibility verdicts. Use changes/consumers/evidence offsets and consumerId for bounded detail. Candidate mode requires expectedVersion plus complete package; retrospective mode requires baseVersion and targetVersion.', academyImpactSchema),
-  tool('list_academy_skills', 'List ACTIVE and DISABLED canonical skills by default, including stateRevision for activation CAS. Discovery does not mean installation. ARCHIVED is a legacy input alias for DISABLED.', { type: 'object', properties: { status: { type: 'string', enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'] } }, additionalProperties: false }),
+  tool('list_academy_skills', 'List ACTIVE and DISABLED canonical skills by default, including stateRevision for activation CAS. Discovery does not mean installation. ARCHIVED is a legacy input alias for DISABLED. Opt in with includeEfficiency:true, limit, or cursor for paged efficiency measures and predecessor deltas without changing the legacy array default.', {
+    type: 'object',
+    properties: {
+      status: { type: 'string', enum: ['ACTIVE', 'DISABLED', 'ARCHIVED'] },
+      includeEfficiency: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 50 },
+      cursor: { type: 'string', minLength: 1 }
+    },
+    additionalProperties: false
+  }),
   tool('set_academy_skill_enabled', 'Set activation with independent stateRevision CAS. Returns persisted status and stateRevision; local reconciliation is scheduled separately. Does not publish an installed plugin.', { type: 'object', properties: { skillId: id, enabled: { type: 'boolean' }, expectedStateRevision: version }, required: ['skillId', 'enabled', 'expectedStateRevision'], additionalProperties: false }),
-  tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
+  tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id, or use view (manifest, resource, outline, section, search) for selective snapshot-bound acquisition without transmitting full bodies.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      view: { type: 'string', enum: ['package', 'manifest', 'resource', 'outline', 'section', 'search'] },
+      version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      path: { type: 'string', minLength: 1 },
+      selector: { type: 'string', minLength: 1 },
+      expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      includeDescendants: { type: 'boolean' },
+      query: { type: 'string', minLength: 1, maxLength: 200 },
+      caseSensitive: { type: 'boolean' },
+      textOffset: { type: 'integer', minimum: 0 },
+      textLimit: { type: 'integer', minimum: 1, maximum: 12288 },
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 100 }
+    },
+    required: ['skillId'],
+    additionalProperties: false
+  }),
   tool('list_academy_changes', 'Discover immutable Academy skill version events globally in descending persistence order (createdAt DESC, skillId ASC, version DESC) without reading packages. Intersecting filters narrow results: skillId, query (case-insensitive literal substring on current skillName, not body), after/before (inclusive ISO 8601 UTC-normalized persistence timestamps), origin, limit (default 20, max 50), and cursor. skillName reflects the current canonical skill name; previousVersion is the actual persisted predecessor of that skill regardless of date filters. contentState/previousContentState distinguish tombstone deletion and reintroduction. Cursor binds filters, order and limit; visibility matches Academy catalog permissions and does not guarantee an immutable snapshot across pages. Inspect deltas with get_academy_change_diff or read a full package with get_academy_skill_history.', {
     type: 'object',
     properties: {
@@ -59,7 +90,20 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
     required: ['skillId', 'targetVersion'],
     additionalProperties: false
   }),
-  tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order.', { type: 'object', properties: { skillId: id, metadataOnly: { type: 'boolean' }, version: { ...version, maximum: Number.MAX_SAFE_INTEGER } }, required: ['skillId'], not: { required: ['metadataOnly', 'version'] }, additionalProperties: false }),
+  tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order. Optional includeEfficiency, limit, and cursor require metadataOnly:true.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      metadataOnly: { type: 'boolean' },
+      version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      includeEfficiency: { type: 'boolean' },
+      limit: { type: 'integer', minimum: 1, maximum: 50 },
+      cursor: { type: 'string', minLength: 1 }
+    },
+    required: ['skillId'],
+    not: { required: ['metadataOnly', 'version'] },
+    additionalProperties: false
+  }),
   tool('create_academy_skill', 'After CRS cutover, save GLOBAL locally with version CAS and catalogRevision. Content and eligibility persist atomically: the new skill is APPROVED for the public plugin only when the operator previously enabled auto-include for new GLOBAL skills in Academy (not changeable through MCP); otherwise it stays PRIVATE and the result states the reason and approval action. keepPrivate:true opts this skill out. PROJECT is never published. Before cutover, preserves legacy Git drafts.', { type: 'object', properties: { expectedDraftCommitSha: id, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true }, keepPrivate: { type: 'boolean' } }, required: ['package', 'scope'], additionalProperties: false }),
   tool('update_academy_skill', 'Save canonical content with expectedVersion CAS. After CRS cutover, GLOBAL persists offline in SQLite; synchronization and distribution are separate. Legacy drafts remain until reviewed cutover.', { type: 'object', properties: { expectedDraftCommitSha: id, skillId: id, expectedVersion: version, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true } }, required: ['skillId', 'expectedVersion', 'package'], additionalProperties: false }),
   tool('get_academy_skill_delivery_status', 'Inspect the compact, version-aware delivery and convergence status of one Academy skill without downloading packages or scanning the filesystem.', { type: 'object', properties: { skillId: id, expectedVersion: version }, required: ['skillId'], additionalProperties: false }),
@@ -73,10 +117,91 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('get_openai_plugin_publication', 'Inspect the Academy Skills OpenAI publication profile, drift, and current release state.', { type: 'object', properties: {}, additionalProperties: false }),
   tool('prepare_openai_plugin_release', 'After CRS cutover, prepare an immutable eligible local snapshot offline in a worker; Git freshness and manual upload remain separate. Before cutover, LATEST uses verified Git input. REBUILD reproduces a historical verified Git source when its material is available. Never uploads.', { type: 'object', properties: { mode: { type: 'string', enum: ['LATEST', 'REBUILD'] }, sourceCommitSha: id, force: { type: 'boolean' } }, additionalProperties: false }),
   tool('get_openai_plugin_release', 'Read one immutable OpenAI plugin release and its delta.', { type: 'object', properties: { releaseId: id }, required: ['releaseId'], additionalProperties: false }),
-  tool('confirm_openai_plugin_upload', 'Record that one exact READY_TO_UPLOAD artifact was manually submitted to OpenAI. This does not verify runtime availability.', { type: 'object', properties: { releaseId: id, artifactHash: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, required: ['releaseId', 'artifactHash'], additionalProperties: false })
+  tool('confirm_openai_plugin_upload', 'Record that one exact READY_TO_UPLOAD artifact was manually submitted to OpenAI. This does not verify runtime availability.', { type: 'object', properties: { releaseId: id, artifactHash: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, required: ['releaseId', 'artifactHash'], additionalProperties: false }),
+  {
+    ...tool(
+      'get_academy_skill_lint',
+      'Read-only deterministic Skill Linter diagnostics, derived lintHealth, coverage, persistence/stagnation and capability review priority. Provide skillId (optional version) for a focal report, or omit skillId for a paged catalog summary (default ACTIVE; only skills in the page are analyzed).',
+      {
+        type: 'object',
+        properties: {
+          skillId: id,
+          version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+          status: { type: 'string', enum: ['ACTIVE', 'DISABLED'] },
+          scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] },
+          ruleId: { type: 'string', minLength: 1 },
+          category: { type: 'string', enum: ['INVALID', 'REVIEW', 'OBSERVATION'] },
+          state: { type: 'string', enum: ['OPEN', 'REVIEWED'] },
+          lintHealth: { type: 'string', enum: ['INVALID', 'REVIEW_OPEN', 'REVIEWED', 'NO_FINDINGS', 'UNKNOWN'] },
+          includeInventory: { type: 'boolean' },
+          deepen: { type: 'array', items: { type: 'string', enum: ['DESCRIPTION_TERMS', 'CATALOG_PRESSURE'] }, uniqueItems: true },
+          limit: { type: 'integer', minimum: 1, maximum: 50 },
+          cursor: { type: 'string', minLength: 1 }
+        },
+        additionalProperties: false
+      }
+    ),
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  },
+  tool(
+    'review_academy_skill_lint',
+    'Authenticated optional editorial review decision (RECORD or REVOKE) for a REVIEW lint finding bound to skillId, expectedVersion, findingId, and evidenceFingerprint. Does not change skill version or distribution.',
+    {
+      type: 'object',
+      properties: {
+        skillId: id,
+        expectedVersion: version,
+        findingId: id,
+        evidenceFingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        action: { type: 'string', enum: ['RECORD', 'REVOKE'] },
+        rationale: { type: 'string', minLength: 1, maxLength: 500 }
+      },
+      required: ['skillId', 'expectedVersion', 'findingId', 'evidenceFingerprint', 'action'],
+      additionalProperties: false
+    }
+  ),
+  tool(
+    'edit_academy_skill',
+    'Focal atomic package edit (replace by oldText or snapshot selector, add, remove, move) bound to expectedVersion and expectedPackageHash. Supports read-only PREVIEW (focal diff, measures delta, lint delta) and APPLY (canonical saveSkill receipt). Requires local SQLite authority for GLOBAL skills.',
+    {
+      type: 'object',
+      properties: {
+        skillId: id,
+        expectedVersion: version,
+        expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        mode: { type: 'string', enum: ['PREVIEW', 'APPLY'] },
+        edits: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: 'object',
+            properties: {
+              op: { type: 'string', enum: ['replace', 'add', 'remove', 'move'] },
+              path: { type: 'string', minLength: 1 },
+              toPath: { type: 'string', minLength: 1 },
+              oldText: { type: 'string', minLength: 1 },
+              newText: { type: 'string' },
+              selector: { type: 'string', minLength: 1 },
+              content: { type: 'string' }
+            },
+            required: ['op'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['skillId', 'expectedVersion', 'expectedPackageHash', 'mode', 'edits'],
+      additionalProperties: false
+    }
+  )
 ]
 
-export async function executeAcademyTool(service: AcademyService, name: string, args: unknown): Promise<McpToolResult> {
+export async function executeAcademyTool(
+  service: AcademyService,
+  name: string,
+  args: unknown,
+  context?: { authority?: AgentAuthority }
+): Promise<McpToolResult> {
   try {
     const values = objectArgs(args)
     let result: unknown
@@ -87,16 +212,175 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'publish_academy_git_drafts': if (values.confirmed !== true) throw new Error('PUBLICATION_AUTHORIZATION_REQUIRED'); if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); result = projectAcademyGitStatus(await service.gitSync.publish({ localHead: string(values.localHead, 'localHead'), remoteHead: string(values.remoteHead, 'remoteHead') })); break
       case 'verify_academy_change_impact': result = service.verifyChangeImpact(args); break
       case 'analyze_academy_change_impact': result = service.analyzeChangeImpact(args); break
-      case 'list_academy_skills': result = service.list(optionalEnum(values.status, ['ACTIVE', 'DISABLED', 'ARCHIVED']) as 'ACTIVE' | 'DISABLED' | 'ARCHIVED' | undefined); break
+      case 'list_academy_skills': {
+        if (Object.keys(values).some(key => !['status', 'includeEfficiency', 'limit', 'cursor'].includes(key))) {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        const statusRaw = optionalEnum(values.status, ['ACTIVE', 'DISABLED', 'ARCHIVED']) as 'ACTIVE' | 'DISABLED' | 'ARCHIVED' | undefined
+        if (values.includeEfficiency === undefined && values.limit === undefined && values.cursor === undefined) {
+          result = service.list(statusRaw)
+          break
+        }
+        if (values.includeEfficiency !== undefined && typeof values.includeEfficiency !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor)) {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        result = service.lint.efficiencyForList({
+          status: statusRaw === 'ARCHIVED' ? 'DISABLED' : statusRaw,
+          includeEfficiency: values.includeEfficiency,
+          limit: values.limit as number | undefined,
+          cursor: values.cursor
+        })
+        break
+      }
       case 'set_academy_skill_enabled': {
         if (Object.keys(values).some(key => !['skillId', 'enabled', 'expectedStateRevision'].includes(key)) || typeof values.enabled !== 'boolean') throw new Error('INVALID_ARGUMENT')
         result = await service.setEnabled(string(values.skillId, 'skillId'), values.enabled, integer(values.expectedStateRevision, 'expectedStateRevision'))
         break
       }
-      case 'get_academy_skill': result = service.get(string(values.skillId, 'skillId')); break
+      case 'get_academy_skill': {
+        const allowed = [
+          'skillId', 'view', 'version', 'path', 'selector', 'expectedPackageHash',
+          'includeDescendants', 'query', 'caseSensitive', 'textOffset', 'textLimit', 'offset', 'limit'
+        ]
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const view = optionalEnum(values.view, ['package', 'manifest', 'resource', 'outline', 'section', 'search']) as
+          | 'package'
+          | 'manifest'
+          | 'resource'
+          | 'outline'
+          | 'section'
+          | 'search'
+          | undefined
+        const skillId = string(values.skillId, 'skillId')
+        if (!view || view === 'package') {
+          if (Object.keys(values).some(key => key !== 'skillId' && key !== 'view')) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.get(skillId)
+          break
+        }
+        const expectedPackageHash = values.expectedPackageHash === undefined ? undefined : sha256(values.expectedPackageHash)
+        const targetVersion = values.version === undefined ? undefined : integer(values.version, 'version')
+        const nonNegInt = (v: unknown) => {
+          if (v === undefined) return undefined
+          if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new AcademyError('INVALID_ARGUMENT')
+          return v
+        }
+        if (values.includeDescendants !== undefined && typeof values.includeDescendants !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (values.caseSensitive !== undefined && typeof values.caseSensitive !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (view === 'manifest') {
+          if (
+            values.path !== undefined || values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({ skillId, view, version: targetVersion, expectedPackageHash })
+        } else if (view === 'resource') {
+          if (
+            targetVersion === undefined || values.path === undefined ||
+            values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            expectedPackageHash,
+            textOffset: nonNegInt(values.textOffset),
+            textLimit: values.textLimit === undefined ? undefined : integer(values.textLimit, 'textLimit')
+          })
+        } else if (view === 'outline') {
+          if (
+            targetVersion === undefined || values.path === undefined ||
+            values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            expectedPackageHash,
+            offset: nonNegInt(values.offset),
+            limit: values.limit === undefined ? undefined : integer(values.limit, 'limit')
+          })
+        } else if (view === 'section') {
+          if (
+            targetVersion === undefined || values.path === undefined || values.selector === undefined ||
+            values.query !== undefined || values.caseSensitive !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            selector: string(values.selector, 'selector'),
+            expectedPackageHash,
+            includeDescendants: values.includeDescendants as boolean | undefined,
+            textOffset: nonNegInt(values.textOffset),
+            textLimit: values.textLimit === undefined ? undefined : integer(values.textLimit, 'textLimit')
+          })
+        } else {
+          if (
+            targetVersion === undefined || values.query === undefined ||
+            values.selector !== undefined || values.includeDescendants !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: values.path === undefined ? undefined : string(values.path, 'path'),
+            expectedPackageHash,
+            query: string(values.query, 'query'),
+            caseSensitive: values.caseSensitive as boolean | undefined,
+            offset: nonNegInt(values.offset),
+            limit: values.limit === undefined ? undefined : integer(values.limit, 'limit')
+          })
+        }
+        break
+      }
       case 'list_academy_changes': result = service.listChanges(values); break
       case 'get_academy_change_diff': result = service.getChangeDiff(values); break
       case 'get_academy_skill_history': {
+        if (values.includeEfficiency !== undefined || values.limit !== undefined || values.cursor !== undefined) {
+          if (
+            Object.keys(values).some(key => !['skillId', 'metadataOnly', 'includeEfficiency', 'limit', 'cursor'].includes(key)) ||
+            values.metadataOnly !== true ||
+            (values.includeEfficiency !== undefined && typeof values.includeEfficiency !== 'boolean') ||
+            (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor))
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.efficiencyForHistory(string(values.skillId, 'skillId'), {
+            includeEfficiency: values.includeEfficiency,
+            limit: values.limit as number | undefined,
+            cursor: values.cursor
+          })
+          break
+        }
         const { skillId, ...options } = values
         result = service.history(string(skillId, 'skillId'), options as AcademyHistoryOptions)
         break
@@ -112,10 +396,42 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'create_academy_skill': {
         if (values.keepPrivate !== undefined && typeof values.keepPrivate !== 'boolean') throw new Error('INVALID_ARGUMENT')
         const created = await service.saveNewSkill({ package: pkg(values.package), scope: enumValue(values.scope, ['GLOBAL', 'PROJECT'], 'scope') as AcademySkillScope, projectIds: strings(values.projectIds), keepPrivate: values.keepPrivate, expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined, origin: 'MCP' })
-        result = 'id' in created ? { ...created, publication: service.describePublication(created) } : created
+        if ('id' in created) {
+          const lint = safeInFlowLint(service, null, {
+            skillId: created.id,
+            version: created.currentVersion,
+            packageHash: created.current.packageHash
+          })
+          result = { ...created, publication: service.describePublication(created), lint }
+        } else {
+          result = created
+        }
         break
       }
-      case 'update_academy_skill': result = await service.saveSkill({ skillId: string(values.skillId, 'skillId'), expectedVersion: integer(values.expectedVersion, 'expectedVersion'), package: pkg(values.package), scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined, projectIds: values.projectIds === undefined ? undefined : strings(values.projectIds), expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined, origin: 'MCP' }); break
+      case 'update_academy_skill': {
+        const skillId = string(values.skillId, 'skillId')
+        const base = captureBaseMeta(service, skillId)
+        const updated = await service.saveSkill({
+          skillId,
+          expectedVersion: integer(values.expectedVersion, 'expectedVersion'),
+          package: pkg(values.package),
+          scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined,
+          projectIds: values.projectIds === undefined ? undefined : strings(values.projectIds),
+          expectedDraftCommitSha: values.expectedDraftCommitSha as string | undefined,
+          origin: 'MCP'
+        })
+        if ('id' in updated) {
+          const lint = safeInFlowLint(service, base, {
+            skillId: updated.id,
+            version: updated.currentVersion,
+            packageHash: updated.current.packageHash
+          })
+          result = { ...updated, lint }
+        } else {
+          result = updated
+        }
+        break
+      }
       case 'archive_academy_skill': result = await service.archive(string(values.skillId, 'skillId'), integer(values.expectedVersion, 'expectedVersion')); break
       case 'restore_academy_skill': result = await service.restore(string(values.skillId, 'skillId'), integer(values.expectedVersion, 'expectedVersion')); break
       case 'list_academy_conflicts': result = service.store.conflictSummaries(); break
@@ -132,6 +448,140 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       }
       case 'get_openai_plugin_release': result = service.getOpenAiRelease(string(values.releaseId, 'releaseId')); break
       case 'confirm_openai_plugin_upload': result = service.confirmOpenAiUpload(string(values.releaseId, 'releaseId'), sha256(values.artifactHash)); break
+      case 'get_academy_skill_lint': {
+        const allowed = ['skillId', 'version', 'status', 'scope', 'ruleId', 'category', 'state', 'lintHealth', 'includeInventory', 'deepen', 'limit', 'cursor']
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        if (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor)) throw new AcademyError('INVALID_ARGUMENT')
+        if (values.includeInventory !== undefined && typeof values.includeInventory !== 'boolean') throw new AcademyError('INVALID_ARGUMENT')
+        if (values.ruleId !== undefined && (typeof values.ruleId !== 'string' || !values.ruleId)) throw new AcademyError('INVALID_ARGUMENT')
+        if (values.deepen !== undefined && (!Array.isArray(values.deepen) || values.deepen.some(d => d !== 'DESCRIPTION_TERMS' && d !== 'CATALOG_PRESSURE'))) {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        const category = optionalEnum(values.category, ['INVALID', 'REVIEW', 'OBSERVATION']) as FindingCategory | undefined
+        if (values.skillId !== undefined) {
+          result = service.lint.report({
+            skillId: string(values.skillId, 'skillId'),
+            version: values.version === undefined ? undefined : integer(values.version, 'version'),
+            ruleId: values.ruleId,
+            category,
+            state: optionalEnum(values.state, ['OPEN', 'REVIEWED']) as 'OPEN' | 'REVIEWED' | undefined,
+            includeInventory: values.includeInventory,
+            deepen: values.deepen as string[] | undefined,
+            limit: values.limit as number | undefined,
+            cursor: values.cursor
+          })
+        } else {
+          if (values.version !== undefined || values.state !== undefined || values.includeInventory !== undefined || values.deepen !== undefined) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.catalog({
+            status: optionalEnum(values.status, ['ACTIVE', 'DISABLED']) as AcademySkillStatus | undefined,
+            scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined,
+            ruleId: values.ruleId,
+            category,
+            lintHealth: optionalEnum(values.lintHealth, ['INVALID', 'REVIEW_OPEN', 'REVIEWED', 'NO_FINDINGS', 'UNKNOWN']) as LintHealth | undefined,
+            limit: values.limit as number | undefined,
+            cursor: values.cursor
+          })
+        }
+        break
+      }
+      case 'review_academy_skill_lint': {
+        const allowed = ['skillId', 'expectedVersion', 'findingId', 'evidenceFingerprint', 'action', 'rationale']
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const principalId = context?.authority?.principal?.principalId
+        if (!principalId || context?.authority?.isActive?.() === false) {
+          throw new AcademyError('AUTHENTICATION_REQUIRED', 'Authenticated authority principal is required to record or revoke lint reviews')
+        }
+        const action = enumValue(values.action, ['RECORD', 'REVOKE'], 'action') as 'RECORD' | 'REVOKE'
+        const fp = string(values.evidenceFingerprint, 'evidenceFingerprint')
+        if (!/^[a-f0-9]{64}$/.test(fp)) throw new AcademyError('INVALID_EVIDENCE_FINGERPRINT')
+        if (action === 'RECORD') {
+          result = service.lint.recordReview({
+            skillId: string(values.skillId, 'skillId'),
+            expectedVersion: integer(values.expectedVersion, 'expectedVersion'),
+            findingId: string(values.findingId, 'findingId'),
+            evidenceFingerprint: fp,
+            rationale: string(values.rationale, 'rationale'),
+            author: principalId
+          })
+        } else {
+          result = service.lint.revokeReview({
+            skillId: string(values.skillId, 'skillId'),
+            expectedVersion: integer(values.expectedVersion, 'expectedVersion'),
+            findingId: string(values.findingId, 'findingId'),
+            evidenceFingerprint: fp,
+            author: principalId
+          })
+        }
+        break
+      }
+      case 'edit_academy_skill': {
+        const allowed = ['skillId', 'expectedVersion', 'expectedPackageHash', 'mode', 'edits']
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const skillId = string(values.skillId, 'skillId')
+        const expectedVersion = integer(values.expectedVersion, 'expectedVersion')
+        const expectedPackageHash = sha256(values.expectedPackageHash)
+        const mode = enumValue(values.mode, ['PREVIEW', 'APPLY'], 'mode') as 'PREVIEW' | 'APPLY'
+        const existingSkill = service.get(skillId)
+        if (existingSkill.scope === 'GLOBAL' && service.gitSync && !service.store.usesLocalAuthority()) {
+          throw new AcademyError('FOCAL_EDIT_REQUIRES_LOCAL_AUTHORITY', 'Focal edit requires local SQLite authority for GLOBAL skills')
+        }
+        if (mode === 'PREVIEW') {
+          result = service.lint.previewFocalEdit({
+            skillId,
+            expectedVersion,
+            expectedPackageHash,
+            edits: values.edits
+          })
+          break
+        }
+        const prep = service.lint.prepareFocalEdit({
+          skillId,
+          expectedVersion,
+          expectedPackageHash,
+          edits: values.edits
+        })
+        if (prep.kind === 'NO_CHANGE') {
+          result = {
+            state: 'NO_CHANGE',
+            skillId: prep.skill.id,
+            version: prep.skill.currentVersion,
+            packageHash: prep.skill.current.packageHash
+          }
+          break
+        }
+        if (!prep.editResult.candidateValid) {
+          throw new AcademyError(
+            prep.editResult.validationError?.code ?? 'INVALID_PACKAGE',
+            prep.editResult.validationError?.message ?? 'Invalid candidate package'
+          )
+        }
+        const base = {
+          version: prep.skill.currentVersion,
+          packageHash: prep.skill.current.packageHash
+        }
+        const applied = await service.saveSkill(
+          {
+            skillId,
+            expectedVersion,
+            package: prep.editResult.candidate,
+            origin: 'MCP'
+          },
+          'RECEIPT'
+        )
+        if ('skillId' in applied && applied.state === 'PERSISTED') {
+          const lint = safeInFlowLint(service, base, {
+            skillId: applied.skillId,
+            version: applied.version,
+            packageHash: applied.packageHash
+          })
+          result = { ...applied, lint }
+        } else {
+          result = applied
+        }
+        break
+      }
       default: throw new Error('METHOD_NOT_FOUND')
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
@@ -159,4 +609,38 @@ function pkg(value: unknown): AcademyPackage {
   const object = objectArgs(value)
   if (typeof object.skillMd !== 'string' || !object.artifacts || typeof object.artifacts !== 'object' || Array.isArray(object.artifacts) || Object.values(object.artifacts).some((item) => typeof item !== 'string')) throw new Error('INVALID_PACKAGE')
   return { skillMd: object.skillMd, artifacts: object.artifacts as Record<string, string> }
+}
+
+function captureBaseMeta(service: AcademyService, skillId: string): { version: number; packageHash: string } | null {
+  try {
+    const hist = service.store.history(skillId, { metadataOnly: true })
+    const summary = service.store.list().find(item => item.id === skillId)
+    const meta = summary ? hist.find(item => item.version === summary.currentVersion) : hist[0]
+    return meta ? { version: meta.version, packageHash: meta.packageHash } : null
+  } catch {
+    return null
+  }
+}
+
+function safeInFlowLint(
+  service: AcademyService,
+  base: { version: number; packageHash: string } | null,
+  persisted: { skillId: string; version: number; packageHash: string }
+) {
+  try {
+    return service.lint.inFlow(base, persisted)
+  } catch {
+    return {
+      identity: {
+        skillId: persisted.skillId,
+        version: persisted.version,
+        packageHash: persisted.packageHash,
+        ruleSetVersion: service.lint.ruleSetVersion,
+        tokenizerId: service.lint.tokenizerId
+      },
+      base,
+      coverage: 'UNAVAILABLE',
+      reason: 'ANALYSIS_FAILED'
+    }
+  }
 }
