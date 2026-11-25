@@ -1,4 +1,6 @@
+import { createTwoFilesPatch } from 'diff'
 import type {
+  AcademyPackage,
   AcademySkillScope,
   AcademySkillStatus,
   AcademySkillSummary,
@@ -9,6 +11,14 @@ import { getCanonicalTokenizer, type TokenizerPort } from '../../core/tokenizer'
 import { AcademyError } from '../academy-package'
 import type { AcademyStore } from '../academy-store'
 import { canonicalJson } from '../publication/openai-plugin-model'
+import { applyFocalEdits } from './skill-focal-edit'
+import {
+  buildManifestView,
+  buildOutlineView,
+  buildResourceView,
+  buildSearchView,
+  buildSectionView
+} from './skill-navigation'
 import {
   analyzePackageFacts,
   compareMagnitude,
@@ -539,7 +549,7 @@ export class AcademySkillLintService {
     const projected = projectReportFindings(targetRes.facts, {
       targetSkill: skill,
       activeCatalog,
-      baseFacts: baseRes?.facts ?? undefined,
+      baseFacts: baseRes?.facts ?? null,
       reviews,
       includeDescriptionTerms: input.deepen?.includes('DESCRIPTION_TERMS'),
       includeCatalogPressure: input.deepen?.includes('CATALOG_PRESSURE'),
@@ -779,16 +789,21 @@ export class AcademySkillLintService {
       })
     }
 
-    const report = this.report({ skillId: input.skillId, version: input.expectedVersion, limit: 50 })
-    const factsRes = this.factsFor(input.skillId, input.expectedVersion)
+    const historyMeta = this.store.history(skill.id, { metadataOnly: true })
+    const targetIdx = historyMeta.findIndex(m => m.version === input.expectedVersion)
+    const baseMeta = targetIdx >= 0 && targetIdx + 1 < historyMeta.length ? historyMeta[targetIdx + 1] : null
+    const memo = new Map<string, PackageFacts>()
+    const factsRes = this.factsFor(input.skillId, input.expectedVersion, memo)
     if (!factsRes.facts) {
       throw new AcademyError('FINDING_STALE', 'Skill version content unavailable for review')
     }
+    const baseFacts = baseMeta ? this.factsForVersionMeta(skill.id, baseMeta, memo).facts : null
 
     const activeCatalog = this.store.list('ACTIVE')
     const projected = projectReportFindings(factsRes.facts, {
       targetSkill: skill,
       activeCatalog,
+      baseFacts,
       reviews: this.store.lint.listActiveReviews(skill.id)
     })
     const targetFinding = projected.findings.find(f => f.findingId === input.findingId)
@@ -830,8 +845,242 @@ export class AcademySkillLintService {
       version: input.expectedVersion,
       findingId: targetFinding.findingId,
       lintHealth: updatedHealth.lintHealth,
-      counts: updatedHealth.counts,
-      previousLintHealth: report.lintHealth
+      counts: updatedHealth.counts
+    }
+  }
+
+  getSkillView(input: {
+    skillId: string
+    view: 'manifest' | 'resource' | 'outline' | 'section' | 'search'
+    version?: number
+    path?: string
+    selector?: string
+    expectedPackageHash?: string
+    includeDescendants?: boolean
+    query?: string
+    caseSensitive?: boolean
+    textOffset?: number
+    textLimit?: number
+    offset?: number
+    limit?: number
+  }) {
+    const skill = this.store.get(input.skillId)
+    const targetVersion = input.version ?? skill.currentVersion
+    const versionRecord = this.store.history(skill.id, { version: targetVersion }) as AcademySkillVersion
+
+    if (
+      input.expectedPackageHash !== undefined &&
+      versionRecord.packageHash !== input.expectedPackageHash
+    ) {
+      throw new AcademyError('PACKAGE_HASH_CONFLICT', 'Package hash does not match expectedPackageHash', {
+        expectedPackageHash: input.expectedPackageHash,
+        actualPackageHash: versionRecord.packageHash,
+        version: versionRecord.version
+      })
+    }
+
+    if (input.view === 'manifest') {
+      const factsRes =
+        versionRecord.contentState === 'DELETED'
+          ? { facts: null }
+          : this.factsForVersionMeta(skill.id, versionRecord)
+      return buildManifestView(skill, versionRecord, factsRes.facts)
+    }
+
+    if (input.view === 'resource') {
+      return buildResourceView(
+        skill,
+        versionRecord,
+        input.path!,
+        input.textOffset,
+        input.textLimit
+      )
+    }
+
+    const historyMeta = this.store.history(skill.id, { metadataOnly: true })
+    const targetIdx = historyMeta.findIndex(m => m.version === targetVersion)
+    const baseMeta = targetIdx >= 0 && targetIdx + 1 < historyMeta.length ? historyMeta[targetIdx + 1] : null
+    const memo = new Map<string, PackageFacts>()
+    const factsRes = this.factsForVersionMeta(skill.id, versionRecord, memo)
+    if (!factsRes.facts || versionRecord.contentState === 'DELETED') {
+      throw new AcademyError('VERSION_CONTENT_DELETED', 'Skill version content was deleted')
+    }
+
+    if (input.view === 'outline') {
+      const baseFacts = baseMeta ? this.factsForVersionMeta(skill.id, baseMeta, memo).facts : null
+      const projected = projectReportFindings(factsRes.facts, {
+        targetSkill: skill,
+        activeCatalog: this.store.list('ACTIVE'),
+        baseFacts,
+        reviews: this.store.lint.listActiveReviews(skill.id)
+      })
+      return buildOutlineView(
+        skill,
+        versionRecord,
+        factsRes.facts,
+        input.path!,
+        projected.findings,
+        input.offset,
+        input.limit
+      )
+    }
+
+    if (input.view === 'section') {
+      return buildSectionView(
+        skill,
+        versionRecord,
+        factsRes.facts,
+        input.path!,
+        input.selector!,
+        input.includeDescendants === true,
+        input.textOffset,
+        input.textLimit
+      )
+    }
+
+    return buildSearchView(
+      skill,
+      versionRecord,
+      factsRes.facts,
+      input.query!,
+      input.path,
+      input.caseSensitive === true,
+      input.offset,
+      input.limit
+    )
+  }
+
+  prepareFocalEdit(input: {
+    skillId: string
+    expectedVersion: number
+    expectedPackageHash: string
+    edits: unknown
+  }) {
+    if (this.store.isDeleted(input.skillId)) {
+      throw new AcademyError('SKILL_DELETED_RECONCILIATION_REQUIRED', 'Skill is deleted')
+    }
+    const skill = this.store.get(input.skillId)
+    if (skill.currentVersion !== input.expectedVersion) {
+      throw new AcademyError('VERSION_CONFLICT', 'Skill changed since it was read', {
+        expectedVersion: input.expectedVersion,
+        currentVersion: skill.currentVersion
+      })
+    }
+    if (skill.current.packageHash !== input.expectedPackageHash) {
+      throw new AcademyError('PACKAGE_HASH_CONFLICT', 'Package hash does not match expectedPackageHash', {
+        expectedPackageHash: input.expectedPackageHash,
+        actualPackageHash: skill.current.packageHash
+      })
+    }
+
+    const baseFactsRes = this.factsFor(skill.id, skill.currentVersion)
+    if (!baseFactsRes.facts) {
+      throw new AcademyError('VERSION_CONTENT_DELETED', 'Skill version content unavailable')
+    }
+
+    const editResult = applyFocalEdits(
+      skill.current.package,
+      skill.current.packageHash,
+      baseFactsRes.facts,
+      input.edits
+    )
+
+    if (editResult.candidateValid && editResult.candidateHash === skill.current.packageHash) {
+      return {
+        kind: 'NO_CHANGE' as const,
+        skill,
+        baseFacts: baseFactsRes.facts,
+        editResult
+      }
+    }
+
+    return {
+      kind: 'CHANGED' as const,
+      skill,
+      baseFacts: baseFactsRes.facts,
+      editResult
+    }
+  }
+
+  previewFocalEdit(input: {
+    skillId: string
+    expectedVersion: number
+    expectedPackageHash: string
+    edits: unknown
+  }) {
+    const prep = this.prepareFocalEdit(input)
+    if (prep.kind === 'NO_CHANGE') {
+      return {
+        state: 'NO_CHANGE' as const,
+        skillId: prep.skill.id,
+        version: prep.skill.currentVersion,
+        packageHash: prep.skill.current.packageHash
+      }
+    }
+
+    const { skill, baseFacts, editResult } = prep
+    const diff = buildFocalPackageDiff(skill.current.package, editResult.candidate)
+
+    const activeCatalog = this.store.list('ACTIVE')
+    const reviews = this.store.lint.listActiveReviews(skill.id)
+    const baseProjected = projectReportFindings(baseFacts, {
+      targetSkill: skill,
+      activeCatalog,
+      reviews
+    })
+
+    const candidateFacts = analyzePackageFacts(
+      editResult.candidate,
+      this.tokenizer,
+      editResult.candidateValid ? editResult.candidateHash : undefined
+    )
+    const candidateProjected = projectReportFindings(candidateFacts, {
+      targetSkill: editResult.candidateValid
+        ? {
+            ...skill,
+            name: candidateFacts.metadata.name ?? skill.name,
+            description: candidateFacts.metadata.description ?? skill.description
+          }
+        : null,
+      activeCatalog,
+      baseFacts,
+      reviews
+    })
+    const comparison = compareReports(
+      baseFacts,
+      baseProjected.findings,
+      candidateFacts,
+      candidateProjected.findings
+    )
+
+    return {
+      state: 'PREVIEW' as const,
+      valid: editResult.candidateValid,
+      ...(editResult.validationError ? { validationError: editResult.validationError } : {}),
+      skillId: skill.id,
+      baseVersion: skill.currentVersion,
+      basePackageHash: skill.current.packageHash,
+      ...(editResult.candidateValid ? { candidateHash: editResult.candidateHash } : {}),
+      diff: diff.files,
+      diffTruncated: diff.diffTruncated,
+      lint: {
+        coverage: candidateFacts.coverage,
+        lintHealth: candidateProjected.lintHealth,
+        counts: candidateProjected.counts,
+        delta: {
+          introduced: comparison.introduced,
+          worsened: comparison.worsened,
+          resolved: comparison.resolved,
+          persistent: {
+            count: comparison.persistent.length,
+            top: comparison.persistent.slice(0, 5)
+          }
+        },
+        measuresDelta: comparison.measuresDelta,
+        ...(candidateProjected.capabilityNotice
+          ? { capabilityNotice: candidateProjected.capabilityNotice }
+          : {})
+      }
     }
   }
 
@@ -1053,13 +1302,50 @@ export class AcademySkillLintService {
     const nextOffset = offset + slice.length
     const nextCursor = nextOffset < versions.length ? encodeLintCursor(sig, nextOffset) : undefined
 
-    return {
-      skillId,
-      items,
-      ...(nextCursor ? { nextCursor } : {}),
-      ruleSetVersion: this.ruleSetVersion,
-      tokenizerId: this.tokenizer.id,
-      lineConvention: LINE_CONVENTION
-    }
+  return {
+    skillId,
+    items,
+    ...(nextCursor ? { nextCursor } : {}),
+    ruleSetVersion: this.ruleSetVersion,
+    tokenizerId: this.tokenizer.id,
+    lineConvention: LINE_CONVENTION
   }
+  }
+}
+
+function buildFocalPackageDiff(
+  basePkg: AcademyPackage,
+  candidatePkg: AcademyPackage
+): { files: Array<{ path: string; kind: 'ADDED' | 'REMOVED' | 'MODIFIED'; patch: string }>; diffTruncated: boolean } {
+  const baseMap = new Map<string, string>([
+    ['SKILL.md', basePkg.skillMd],
+    ...Object.entries(basePkg.artifacts)
+  ])
+  const candMap = new Map<string, string>([
+    ['SKILL.md', candidatePkg.skillMd],
+    ...Object.entries(candidatePkg.artifacts)
+  ])
+  const allPaths = [...new Set([...baseMap.keys(), ...candMap.keys()])].sort()
+  const files: Array<{ path: string; kind: 'ADDED' | 'REMOVED' | 'MODIFIED'; patch: string }> = []
+  let remaining = 20000
+  let diffTruncated = false
+
+  for (const path of allPaths) {
+    const oldText = baseMap.get(path)
+    const newText = candMap.get(path)
+    if (oldText === newText) continue
+    const kind = oldText === undefined ? 'ADDED' : newText === undefined ? 'REMOVED' : 'MODIFIED'
+    let patch = createTwoFilesPatch(path, path, oldText ?? '', newText ?? '', '', '', { context: 2 })
+    if (patch.length > remaining) {
+      patch = patch.slice(0, Math.max(0, remaining))
+      remaining = 0
+      diffTruncated = true
+    } else {
+      remaining -= patch.length
+    }
+    files.push({ path, kind, patch })
+    if (diffTruncated) break
+  }
+
+  return { files, diffTruncated }
 }

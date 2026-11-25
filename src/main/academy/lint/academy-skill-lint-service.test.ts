@@ -318,4 +318,250 @@ describe('AcademySkillLintService & U1 opt-in list/history', () => {
       await service.close()
     }
   })
+
+  it('supports U3 selective navigation views and atomic focal edit PREVIEW/APPLY', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-lint-u3-'))
+    roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    try {
+      const v1Pkg = {
+        skillMd: [
+          '---',
+          'name: u3-nav-skill',
+          'description: Navigation and focal edit test',
+          '---',
+          '# Section One',
+          'BODY_SENTINEL_V1 alpha',
+          'See [broken](references/target.md).',
+          '# Section Two',
+          'SIBLING_SENTINEL_V1 beta',
+          ''
+        ].join('\r\n'),
+        artifacts: {
+          'references/legacy.md': 'LEGACY_RESOURCE_V1_LITERAL'
+        }
+      }
+
+      const created = await service.create({ package: v1Pkg, scope: 'GLOBAL', origin: 'UI' })
+      const v1Hash = created.current.packageHash
+
+      // Update to v2 removing legacy.md and changing SKILL.md
+      const v2Pkg = {
+        skillMd: v1Pkg.skillMd.replace('BODY_SENTINEL_V1', 'BODY_SENTINEL_V2'),
+        artifacts: {}
+      }
+      const updated = await service.update({
+        skillId: created.id,
+        expectedVersion: 1,
+        package: v2Pkg,
+        origin: 'UI'
+      })
+      const v2Hash = updated.current.packageHash
+
+      // 1. Legacy get_academy_skill unchanged
+      const legacyGet = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill', { skillId: created.id })).content[0].text
+      )
+      expect(legacyGet).toEqual(service.get(created.id))
+
+      // 2. Manifest has no body text
+      const manifestRes = await executeAcademyTool(service, 'get_academy_skill', {
+        skillId: created.id,
+        view: 'manifest'
+      })
+      expect(manifestRes.isError).toBeUndefined()
+      expect(manifestRes.content[0].text).not.toContain('BODY_SENTINEL_V2')
+      expect(manifestRes.content[0].text).not.toContain('SIBLING_SENTINEL_V1')
+      const manifest = JSON.parse(manifestRes.content[0].text)
+      expect(manifest.version).toBe(2)
+      expect(manifest.packageHash).toBe(v2Hash)
+
+      // 3. Historical resource & outline & section (no siblings!) after v2
+      const histResource = JSON.parse(
+        (
+          await executeAcademyTool(service, 'get_academy_skill', {
+            skillId: created.id,
+            view: 'resource',
+            version: 1,
+            path: 'references/legacy.md'
+          })
+        ).content[0].text
+      )
+      expect(histResource.content.text).toBe('LEGACY_RESOURCE_V1_LITERAL')
+
+      const v1Outline = JSON.parse(
+        (
+          await executeAcademyTool(service, 'get_academy_skill', {
+            skillId: created.id,
+            view: 'outline',
+            version: 1,
+            path: 'SKILL.md'
+          })
+        ).content[0].text
+      )
+      const sec1 = v1Outline.entries.find((e: { kind: string; title?: string }) => e.kind === 'HEADING' && e.title === 'Section One')
+      expect(sec1).toBeDefined()
+
+      const sec1Content = JSON.parse(
+        (
+          await executeAcademyTool(service, 'get_academy_skill', {
+            skillId: created.id,
+            view: 'section',
+            version: 1,
+            path: 'SKILL.md',
+            selector: sec1.selector
+          })
+        ).content[0].text
+      )
+      expect(sec1Content.content.text).toContain('BODY_SENTINEL_V1')
+      expect(sec1Content.content.text).not.toContain('SIBLING_SENTINEL_V1')
+
+      // 4. Search
+      const searchRes = JSON.parse(
+        (
+          await executeAcademyTool(service, 'get_academy_skill', {
+            skillId: created.id,
+            view: 'search',
+            version: 2,
+            query: 'BODY_SENTINEL_V2'
+          })
+        ).content[0].text
+      )
+      expect(searchRes.totalMatches).toBe(1)
+      expect(searchRes.matches[0].path).toBe('SKILL.md')
+
+      // 5. Errors: stale selector, path traversal, PACKAGE_HASH_CONFLICT
+      const staleSel = await executeAcademyTool(service, 'get_academy_skill', {
+        skillId: created.id,
+        view: 'section',
+        version: 2,
+        path: 'SKILL.md',
+        selector: sec1.selector
+      })
+      expect(staleSel.isError).toBe(true)
+      expect(JSON.parse(staleSel.content[0].text).error).toBe('SELECTOR_STALE')
+
+      const trav = await executeAcademyTool(service, 'get_academy_skill', {
+        skillId: created.id,
+        view: 'resource',
+        version: 2,
+        path: '../secret'
+      })
+      expect(trav.isError).toBe(true)
+      expect(JSON.parse(trav.content[0].text).error).toBe('INVALID_ARTIFACT_PATH')
+
+      const hashConflict = await executeAcademyTool(service, 'get_academy_skill', {
+        skillId: created.id,
+        view: 'manifest',
+        version: 2,
+        expectedPackageHash: v1Hash
+      })
+      expect(hashConflict.isError).toBe(true)
+      expect(JSON.parse(hashConflict.content[0].text).error).toBe('PACKAGE_HASH_CONFLICT')
+
+      // 6. PREVIEW does not mutate; invalid candidate shows INVALID in PREVIEW, rejects in APPLY without persisting
+      const snapBefore = service.snapshot()
+      const histBefore = service.history(created.id)
+      const reconcileSpy = vi.spyOn(service, 'scheduleReconciliationForSkill')
+
+      const invalidPreview = JSON.parse(
+        (
+          await executeAcademyTool(service, 'edit_academy_skill', {
+            skillId: created.id,
+            expectedVersion: 2,
+            expectedPackageHash: v2Hash,
+            mode: 'PREVIEW',
+            edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'name: u3-nav-skill', newText: 'name: INVALID NAME!' }]
+          })
+        ).content[0].text
+      )
+      expect(invalidPreview.state).toBe('PREVIEW')
+      expect(invalidPreview.valid).toBe(false)
+      expect(invalidPreview.lint.lintHealth).toBe('INVALID')
+      expect(service.snapshot()).toEqual(snapBefore)
+      expect(service.history(created.id)).toEqual(histBefore)
+
+      const invalidApply = await executeAcademyTool(service, 'edit_academy_skill', {
+        skillId: created.id,
+        expectedVersion: 2,
+        expectedPackageHash: v2Hash,
+        mode: 'APPLY',
+        edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'name: u3-nav-skill', newText: 'name: INVALID NAME!' }]
+      })
+      expect(invalidApply.isError).toBe(true)
+      expect(JSON.parse(invalidApply.content[0].text).error).toBe('INVALID_METADATA')
+      expect(reconcileSpy).not.toHaveBeenCalled()
+      expect(service.history(created.id)).toEqual(histBefore)
+
+      // 7. Atomic shard APPLY: add references/target.md + update link in SKILL.md in one batch (v2 -> v3, no intermediate version)
+      const validPreview = JSON.parse(
+        (
+          await executeAcademyTool(service, 'edit_academy_skill', {
+            skillId: created.id,
+            expectedVersion: 2,
+            expectedPackageHash: v2Hash,
+            mode: 'PREVIEW',
+            edits: [
+              { op: 'add', path: 'references/target.md', content: '# Target\r\nDetails\r\n' },
+              { op: 'replace', path: 'SKILL.md', oldText: 'BODY_SENTINEL_V2 alpha', newText: 'BODY_SENTINEL_V3 alpha' }
+            ]
+          })
+        ).content[0].text
+      )
+      expect(validPreview.state).toBe('PREVIEW')
+      expect(validPreview.valid).toBe(true)
+      expect(validPreview.lint.delta.resolved.some((f: { ruleId: string }) => f.ruleId === 'LOCAL_REFERENCE_BROKEN')).toBe(true)
+      expect(service.history(created.id)).toHaveLength(2)
+
+      const applied = JSON.parse(
+        (
+          await executeAcademyTool(service, 'edit_academy_skill', {
+            skillId: created.id,
+            expectedVersion: 2,
+            expectedPackageHash: v2Hash,
+            mode: 'APPLY',
+            edits: [
+              { op: 'add', path: 'references/target.md', content: '# Target\r\nDetails\r\n' },
+              { op: 'replace', path: 'SKILL.md', oldText: 'BODY_SENTINEL_V2 alpha', newText: 'BODY_SENTINEL_V3 alpha' }
+            ]
+          })
+        ).content[0].text
+      )
+      expect(applied.state).toBe('PERSISTED')
+      expect(applied.version).toBe(3)
+      expect(service.history(created.id)).toHaveLength(3)
+      const v3Detail = service.get(created.id)
+      expect(v3Detail.current.package.skillMd).toContain('BODY_SENTINEL_V3 alpha\r\nSee [broken](references/target.md).\r\n')
+      expect(v3Detail.current.package.artifacts['references/target.md']).toBe('# Target\r\nDetails\r\n')
+
+      // 8. No-op creates no version
+      const noop = JSON.parse(
+        (
+          await executeAcademyTool(service, 'edit_academy_skill', {
+            skillId: created.id,
+            expectedVersion: 3,
+            expectedPackageHash: applied.packageHash,
+            mode: 'APPLY',
+            edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'BODY_SENTINEL_V3', newText: 'BODY_SENTINEL_V3' }]
+          })
+        ).content[0].text
+      )
+      expect(noop.state).toBe('NO_CHANGE')
+      expect(service.history(created.id)).toHaveLength(3)
+
+      // 9. Stale expectedVersion -> VERSION_CONFLICT
+      const staleEdit = await executeAcademyTool(service, 'edit_academy_skill', {
+        skillId: created.id,
+        expectedVersion: 2,
+        expectedPackageHash: v2Hash,
+        mode: 'APPLY',
+        edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'BODY_SENTINEL_V3', newText: 'X' }]
+      })
+      expect(staleEdit.isError).toBe(true)
+      expect(JSON.parse(staleEdit.content[0].text).error).toBe('VERSION_CONFLICT')
+    } finally {
+      vi.restoreAllMocks()
+      await service.close()
+    }
+  })
 })

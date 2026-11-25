@@ -42,7 +42,26 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
     additionalProperties: false
   }),
   tool('set_academy_skill_enabled', 'Set activation with independent stateRevision CAS. Returns persisted status and stateRevision; local reconciliation is scheduled separately. Does not publish an installed plugin.', { type: 'object', properties: { skillId: id, enabled: { type: 'boolean' }, expectedStateRevision: version }, required: ['skillId', 'enabled', 'expectedStateRevision'], additionalProperties: false }),
-  tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
+  tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id, or use view (manifest, resource, outline, section, search) for selective snapshot-bound acquisition without transmitting full bodies.', {
+    type: 'object',
+    properties: {
+      skillId: id,
+      view: { type: 'string', enum: ['package', 'manifest', 'resource', 'outline', 'section', 'search'] },
+      version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+      path: { type: 'string', minLength: 1 },
+      selector: { type: 'string', minLength: 1 },
+      expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      includeDescendants: { type: 'boolean' },
+      query: { type: 'string', minLength: 1, maxLength: 200 },
+      caseSensitive: { type: 'boolean' },
+      textOffset: { type: 'integer', minimum: 0 },
+      textLimit: { type: 'integer', minimum: 1, maximum: 12288 },
+      offset: { type: 'integer', minimum: 0 },
+      limit: { type: 'integer', minimum: 1, maximum: 100 }
+    },
+    required: ['skillId'],
+    additionalProperties: false
+  }),
   tool('list_academy_changes', 'Discover immutable Academy skill version events globally in descending persistence order (createdAt DESC, skillId ASC, version DESC) without reading packages. Intersecting filters narrow results: skillId, query (case-insensitive literal substring on current skillName, not body), after/before (inclusive ISO 8601 UTC-normalized persistence timestamps), origin, limit (default 20, max 50), and cursor. skillName reflects the current canonical skill name; previousVersion is the actual persisted predecessor of that skill regardless of date filters. contentState/previousContentState distinguish tombstone deletion and reintroduction. Cursor binds filters, order and limit; visibility matches Academy catalog permissions and does not guarantee an immutable snapshot across pages. Inspect deltas with get_academy_change_diff or read a full package with get_academy_skill_history.', {
     type: 'object',
     properties: {
@@ -140,6 +159,40 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
       required: ['skillId', 'expectedVersion', 'findingId', 'evidenceFingerprint', 'action'],
       additionalProperties: false
     }
+  ),
+  tool(
+    'edit_academy_skill',
+    'Focal atomic package edit (replace by oldText or snapshot selector, add, remove, move) bound to expectedVersion and expectedPackageHash. Supports read-only PREVIEW (focal diff, measures delta, lint delta) and APPLY (canonical saveSkill receipt). Requires local SQLite authority for GLOBAL skills.',
+    {
+      type: 'object',
+      properties: {
+        skillId: id,
+        expectedVersion: version,
+        expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        mode: { type: 'string', enum: ['PREVIEW', 'APPLY'] },
+        edits: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 50,
+          items: {
+            type: 'object',
+            properties: {
+              op: { type: 'string', enum: ['replace', 'add', 'remove', 'move'] },
+              path: { type: 'string', minLength: 1 },
+              toPath: { type: 'string', minLength: 1 },
+              oldText: { type: 'string', minLength: 1 },
+              newText: { type: 'string' },
+              selector: { type: 'string', minLength: 1 },
+              content: { type: 'string' }
+            },
+            required: ['op'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['skillId', 'expectedVersion', 'expectedPackageHash', 'mode', 'edits'],
+      additionalProperties: false
+    }
   )
 ]
 
@@ -187,7 +240,128 @@ export async function executeAcademyTool(
         result = await service.setEnabled(string(values.skillId, 'skillId'), values.enabled, integer(values.expectedStateRevision, 'expectedStateRevision'))
         break
       }
-      case 'get_academy_skill': result = service.get(string(values.skillId, 'skillId')); break
+      case 'get_academy_skill': {
+        const allowed = [
+          'skillId', 'view', 'version', 'path', 'selector', 'expectedPackageHash',
+          'includeDescendants', 'query', 'caseSensitive', 'textOffset', 'textLimit', 'offset', 'limit'
+        ]
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const view = optionalEnum(values.view, ['package', 'manifest', 'resource', 'outline', 'section', 'search']) as
+          | 'package'
+          | 'manifest'
+          | 'resource'
+          | 'outline'
+          | 'section'
+          | 'search'
+          | undefined
+        const skillId = string(values.skillId, 'skillId')
+        if (!view || view === 'package') {
+          if (Object.keys(values).some(key => key !== 'skillId' && key !== 'view')) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.get(skillId)
+          break
+        }
+        const expectedPackageHash = values.expectedPackageHash === undefined ? undefined : sha256(values.expectedPackageHash)
+        const targetVersion = values.version === undefined ? undefined : integer(values.version, 'version')
+        const nonNegInt = (v: unknown) => {
+          if (v === undefined) return undefined
+          if (typeof v !== 'number' || !Number.isSafeInteger(v) || v < 0) throw new AcademyError('INVALID_ARGUMENT')
+          return v
+        }
+        if (values.includeDescendants !== undefined && typeof values.includeDescendants !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (values.caseSensitive !== undefined && typeof values.caseSensitive !== 'boolean') {
+          throw new AcademyError('INVALID_ARGUMENT')
+        }
+        if (view === 'manifest') {
+          if (
+            values.path !== undefined || values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({ skillId, view, version: targetVersion, expectedPackageHash })
+        } else if (view === 'resource') {
+          if (
+            targetVersion === undefined || values.path === undefined ||
+            values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            expectedPackageHash,
+            textOffset: nonNegInt(values.textOffset),
+            textLimit: values.textLimit === undefined ? undefined : integer(values.textLimit, 'textLimit')
+          })
+        } else if (view === 'outline') {
+          if (
+            targetVersion === undefined || values.path === undefined ||
+            values.selector !== undefined || values.query !== undefined ||
+            values.includeDescendants !== undefined || values.caseSensitive !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            expectedPackageHash,
+            offset: nonNegInt(values.offset),
+            limit: values.limit === undefined ? undefined : integer(values.limit, 'limit')
+          })
+        } else if (view === 'section') {
+          if (
+            targetVersion === undefined || values.path === undefined || values.selector === undefined ||
+            values.query !== undefined || values.caseSensitive !== undefined ||
+            values.offset !== undefined || values.limit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: string(values.path, 'path'),
+            selector: string(values.selector, 'selector'),
+            expectedPackageHash,
+            includeDescendants: values.includeDescendants as boolean | undefined,
+            textOffset: nonNegInt(values.textOffset),
+            textLimit: values.textLimit === undefined ? undefined : integer(values.textLimit, 'textLimit')
+          })
+        } else {
+          if (
+            targetVersion === undefined || values.query === undefined ||
+            values.selector !== undefined || values.includeDescendants !== undefined ||
+            values.textOffset !== undefined || values.textLimit !== undefined
+          ) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          result = service.lint.getSkillView({
+            skillId,
+            view,
+            version: targetVersion,
+            path: values.path === undefined ? undefined : string(values.path, 'path'),
+            expectedPackageHash,
+            query: string(values.query, 'query'),
+            caseSensitive: values.caseSensitive as boolean | undefined,
+            offset: nonNegInt(values.offset),
+            limit: values.limit === undefined ? undefined : integer(values.limit, 'limit')
+          })
+        }
+        break
+      }
       case 'list_academy_changes': result = service.listChanges(values); break
       case 'get_academy_change_diff': result = service.getChangeDiff(values); break
       case 'get_academy_skill_history': {
@@ -308,6 +482,58 @@ export async function executeAcademyTool(
             author: principalId
           })
         }
+        break
+      }
+      case 'edit_academy_skill': {
+        const allowed = ['skillId', 'expectedVersion', 'expectedPackageHash', 'mode', 'edits']
+        if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const skillId = string(values.skillId, 'skillId')
+        const expectedVersion = integer(values.expectedVersion, 'expectedVersion')
+        const expectedPackageHash = sha256(values.expectedPackageHash)
+        const mode = enumValue(values.mode, ['PREVIEW', 'APPLY'], 'mode') as 'PREVIEW' | 'APPLY'
+        const existingSkill = service.get(skillId)
+        if (existingSkill.scope === 'GLOBAL' && service.gitSync && !service.store.usesLocalAuthority()) {
+          throw new AcademyError('FOCAL_EDIT_REQUIRES_LOCAL_AUTHORITY', 'Focal edit requires local SQLite authority for GLOBAL skills')
+        }
+        if (mode === 'PREVIEW') {
+          result = service.lint.previewFocalEdit({
+            skillId,
+            expectedVersion,
+            expectedPackageHash,
+            edits: values.edits
+          })
+          break
+        }
+        const prep = service.lint.prepareFocalEdit({
+          skillId,
+          expectedVersion,
+          expectedPackageHash,
+          edits: values.edits
+        })
+        if (prep.kind === 'NO_CHANGE') {
+          result = {
+            state: 'NO_CHANGE',
+            skillId: prep.skill.id,
+            version: prep.skill.currentVersion,
+            packageHash: prep.skill.current.packageHash
+          }
+          break
+        }
+        if (!prep.editResult.candidateValid) {
+          throw new AcademyError(
+            prep.editResult.validationError?.code ?? 'INVALID_PACKAGE',
+            prep.editResult.validationError?.message ?? 'Invalid candidate package'
+          )
+        }
+        result = await service.saveSkill(
+          {
+            skillId,
+            expectedVersion,
+            package: prep.editResult.candidate,
+            origin: 'MCP'
+          },
+          'RECEIPT'
+        )
         break
       }
       default: throw new Error('METHOD_NOT_FOUND')
