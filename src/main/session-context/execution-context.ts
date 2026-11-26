@@ -19,7 +19,7 @@ export const executionSelector = z.discriminatedUnion('type', [
   z.object({ type: z.literal('WORKTREE'), id: z.string().regex(/^[a-f0-9]{64}$/), generation: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 ]).refine(selector => selector.type !== 'SESSION' || !!selector.provider || z.string().uuid().safeParse(selector.id).success)
 export const executionContextQuery = z.object({ selector: executionSelector, mode: z.enum(['MAP', 'RELATION_DETAIL']).default('MAP'),
-  view: z.enum(['WORK', 'GRAPH']).optional(), depth: z.number().int().min(1).max(4).default(4),
+  view: z.enum(['WORK', 'GRAPH', 'MEMBERSHIP']).optional(), depth: z.number().int().min(1).max(4).default(4),
   limit: z.number().int().min(1).max(24).default(20), cursor: z.string().max(512).optional() }).strict()
 export type ExecutionSelector = z.infer<typeof executionSelector>
 export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, revision: { type: 'integer', minimum: 1, description: 'Exact Artifact revision when selecting publication provenance.' }, type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'INVOCATION', 'WORKTREE'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex', 'codex-native', 'antigravity-native'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
@@ -100,7 +100,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
       const links = path.edges.map(id => graph.edges.find(edge => edge.id === id)!)
       const first = links[0]
       const causal = links.length && links.every(edge => edge.confidenceClass === 'VERIFIED_CAUSAL' && edge.evidenceKind === first.evidenceKind && edge.evidenceRef === first.evidenceRef && edge.sourceRevision === first.sourceRevision)
-      const rank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_CAUSAL: 4 }
+      const rank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_MEMBERSHIP: 3, VERIFIED_CAUSAL: 4 }
       const weakest = links.reduce((current, edge) => rank[edge.confidenceClass] < rank[current] ? edge.confidenceClass : current, first.confidenceClass)
       const target = graph.nodes.find(node => node.key === path.target)
       const reason = target?.metadataCoverage === 'GATE_REQUIRED' ? 'GATE_REQUIRED' :

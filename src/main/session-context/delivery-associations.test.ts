@@ -2,6 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { ArtifactStore } from '../continuum/artifact-store'
 import { ContinuumService } from '../continuum/continuum-service'
+import { storedLegacyArtifact, storedLegacyIdentity } from '../continuum/continuum-test-fixtures'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 import { GitHubPullRequests, pullRequestDeliveryPage } from '../github/github-pull-requests'
 import { GitService } from '../core/git-service'
@@ -36,7 +37,8 @@ async function fixture() {
   const tree = (await reader.inventory()).worktrees[0], observe = () => reader.executionSnapshot(tree.worktreeId, tree.generation)
   const store = new ArtifactStore(join(root, '.git', 'artifacts.db'), 'fixture'); cleanup.push(async () => store.close())
   const service = new ContinuumService(store, undefined, () => active)
-  const plan = service.publish('---\nname: Plan\ndescription: Delivery fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nPRIVATE_PLAN')
+  const plan = storedLegacyArtifact(store, '---\nname: Plan\ndescription: Delivery fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nPRIVATE_PLAN')
+  storedLegacyIdentity(join(root, '.git', 'artifacts.db'), plan, 'execution-A')
   const binding = await service.bindExecutionBranch('execution-A', plan.artifactId, observe)
   const request = { bindingArtifactId: binding.artifactId, bindingRevision: binding.revision, planArtifactId: plan.artifactId, planRevision: plan.revision, executionId: 'execution-A' }
   const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', () => active), 'fixture', () => active, tree.worktreeId)
@@ -47,11 +49,12 @@ it('requires canonical authenticated binding, exact revisions and scope; branch 
   const f = await fixture(), snapshot = await f.observe()
   await expect(f.service.prepareDeliveryContext(undefined, f.request, f.observe)).rejects.toThrow('AGENT_UNAUTHORIZED')
   await expect(f.service.prepareDeliveryContext({ ...f.authority }, f.request, f.observe)).rejects.toThrow('AGENT_UNAUTHORIZED')
-  const fake = f.service.publish('---\nname: Impostor\ndescription: Fixture\nkind: OBSERVATION\nbindingRole: EXECUTION_BRANCH\n---\nDeclaration')
+  const fake = storedLegacyArtifact(f.store, '---\nname: Impostor\ndescription: Fixture\nkind: OBSERVATION\nbindingRole: EXECUTION_BRANCH\n---\nDeclaration')
   await expect(f.service.prepareDeliveryContext(f.authority, { ...f.request, bindingArtifactId: fake.artifactId }, f.observe)).rejects.toThrow()
   await expect(f.service.prepareDeliveryContext(f.authority, { ...f.request, planRevision: 2 }, f.observe)).rejects.toThrow('DELIVERY_CONTEXT_STALE')
   for (const key of ['worktreeId', 'worktreeGeneration', 'branchGeneration'] as const) await expect(f.service.prepareDeliveryContext(f.authority, f.request, async () => ({ ...snapshot, [key]: 'f'.repeat(64) }))).rejects.toThrow('DELIVERY_CONTEXT_STALE')
-  const second = f.service.publish('---\nname: Plan B\ndescription: Fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-B\n---\nB')
+  const second = storedLegacyArtifact(f.store, '---\nname: Plan B\ndescription: Fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-B\n---\nB')
+  storedLegacyIdentity(join(f.root, '.git', 'artifacts.db'), second, 'execution-B')
   await f.service.bindExecutionBranch('execution-B', second.artifactId, f.observe)
   expect((await f.prepare()).executionId).toBe('execution-A')
   await expect(f.service.prepareDeliveryContext(f.authority, { ...f.request, executionId: 'execution-B' }, f.observe)).rejects.toThrow('DELIVERY_CONTEXT_INVALID')
@@ -144,7 +147,7 @@ it('projects governed delivery and GitHub membership bidirectionally through MCP
   const noPrMetadata = declared('Historical PR mention', '')
   const wrongRepo = declared('Foreign declaration', 'repository: fork/repo\ncommitSha: ' + sha + '\nprNumber: 111')
   for (const artifact of [shaDeclared, prDeclared, wrongRepo, documented, noPrMetadata]) await refreshFor({ kind: 'ARTIFACT', id: artifact.artifactId })
-  const otherPlan = f.service.publish('---\nname: Other plan\ndescription: Fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nOther candidate')
+  const otherPlan = storedLegacyArtifact(f.store, '---\nname: Other plan\ndescription: Fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nOther candidate')
   const unrelatedHandoff = f.service.publish('---\nname: Other handoff\ndescription: Fixture\nkind: IMPLEMENTATION_HANDOFF\nrelations:\n  - artifactId: ' + otherPlan.artifactId + '\n    kind: implements\n---\nOther candidate')
   await refreshFor({ kind: 'ARTIFACT', id: unrelatedHandoff.artifactId })
   const unrelated = await query({ type: 'ARTIFACT', id: unrelatedHandoff.artifactId, revision: 1 })

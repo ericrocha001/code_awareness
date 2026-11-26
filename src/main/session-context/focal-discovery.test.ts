@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, expect, it, vi } from 'vitest'
-import { fixture, markdown } from '../continuum/continuum-test-fixtures'
+import { fixture, markdown, storedLegacyPublication } from '../continuum/continuum-test-fixtures'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { inspectExecutionOriginAlignment } from './execution-origin'
 import { startCaptureFixture } from './fixtures/native-capture-fixture'
@@ -63,7 +63,7 @@ function setup(repositoryId = 'repo') {
     return sessionId
   }
   const publishWithNative = async (rawMarkdown: string, sessionRaw: string, callId = 'call-1') => {
-    const receipt = continuum.service.publish(rawMarkdown)
+    const receipt = rawMarkdown.includes('\nexecutionId:') ? storedLegacyPublication(continuum.store, rawMarkdown) : continuum.service.publish(rawMarkdown)
     const sessionId = nativeDigest(JSON.stringify([repositoryId, 'codex', sessionRaw]))
     const stamp = startCaptureFixture(store.registry, binding, sessionId)
     for (const hook_event_name of ['PreToolUse', 'PostToolUse']) {

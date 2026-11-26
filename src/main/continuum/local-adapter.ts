@@ -1,4 +1,4 @@
-import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, parseContinuumAgentRequest, parseAgentArtifactUpdate } from './continuum-agent'
+import { CONTINUUM_AGENT_TOOLS, documentaryTargetSchema, executeContinuumAgent, parseContinuumAgentRequest, parseAgentArtifactUpdate } from './continuum-agent'
 import { authorizeArtifactAgent } from './agent-authority'
 import { GitService } from '../core/git-service'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
@@ -153,7 +153,11 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
         return artifact
       }),
-      publish: operation(input => { const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind', 'deliveryContext', 'sessionWitness']); const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, ...fields } = request.value; return { ...request, deliveryContext, sessionWitness, rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => {
+      publish: operation(input => {
+        const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind', 'deliveryContext', 'sessionWitness', 'membership'])
+        const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, membership, ...fields } = request.value
+        return { ...request, deliveryContext, sessionWitness, rawMarkdown: text(rawMarkdown), fields: { ...publicationFields(fields), ...(membership === undefined ? {} : { membership: documentaryTargetSchema.parse(membership) }) } }
+      }, async (request, context) => {
         const service = await this.service(request, context)
         const authority = this.authority(request, context)
         if (authority.deliveryContextError) throw new Error('DELIVERY_CONTEXT_INVALID')
@@ -171,7 +175,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         return { ...receipt, state: 'PERSISTED', ...(sessionCoverage ? { sessionCoverage } : {}) }
       }),
       update: operation(input => {
-        const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind', 'lifecycle', 'deliveryContext', 'sessionWitness'])
+        const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind', 'lifecycle', 'deliveryContext', 'sessionWitness', 'membership'])
         const { repositoryId: _repository, worktreeId: _worktree, deliveryContext, sessionWitness, ...args } = request.value
         return { ...request, deliveryContext, sessionWitness, args: parseAgentArtifactUpdate(args) }
       }, async (request, context) => {

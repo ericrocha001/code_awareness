@@ -16,6 +16,7 @@ import type { McpMultimodalToolResult } from '../mcp/mcp-types'
 import { createHash } from 'node:crypto'
 import { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 import { ContinuumLocalAdapter } from '../continuum/local-adapter'
+import { authenticatedAgentPrincipal } from '../continuum/agent-authority'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { authorizeHandoffAssociation, handoffSessionCoverage } from './handoff'
 import { LocalChannelHost } from '../local-agent-channel/local-channel-host'
@@ -135,8 +136,10 @@ describe('refresh in an explicitly selected sibling Worktree', () => {
     const adapter = new ContinuumLocalAdapter(continuum, (artifact, target) => handoffSessionCoverage(client, artifact, target))
     const commitSha = f.git(f.sibling, 'rev-parse', 'HEAD').trim()
     const markdown = `---\n${JSON.stringify({ name: 'History handoff', description: 'Fixture coverage', kind: 'IMPLEMENTATION_HANDOFF', date: '2026-11-03T00:00:00Z',
-      sessionLinks: [{ sessionId: session.id }], executionId: 'execution-fixture', commitSha, pullRequest: 89, proofIds: [proof.proofId], relations: [{ artifactId: plan.artifactId, kind: 'implements' }] })}\n---\nFixture Handoff`
-    const receipt = await adapter.operations.publish.execute({ repositoryId: 'A', worktreeId: f.selection.worktreeId, rawMarkdown: markdown }, { connected: () => true }) as any
+      sessionLinks: [{ sessionId: session.id }], commitSha, pullRequest: 89, proofIds: [proof.proofId], relations: [{ artifactId: plan.artifactId, kind: 'implements' }] })}\n---\nFixture Handoff`
+    const connected = () => true
+    const receipt = await adapter.operations.publish.execute({ repositoryId: 'A', worktreeId: f.selection.worktreeId, rawMarkdown: markdown },
+      { connected, principal: authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', connected) }) as any
     expect(receipt).toMatchObject({ state: 'PERSISTED', sessionCoverage: { coverage: 'LINKED', evidence: 'HANDOFF_DECLARED', transcriptImported: false } })
     const link = f.store.associations(session.id).find(link => link.sourceArtifactId === receipt.artifactId)!
     expect(link).toMatchObject({ proofIds: [proof.proofId], evidence: 'HANDOFF_DECLARED', commitSha, pullRequest: 89, sourceRevision: receipt.revision, sourceHash: service.get(receipt.artifactId)!.contentHash })
@@ -145,7 +148,7 @@ describe('refresh in an explicitly selected sibling Worktree', () => {
       association: { sourceArtifactId: receipt.artifactId, artifactId: plan.artifactId, expectedCatalogRevision: f.store.catalogRevision(), proofIds: [proof.proofId] } }))
     expect(rejected.code).toBe('ASSOCIATION_WORKTREE_MISMATCH')
     f.git(f.main, 'worktree', 'remove', '--force', f.sibling)
-    for (const filter of [{ executionId: 'execution-fixture' }, { artifactId: plan.artifactId }, { artifactId: receipt.artifactId }, { commitSha }, { pullRequest: 89 }]) {
+    for (const filter of [{ artifactId: plan.artifactId }, { artifactId: receipt.artifactId }, { commitSha }, { pullRequest: 89 }]) {
       const result = data(await client.call('list_agent_sessions', filter))
       expect(result.sessions).toHaveLength(1)
       expect(result.sessions[0]).toMatchObject({ sessionId: session.id, importState: 'METADATA_ONLY', eventCount: 0, claimsVerified: false, worktreeAvailability: 'NOT_RECHECKED' })

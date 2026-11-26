@@ -89,7 +89,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
   it('generic CLI publishes frontmatter as transport and preserves open metadata and literal bytes through ingestion/restart', () => {
     const repo = tempDir('generic-cli-')
     writeFileSync(join(repo, 'package.json'), '{}', 'utf8')
-    const rawMarkdown = '---\r\nname: Generic context\r\ndescription: Open this for literal preservation\r\nkind: FUTURE_KIND\r\nexecutionId: canonical-execution\r\n---\r\n' + HOSTILE_SHELL_MARKDOWN
+    const rawMarkdown = '---\r\nname: Generic context\r\ndescription: Open this for literal preservation\r\nkind: FUTURE_KIND\r\ncontextLabel: canonical-execution\r\n---\r\n' + HOSTILE_SHELL_MARKDOWN
     const mdFile = join(repo, 'generic.md'); writeFileSync(mdFile, rawMarkdown, 'utf8')
     const receipt = JSON.parse(execFileSync(process.execPath, [publisherScript, 'publish', mdFile], { cwd: repo, encoding: 'utf8' }))
     expect(receipt.status).toBe('QUEUED')
@@ -105,7 +105,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
       const artifact = reopened.get(receipt.artifactId)!
       expect(Buffer.from(artifact.rawMarkdown)).toEqual(Buffer.from(rawMarkdown))
       expect(artifact.metadata.kind).toBe('FUTURE_KIND'); expect(artifact.revision).toBe(1)
-      expect(reopened.list({ metadata: { executionId: 'canonical-execution' } }).artifacts).toHaveLength(1)
+      expect(reopened.list({ metadata: { contextLabel: 'canonical-execution' } }).artifacts).toHaveLength(1)
     } finally { reopened.close() }
   })
 

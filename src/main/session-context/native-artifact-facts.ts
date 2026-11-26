@@ -20,10 +20,14 @@ export function nativeArtifactFact(payload: Record<string, unknown>, repositoryI
   const tool = payload.tool_name
   if (typeof tool !== 'string' || !Object.hasOwn(nativeArtifactTools, tool) || !object(payload.tool_input)) return
   const action = nativeArtifactTools[tool as keyof typeof nativeArtifactTools], input = payload.tool_input
-  const keys = ['rawMarkdown', 'name', 'description', 'kind', ...(action === 'UPDATE' ? ['artifactId', 'expectedRevision'] : [])]
+  const keys = ['rawMarkdown', 'name', 'description', 'kind', 'membership', ...(action === 'UPDATE' ? ['artifactId', 'expectedRevision'] : [])]
   if (Object.keys(input).some(key => !keys.includes(key)) || typeof input.rawMarkdown !== 'string' || !input.rawMarkdown.trim() ||
     ['name','description','kind'].some(key => input[key] !== undefined && (typeof input[key] !== 'string' || !(input[key] as string).trim())) ||
     action === 'UPDATE' && (!artifactId(input.artifactId) || !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 1)) return
+  const selection = input.membership
+  if (selection !== undefined && (!object(selection) || Object.keys(selection).length !== 2 ||
+    !(artifactId(selection.planArtifactId) && Number.isSafeInteger(selection.expectedPlanRevision) && Number(selection.expectedPlanRevision) > 0 ||
+      action === 'UPDATE' && selection.action === 'UNLINK' && typeof selection.reason === 'string' && selection.reason.trim()))) return
   const requestDigest = publicationRequestDigest(action, input as unknown as PublicationRequest)
   const fact: NativeArtifactFact = { schemaVersion: 1, category: action === 'PUBLISH' ? 'ARTIFACT_PUBLISH' : 'ARTIFACT_UPDATE', tool: tool as keyof typeof nativeArtifactTools, requestDigest, outcome: 'UNKNOWN' }
   if (payload.hook_event_name !== 'PostToolUse' || !object(payload.tool_response)) return fact
@@ -41,11 +45,14 @@ export function nativeArtifactFact(payload: Record<string, unknown>, repositoryI
   if (result.success !== true || typeof result.replayed !== 'boolean' || !object(result.publicationReceipt)) return fact
   const receipt = result.publicationReceipt
   const { digest, ...body } = receipt
-  if (Object.keys(receipt).some(key => !['schemaVersion','receiptId','repositoryId','artifactId','revision','contentHash','requestDigest','action','deliveryContext','sessionWitness','digest'].includes(key)) ||
+  if (Object.keys(receipt).some(key => !['schemaVersion','receiptId','repositoryId','artifactId','revision','contentHash','requestDigest','action','deliveryContext','sessionWitness','documentaryMembership','documentaryUnlinkReason','digest'].includes(key)) ||
     receipt.schemaVersion !== 1 || typeof receipt.receiptId !== 'string' || !/^publication-[a-f0-9-]{36}$/.test(receipt.receiptId) || receipt.repositoryId !== repositoryId ||
     !artifactId(receipt.artifactId) || !Number.isSafeInteger(receipt.revision) || Number(receipt.revision) < 1 || !hash(receipt.contentHash) || !hash(digest) ||
     receipt.action !== action || receipt.requestDigest !== requestDigest || result.artifactId !== receipt.artifactId || result.revision !== receipt.revision ||
     (receipt.deliveryContext !== undefined && !deliveryAnchor.safeParse(receipt.deliveryContext).success) ||
+    (receipt.documentaryMembership !== undefined && (receipt.documentaryMembership !== 'EXPLICIT_TARGET' && receipt.documentaryMembership !== 'HANDOFF_IMPLEMENTS' ||
+      receipt.deliveryContext === undefined || receipt.documentaryUnlinkReason !== undefined)) ||
+    (receipt.documentaryUnlinkReason !== undefined && (action !== 'UPDATE' || typeof receipt.documentaryUnlinkReason !== 'string' || !receipt.documentaryUnlinkReason.trim())) ||
     (receipt.sessionWitness !== undefined && !authenticatedSessionWitness.safeParse(receipt.sessionWitness).success) ||
     action === 'UPDATE' && (input.artifactId !== receipt.artifactId || Number(input.expectedRevision) + 1 !== receipt.revision) ||
     publicationReceiptDigest(body as unknown as Omit<PublicationReceipt, 'digest'>) !== digest) return fact
