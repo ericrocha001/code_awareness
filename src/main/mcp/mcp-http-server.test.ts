@@ -242,4 +242,137 @@ describe('MCP HTTP server', () => {
       await new Promise<void>((resolve) => postServer.close(() => resolve()))
     }
   })
+
+  it('preserves modern discovery, legacy handshake, and get_academy_skill structuredContent/outputSchema with Academy catalog', async () => {
+    const academyStub = {
+      lint: {
+        getSkillView: vi.fn((input: { view: string; skillId: string; path?: string; selector?: string }) => {
+          if (input.view === 'resource') {
+            return {
+              skillId: input.skillId,
+              name: 'probe-skill',
+              scope: 'GLOBAL',
+              version: 1,
+              packageHash: 'a'.repeat(64),
+              path: input.path,
+              content: { text: 'LITERAL_RESOURCE_SLICE', offset: 0, totalCharacters: 22, nextOffset: null }
+            }
+          }
+          return {
+            skillId: input.skillId,
+            name: 'probe-skill',
+            scope: 'GLOBAL',
+            version: 1,
+            packageHash: 'a'.repeat(64),
+            path: input.path,
+            selector: input.selector,
+            kind: 'HEADING',
+            blockType: 'heading',
+            includeDescendants: false,
+            range: { startLine: 1, endLine: 2, startOffset: 0, endOffset: 21 },
+            content: { text: 'LITERAL_SECTION_SLICE', offset: 0, totalCharacters: 21, nextOffset: null }
+          }
+        })
+      }
+    } as any
+
+    const academyAdapter = ChannelMcpAdapter.createGlobalOnly(academyStub)
+    const academyServer = createMcpHttpServer(academyAdapter, () => {})
+    await new Promise<void>(resolve => academyServer.listen(0, '127.0.0.1', resolve))
+    const addr = academyServer.address() as { port: number }
+    const url = `http://127.0.0.1:${addr.port}/mcp`
+    const identity = { 'io.modelcontextprotocol/serverInfo': { name: 'code-awareness-context-navigation', version: '1.0.0' } }
+
+    try {
+      // Modern server/discover 2026-07-28 contract preserved
+      const discover = await send<{ result: Record<string, unknown> }>(
+        modernRequest('server/discover', {}),
+        { 'mcp-protocol-version': modernVersion, 'mcp-method': 'server/discover' },
+        url
+      )
+      expect(discover.response.status).toBe(200)
+      expect(discover.body.result).toMatchObject({
+        resultType: 'complete',
+        ttlMs: 0,
+        cacheScope: 'private',
+        _meta: identity
+      })
+      expect(discover.body.result.supportedVersions).toEqual([
+        modernVersion, '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'
+      ])
+
+      // Modern & legacy tools/list include get_academy_skill with outputSchema
+      const modernList = await send<{ result: { tools: Array<{ name: string; outputSchema?: Record<string, unknown> }> } }>(
+        modernRequest('tools/list'),
+        { 'mcp-protocol-version': modernVersion, 'mcp-method': 'tools/list' },
+        url
+      )
+      expect(modernList.response.status).toBe(200)
+      const getSkillTool = modernList.body.result.tools.find(t => t.name === 'get_academy_skill')
+      expect(getSkillTool?.outputSchema).toMatchObject({
+        type: 'object',
+        additionalProperties: true,
+        properties: { content: { type: 'string' } }
+      })
+
+      const legacyInit = await send<{ result: { protocolVersion: string } }>(
+        { jsonrpc: '2.0', id: 'init-1', method: 'initialize', params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: {} } },
+        {},
+        url
+      )
+      expect(legacyInit.response.status).toBe(200)
+      expect(legacyInit.body.result.protocolVersion).toBe('2025-11-25')
+
+      const legacyList = await send<{ result: { tools: Array<{ name: string }> } }>(
+        { jsonrpc: '2.0', id: 'list-1', method: 'tools/list', params: {} },
+        {},
+        url
+      )
+      expect(legacyList.body.result.tools.some(t => t.name === 'get_academy_skill')).toBe(true)
+
+      // Modern tools/call for section and resource returns structuredContent.content:string + legacy text JSON
+      const sectionCall = await send<{ result: { content: Array<{ text: string }>; structuredContent?: Record<string, unknown> } }>(
+        modernRequest('tools/call', {
+          name: 'get_academy_skill',
+          arguments: { skillId: 's1', view: 'section', version: 1, path: 'SKILL.md', selector: 'aaaaaaaaaaaa:SKILL.md#h0' }
+        }),
+        { 'mcp-protocol-version': modernVersion, 'mcp-method': 'tools/call', 'mcp-name': 'get_academy_skill' },
+        url
+      )
+      expect(sectionCall.response.status).toBe(200)
+      expect(sectionCall.body.result.structuredContent).toMatchObject({
+        skillId: 's1',
+        content: 'LITERAL_SECTION_SLICE',
+        offset: 0,
+        totalCharacters: 21,
+        nextOffset: null
+      })
+      expect(JSON.parse(sectionCall.body.result.content[0].text).content).toEqual({
+        text: 'LITERAL_SECTION_SLICE',
+        offset: 0,
+        totalCharacters: 21,
+        nextOffset: null
+      })
+
+      const resourceCall = await send<{ result: { content: Array<{ text: string }>; structuredContent?: Record<string, unknown> } }>(
+        modernRequest('tools/call', {
+          name: 'get_academy_skill',
+          arguments: { skillId: 's1', view: 'resource', version: 1, path: 'references/guide.md' }
+        }),
+        { 'mcp-protocol-version': modernVersion, 'mcp-method': 'tools/call', 'mcp-name': 'get_academy_skill' },
+        url
+      )
+      expect(resourceCall.response.status).toBe(200)
+      expect(resourceCall.body.result.structuredContent).toMatchObject({
+        skillId: 's1',
+        path: 'references/guide.md',
+        content: 'LITERAL_RESOURCE_SLICE',
+        offset: 0,
+        totalCharacters: 22,
+        nextOffset: null
+      })
+    } finally {
+      await new Promise<void>(resolve => academyServer.close(() => resolve()))
+    }
+  })
 })
