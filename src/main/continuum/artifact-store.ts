@@ -15,6 +15,7 @@ import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continu
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { ExecutionActivationRecord, ExecutionActivationScopeKind, ExecutionActivationStatus, ExecutionIdentityRecord } from '../../shared/types/delivery-context-types'
 import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
+import { ArtifactSearchProjection } from './artifact-search-projection'
 import { ArtifactNavigation } from './artifact-navigation'
 import type { StructureQuery, SectionQuery } from './artifact-structure'
 import { inspectWebP, mediaHash } from './visual-media'
@@ -322,6 +323,7 @@ export class ArtifactStore {
     return this.structureSecret = (this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string }).secret
   }
   private readonly db: Database.Database
+  private readonly searchProjection: ArtifactSearchProjection
   private readonly graphIndex: ArtifactGraph
   suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
   graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
@@ -373,6 +375,8 @@ export class ArtifactStore {
       this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
+      this.searchProjection = new ArtifactSearchProjection(this.db)
+      this.searchProjection.schedule()
     } catch (error) { this.db.close(); throw error }
   }
 
@@ -551,6 +555,7 @@ export class ArtifactStore {
     this.db.prepare('INSERT INTO artifact_revisions(artifact_id, revision, snapshot_json) VALUES (?, ?, ?)').run(artifact.artifactId, artifact.revision, JSON.stringify(artifact))
     this.tagIndex.project(artifact.artifactId, artifact.metadata.tags)
     this.graphIndex.project(artifact)
+    this.searchProjection.schedule()
   }
 
   private createInsideTransaction(input: CreateArtifactInput, legacy = false, media?: VisualMedia): Artifact {
@@ -1005,5 +1010,8 @@ export class ArtifactStore {
   completeMigration(source: string): void { this.db.prepare('INSERT OR IGNORE INTO legacy_migrations VALUES (?, ?)').run(source, new Date().toISOString()) }
   registerLocator(locator: string): void { this.db.prepare('INSERT OR IGNORE INTO repository_locators VALUES (?)').run(locator) }
   hasLocator(locator: string): boolean { return !!this.db.prepare('SELECT 1 FROM repository_locators WHERE locator = ?').get(locator) }
-  close(): void { if (this.db.open) this.db.close() }
+  close(): void {
+    this.searchProjection.stop()
+    if (this.db.open) this.db.close()
+  }
 }
