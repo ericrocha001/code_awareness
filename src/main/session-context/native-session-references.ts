@@ -1,6 +1,8 @@
 import type Database from 'better-sqlite3'
 import { digest } from './privacy'
 import type { NativeSourceEventType } from './native-source-events'
+import { SKILL_EXTRACTOR_VERSION } from './skill-intelligence-extractor'
+import { ensureSkillIntelligenceSchema, SkillIntelligenceStore, type SkillEventInput } from './skill-intelligence-store'
 
 export const NATIVE_CODEX_NORMALIZER = 'native-codex-v3'
 export const NATIVE_ANTIGRAVITY_NORMALIZER = 'native-antigravity-v3'
@@ -479,6 +481,7 @@ export class NativeSessionReferences {
       this.db.prepare(`DELETE FROM native_reference_turns WHERE nativeKey=? AND revision NOT IN (
         SELECT revision FROM native_reference_sources WHERE nativeKey=?
       )`).run(input.nativeKey, input.nativeKey)
+      this.cleanupSkillObservationsForUnpromoted(input.nativeKey)
       const oldFts = this.db.prepare(`SELECT rowid FROM native_reference_fts_map WHERE nativeKey=? AND revision NOT IN (
         SELECT revision FROM native_reference_sources WHERE nativeKey=?
       )`).all(input.nativeKey, input.nativeKey) as Array<{ rowid: number }>
@@ -506,6 +509,7 @@ export class NativeSessionReferences {
     revision: number
     events: NativeIndexedEventRow[]
     pairUpdates: Array<{ eventId: string; status: string; pairing: string }>
+    skillEvents?: SkillEventInput[]
     turns: Array<{ ordinal: number; turnId: string; firstTime?: string; lastTime?: string; eventCount: number; typesJson: string }>
     nextOffset: number
     tailDigest: string
@@ -572,6 +576,17 @@ export class NativeSessionReferences {
           }
         }
       }
+      if (input.skillEvents?.length) {
+        ensureSkillIntelligenceSchema(this.db)
+        const skillStore = new SkillIntelligenceStore(this.db)
+        for (const ev of input.skillEvents) {
+          skillStore.recordSkillEvent({
+            ...ev,
+            sourceNamespace: input.nativeKey,
+            sourceRevision: input.revision
+          })
+        }
+      }
       const cpUpdate = this.db.prepare(`
         UPDATE native_reference_checkpoints
         SET nextOffset=?, tailDigest=?, sourceBytes=?, fileIdentity=?, stateJson=?, updatedAt=?
@@ -582,6 +597,32 @@ export class NativeSessionReferences {
       )
       if (cpUpdate.changes === 0) throw new Error('SOURCE_STALE')
     }).immediate()
+  }
+
+  private hasSkillEventsTable(): boolean {
+    return Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_events'").get())
+  }
+
+  private cleanupSkillObservationsForUnpromoted(nativeKey: string): void {
+    if (!this.hasSkillEventsTable()) return
+    this.db.prepare(`DELETE FROM skill_events WHERE sourceNamespace=? AND sourceRevision IS NOT NULL AND sourceRevision NOT IN (
+      SELECT revision FROM native_reference_sources WHERE nativeKey=?
+    )`).run(nativeKey, nativeKey)
+  }
+
+  private cleanupSkillObservationsForKeepRevision(nativeKey: string, keepRevision: number): void {
+    if (!this.hasSkillEventsTable()) return
+    this.db.prepare('DELETE FROM skill_events WHERE sourceNamespace=? AND sourceRevision IS NOT NULL AND sourceRevision<>?').run(nativeKey, keepRevision)
+  }
+
+  private cleanupSkillObservationsAll(nativeKey: string): void {
+    if (this.hasSkillEventsTable()) {
+      this.db.prepare('DELETE FROM skill_events WHERE sourceNamespace=?').run(nativeKey)
+    }
+    const hasCov = Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_source_coverage'").get())
+    if (hasCov) {
+      this.db.prepare('DELETE FROM skill_source_coverage WHERE scopeKey=?').run(nativeKey)
+    }
   }
 
   private bumpIndexEpoch(): void {
@@ -636,6 +677,16 @@ export class NativeSessionReferences {
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=? AND revision<=?').run(persisted.nativeKey, persisted.revision)
       this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
       this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=? AND revision<>?').run(persisted.nativeKey, persisted.revision)
+      this.cleanupSkillObservationsForKeepRevision(persisted.nativeKey, persisted.revision)
+      if (persisted.normalizer === NATIVE_CODEX_NORMALIZER) {
+        ensureSkillIntelligenceSchema(this.db)
+        new SkillIntelligenceStore(this.db).recordSourceCoverage(
+          'native_source_event',
+          persisted.nativeKey,
+          'SUPPORTED',
+          SKILL_EXTRACTOR_VERSION
+        )
+      }
       const staleFts = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=? AND revision<>?').all(persisted.nativeKey, persisted.revision) as Array<{ rowid: number }>
       if (staleFts.length) {
         const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
@@ -658,6 +709,7 @@ export class NativeSessionReferences {
       this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=?').run(nativeKey)
       this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=?').run(nativeKey)
+      this.cleanupSkillObservationsAll(nativeKey)
       const ftsRows = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=?').all(nativeKey) as Array<{ rowid: number }>
       if (ftsRows.length) {
         const delFts = this.db.prepare('DELETE FROM native_reference_fts WHERE rowid=?')
@@ -683,6 +735,7 @@ export class NativeSessionReferences {
         this.db.prepare('DELETE FROM native_reference_checkpoints WHERE nativeKey=?').run(nativeKey)
         this.db.prepare('DELETE FROM native_reference_events WHERE nativeKey=?').run(nativeKey)
         this.db.prepare('DELETE FROM native_reference_turns WHERE nativeKey=?').run(nativeKey)
+        this.cleanupSkillObservationsAll(nativeKey)
         if (this.ftsAvailable) {
           const ftsRows = this.db.prepare('SELECT rowid FROM native_reference_fts_map WHERE nativeKey=?').all(nativeKey) as Array<{ rowid: number }>
           if (ftsRows.length) {

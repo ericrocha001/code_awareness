@@ -12,7 +12,7 @@ import { entireAgent } from './entire-schema'
 import { migrateSessionNamespace } from './session-namespace-migration'
 import { SessionReferences } from './session-references'
 import { MODEL_INTELLIGENCE_SCHEMA, ModelIntelligenceStore } from './model-intelligence-store'
-import { SKILL_INTELLIGENCE_SCHEMA, SkillIntelligenceStore } from './skill-intelligence-store'
+import { ensureSkillIntelligenceSchema, SkillIntelligenceStore } from './skill-intelligence-store'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -128,7 +128,7 @@ export class SessionStore {
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
         }
         this.db.exec(MODEL_INTELLIGENCE_SCHEMA)
-        this.db.exec(SKILL_INTELLIGENCE_SCHEMA)
+        ensureSkillIntelligenceSchema(this.db)
         this.db.pragma('user_version = 9')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey

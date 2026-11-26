@@ -1,6 +1,11 @@
 import type Database from 'better-sqlite3'
+import { extractTextValue } from './native-source-events'
 import { digest, sanitize } from './privacy'
-import { classifyStructuredOutput, extractTextValue } from './native-source-events'
+import {
+  extractSkillCallMetadata,
+  qualifySkillToolObservation,
+  resolveCanonicalSkillTool
+} from './skill-intelligence-extractor'
 import type { EventInput } from './types'
 
 export type SkillObservationClass =
@@ -8,7 +13,9 @@ export type SkillObservationClass =
   | 'DISCOVERED_MANIFEST_FETCHED'
   | 'CONTENT_DELIVERED'
   | 'ATTEMPT_FAILED_OR_REFUSED'
+  | 'INDETERMINATE'
 
+export type SkillDeliveryGranularity = 'FULL_PACKAGE' | 'FRAGMENT' | 'RESOURCE' | 'MANIFEST' | 'NONE'
 export type SkillScope = 'GLOBAL' | 'PROJECT' | 'UNKNOWN'
 export type SkillVersionStatus = 'EXACT' | 'VERSION_UNKNOWN'
 export type SkillSourceSurface = 'academy_mcp_skills' | 'academy_mcp_tool' | 'native_source_event'
@@ -23,6 +30,7 @@ export const SKILL_INTELLIGENCE_SCHEMA = `
     sessionId TEXT REFERENCES sessions(id) ON DELETE CASCADE,
     executionId TEXT,
     nativeSessionId TEXT,
+    repositoryId TEXT,
     provider TEXT,
     worktreeId TEXT,
     generation TEXT,
@@ -36,10 +44,18 @@ export const SKILL_INTELLIGENCE_SCHEMA = `
     packageHash TEXT,
     resourceUri TEXT,
     resourcePath TEXT,
+    resourceSelector TEXT,
+    resourceRangeJson TEXT,
     resourceDigest TEXT,
+    deliveryGranularity TEXT,
     sourceSurface TEXT NOT NULL,
     sourceContract TEXT NOT NULL,
+    sourceNamespace TEXT,
+    sourceRevision INTEGER,
+    callEventId TEXT,
+    resultEventId TEXT,
     originalEventId TEXT,
+    turnId TEXT,
     operation TEXT NOT NULL,
     operationStatus TEXT NOT NULL,
     errorCode TEXT,
@@ -49,6 +65,7 @@ export const SKILL_INTELLIGENCE_SCHEMA = `
     sourceTimestamp TEXT,
     observedAt TEXT NOT NULL,
     timestampKind TEXT NOT NULL,
+    extractorVersion TEXT,
     gapsJson TEXT NOT NULL DEFAULT '[]',
     revision INTEGER NOT NULL DEFAULT 1
   );
@@ -56,6 +73,8 @@ export const SKILL_INTELLIGENCE_SCHEMA = `
   CREATE INDEX IF NOT EXISTS skill_events_execution_idx ON skill_events(executionId, captureOrder, eventId);
   CREATE INDEX IF NOT EXISTS skill_events_native_idx ON skill_events(nativeSessionId, captureOrder, eventId);
   CREATE INDEX IF NOT EXISTS skill_events_skill_idx ON skill_events(skillId, version, captureOrder);
+  CREATE INDEX IF NOT EXISTS skill_events_skill_hash_idx ON skill_events(skillId, packageHash, captureOrder);
+  CREATE INDEX IF NOT EXISTS skill_events_source_rev_idx ON skill_events(sourceNamespace, sourceRevision);
   CREATE TABLE IF NOT EXISTS skill_source_coverage(
     id TEXT PRIMARY KEY,
     sourceSurface TEXT NOT NULL,
@@ -66,10 +85,38 @@ export const SKILL_INTELLIGENCE_SCHEMA = `
   );
 `
 
+const SKILL_EVENTS_ADDITIVE_COLUMNS: ReadonlyArray<[string, string]> = [
+  ['repositoryId', 'TEXT'],
+  ['sourceRevision', 'INTEGER'],
+  ['sourceNamespace', 'TEXT'],
+  ['callEventId', 'TEXT'],
+  ['resultEventId', 'TEXT'],
+  ['turnId', 'TEXT'],
+  ['resourceSelector', 'TEXT'],
+  ['resourceRangeJson', 'TEXT'],
+  ['deliveryGranularity', 'TEXT'],
+  ['extractorVersion', 'TEXT']
+]
+
+export function ensureSkillIntelligenceSchema(db: Database.Database): void {
+  db.exec(SKILL_INTELLIGENCE_SCHEMA)
+  const existing = new Set(
+    (db.prepare('PRAGMA table_info(skill_events)').all() as Array<{ name: string }>).map(c => c.name)
+  )
+  for (const [col, type] of SKILL_EVENTS_ADDITIVE_COLUMNS) {
+    if (!existing.has(col)) {
+      db.exec(`ALTER TABLE skill_events ADD COLUMN ${col} ${type}`)
+    }
+  }
+  db.exec('CREATE INDEX IF NOT EXISTS skill_events_skill_hash_idx ON skill_events(skillId, packageHash, captureOrder)')
+  db.exec('CREATE INDEX IF NOT EXISTS skill_events_source_rev_idx ON skill_events(sourceNamespace, sourceRevision)')
+}
+
 export interface SkillEventInput {
   sessionId?: string | null
   executionId?: string | null
   nativeSessionId?: string | null
+  repositoryId?: string | null
   provider?: string | null
   worktreeId?: string | null
   generation?: string | null
@@ -83,10 +130,18 @@ export interface SkillEventInput {
   packageHash?: string | null
   resourceUri?: string | null
   resourcePath?: string | null
+  resourceSelector?: string | null
+  resourceRange?: Record<string, unknown> | null
   resourceDigest?: string | null
+  deliveryGranularity?: SkillDeliveryGranularity | null
   sourceSurface: SkillSourceSurface
   sourceContract: string
+  sourceNamespace?: string | null
+  sourceRevision?: number | null
+  callEventId?: string | null
+  resultEventId?: string | null
   originalEventId?: string | null
+  turnId?: string | null
   operation: string
   operationStatus: SkillOperationStatus
   errorCode?: string | null
@@ -96,6 +151,7 @@ export interface SkillEventInput {
   sourceTimestamp?: string | null
   observedAt?: string
   timestampKind?: SkillTimestampKind
+  extractorVersion?: string | null
   gaps?: string[]
   revision?: number
 }
@@ -105,6 +161,7 @@ export interface SkillEventRecord {
   sessionId: string | null
   executionId: string | null
   nativeSessionId: string | null
+  repositoryId: string | null
   provider: string | null
   worktreeId: string | null
   generation: string | null
@@ -118,10 +175,18 @@ export interface SkillEventRecord {
   packageHash: string | null
   resourceUri: string | null
   resourcePath: string | null
+  resourceSelector: string | null
+  resourceRange: Record<string, unknown> | null
   resourceDigest: string | null
+  deliveryGranularity: SkillDeliveryGranularity | null
   sourceSurface: SkillSourceSurface
   sourceContract: string
+  sourceNamespace: string | null
+  sourceRevision: number | null
+  callEventId: string | null
+  resultEventId: string | null
   originalEventId: string | null
+  turnId: string | null
   operation: string
   operationStatus: SkillOperationStatus
   errorCode: string | null
@@ -131,6 +196,7 @@ export interface SkillEventRecord {
   sourceTimestamp: string | null
   observedAt: string
   timestampKind: SkillTimestampKind
+  extractorVersion: string | null
   gaps: string[]
   revision: number
 }
@@ -147,7 +213,12 @@ export interface SkillEventQuery {
   sessionId?: string
   executionId?: string
   nativeSessionId?: string
+  repositoryId?: string
   skillId?: string
+  version?: number
+  packageHash?: string
+  sourceNamespace?: string
+  sourceRevision?: number
   includeUnbound?: boolean
   offset?: number
   limit?: number
@@ -166,12 +237,19 @@ export interface SkillEventQueryResult {
 const MAX_QUERY_LIMIT = 50
 
 function computeSkillEventId(input: SkillEventInput, revision: number): string {
-  const invocationKey = input.originalEventId ?? `${input.operation}:${input.captureOrder ?? 0}:${input.sourceTimestamp ?? ''}`
-  const resourceKey = input.resourceUri ?? input.resourcePath ?? input.skillId ?? 'catalog'
+  const namespaceKey = input.sourceNamespace ?? input.nativeSessionId ?? input.sessionId ?? ''
+  const invocationKey =
+    input.callEventId || input.resultEventId
+      ? `${input.callEventId ?? ''}:${input.resultEventId ?? ''}`
+      : (input.originalEventId ?? `${input.operation}:${input.captureOrder ?? 0}:${input.sourceTimestamp ?? ''}`)
+  const resourceKey = input.resourceUri ?? input.resourcePath ?? input.resourceSelector ?? input.skillId ?? 'catalog'
   return `skill_evt_${digest(JSON.stringify([
     input.sourceSurface,
+    namespaceKey,
+    input.sourceRevision ?? null,
     invocationKey,
     resourceKey,
+    input.resourceSelector ?? null,
     revision,
     input.operationStatus
   ]))}`
@@ -183,11 +261,21 @@ function rowToRecord(row: Record<string, unknown>): SkillEventRecord {
     const parsed = JSON.parse(String(row.gapsJson ?? '[]'))
     if (Array.isArray(parsed)) gaps = parsed.filter((g): g is string => typeof g === 'string')
   } catch {}
+  let resourceRange: Record<string, unknown> | null = null
+  if (typeof row.resourceRangeJson === 'string' && row.resourceRangeJson.length > 0) {
+    try {
+      const parsedRange = JSON.parse(row.resourceRangeJson)
+      if (parsedRange && typeof parsedRange === 'object' && !Array.isArray(parsedRange)) {
+        resourceRange = parsedRange as Record<string, unknown>
+      }
+    } catch {}
+  }
   return {
     eventId: String(row.eventId),
     sessionId: typeof row.sessionId === 'string' ? row.sessionId : null,
     executionId: typeof row.executionId === 'string' ? row.executionId : null,
     nativeSessionId: typeof row.nativeSessionId === 'string' ? row.nativeSessionId : null,
+    repositoryId: typeof row.repositoryId === 'string' ? row.repositoryId : null,
     provider: typeof row.provider === 'string' ? row.provider : null,
     worktreeId: typeof row.worktreeId === 'string' ? row.worktreeId : null,
     generation: typeof row.generation === 'string' ? row.generation : null,
@@ -201,10 +289,18 @@ function rowToRecord(row: Record<string, unknown>): SkillEventRecord {
     packageHash: typeof row.packageHash === 'string' ? row.packageHash : null,
     resourceUri: typeof row.resourceUri === 'string' ? row.resourceUri : null,
     resourcePath: typeof row.resourcePath === 'string' ? row.resourcePath : null,
+    resourceSelector: typeof row.resourceSelector === 'string' ? row.resourceSelector : null,
+    resourceRange,
     resourceDigest: typeof row.resourceDigest === 'string' ? row.resourceDigest : null,
+    deliveryGranularity: typeof row.deliveryGranularity === 'string' ? (row.deliveryGranularity as SkillDeliveryGranularity) : null,
     sourceSurface: row.sourceSurface as SkillSourceSurface,
     sourceContract: String(row.sourceContract),
+    sourceNamespace: typeof row.sourceNamespace === 'string' ? row.sourceNamespace : null,
+    sourceRevision: typeof row.sourceRevision === 'number' ? row.sourceRevision : null,
+    callEventId: typeof row.callEventId === 'string' ? row.callEventId : null,
+    resultEventId: typeof row.resultEventId === 'string' ? row.resultEventId : null,
     originalEventId: typeof row.originalEventId === 'string' ? row.originalEventId : null,
+    turnId: typeof row.turnId === 'string' ? row.turnId : null,
     operation: String(row.operation),
     operationStatus: row.operationStatus as SkillOperationStatus,
     errorCode: typeof row.errorCode === 'string' ? row.errorCode : null,
@@ -214,21 +310,9 @@ function rowToRecord(row: Record<string, unknown>): SkillEventRecord {
     sourceTimestamp: typeof row.sourceTimestamp === 'string' ? row.sourceTimestamp : null,
     observedAt: String(row.observedAt),
     timestampKind: (row.timestampKind as SkillTimestampKind) ?? 'CAPTURE_TIME',
+    extractorVersion: typeof row.extractorVersion === 'string' ? row.extractorVersion : null,
     gaps,
     revision: typeof row.revision === 'number' ? row.revision : 1
-  }
-}
-
-function parseJsonSafe(raw: string): Record<string, unknown> | undefined {
-  const trimmed = raw.trim()
-  if (!trimmed.startsWith('{')) return undefined
-  try {
-    const parsed = JSON.parse(trimmed)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : undefined
-  } catch {
-    return undefined
   }
 }
 
@@ -248,19 +332,23 @@ export class SkillIntelligenceStore {
 
     const observedAt = input.observedAt ?? new Date().toISOString()
     const timestampKind: SkillTimestampKind = input.timestampKind ?? (input.sourceTimestamp ? 'SOURCE_TIMESTAMP' : 'CAPTURE_TIME')
+    const resourceRangeJson = input.resourceRange ? JSON.stringify(input.resourceRange) : null
     const info = this.db.prepare(`
       INSERT OR IGNORE INTO skill_events(
-        eventId, sessionId, executionId, nativeSessionId, provider, worktreeId, generation,
+        eventId, sessionId, executionId, nativeSessionId, repositoryId, provider, worktreeId, generation,
         observationClass, skillId, skillName, skillScope, destinationId, version, versionStatus,
-        packageHash, resourceUri, resourcePath, resourceDigest, sourceSurface, sourceContract,
-        originalEventId, operation, operationStatus, errorCode, sessionBindingState, bindingAuthority,
-        captureOrder, sourceTimestamp, observedAt, timestampKind, gapsJson, revision
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        packageHash, resourceUri, resourcePath, resourceSelector, resourceRangeJson, resourceDigest,
+        deliveryGranularity, sourceSurface, sourceContract, sourceNamespace, sourceRevision,
+        callEventId, resultEventId, originalEventId, turnId, operation, operationStatus, errorCode,
+        sessionBindingState, bindingAuthority, captureOrder, sourceTimestamp, observedAt, timestampKind,
+        extractorVersion, gapsJson, revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventId,
       sessionId,
       executionId,
       nativeSessionId,
+      input.repositoryId ?? null,
       input.provider ?? null,
       bound ? (input.worktreeId ?? null) : null,
       bound ? (input.generation ?? null) : null,
@@ -272,12 +360,22 @@ export class SkillIntelligenceStore {
       typeof input.version === 'number' && Number.isSafeInteger(input.version) && input.version >= 1 ? input.version : null,
       input.versionStatus,
       input.packageHash ?? null,
-      input.resourceUri ? sanitize(input.resourceUri) : null,
+      input.resourceUri
+        ? (input.resourceUri.startsWith('skill://') ? input.resourceUri : sanitize(input.resourceUri))
+        : null,
       input.resourcePath ? sanitize(input.resourcePath) : null,
+      input.resourceSelector ? sanitize(input.resourceSelector) : null,
+      resourceRangeJson,
       input.resourceDigest ?? null,
+      input.deliveryGranularity ?? null,
       input.sourceSurface,
       input.sourceContract,
+      input.sourceNamespace ?? null,
+      typeof input.sourceRevision === 'number' && Number.isSafeInteger(input.sourceRevision) ? input.sourceRevision : null,
+      input.callEventId ?? null,
+      input.resultEventId ?? null,
       input.originalEventId ?? null,
+      input.turnId ?? null,
       input.operation,
       input.operationStatus,
       input.errorCode ?? null,
@@ -287,11 +385,23 @@ export class SkillIntelligenceStore {
       input.sourceTimestamp ?? null,
       observedAt,
       timestampKind,
+      input.extractorVersion ?? null,
       JSON.stringify([...gaps]),
       revision
     )
 
     return { eventId, inserted: info.changes > 0, revision }
+  }
+
+  deleteSourceObservations(sourceNamespace: string, keepRevision?: number): number {
+    const hasTable = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='skill_events'").get()
+    if (!hasTable) return 0
+    if (keepRevision !== undefined) {
+      return this.db.prepare(
+        'DELETE FROM skill_events WHERE sourceNamespace = ? AND sourceRevision IS NOT NULL AND sourceRevision <> ?'
+      ).run(sourceNamespace, keepRevision).changes
+    }
+    return this.db.prepare('DELETE FROM skill_events WHERE sourceNamespace = ?').run(sourceNamespace).changes
   }
 
   recordSourceCoverage(
@@ -313,13 +423,16 @@ export class SkillIntelligenceStore {
 
   extractFromNativeEvents(
     sessionId: string,
-    events: Array<Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number }>,
-    context?: { executionId?: string; nativeSessionId?: string; provider?: string; worktreeId?: string; generation?: string }
+    events: Array<Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number; turnId?: string }>,
+    context?: { executionId?: string; nativeSessionId?: string; repositoryId?: string; provider?: string; worktreeId?: string; generation?: string }
   ): number {
-    const callsById = new Map<string, Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number }>()
+    const callsById = new Map<string, Partial<EventInput> & { type: EventInput['type']; callId?: string; content?: unknown; eventId?: string; ordinal?: number; turnId?: string }>()
+    const resultsByCallId = new Set<string>()
     for (const ev of events) {
       if (ev.type === 'TOOL_CALL' && ev.callId) {
         callsById.set(ev.callId, ev)
+      } else if (ev.type === 'TOOL_RESULT' && ev.callId) {
+        resultsByCallId.add(ev.callId)
       }
     }
 
@@ -327,127 +440,45 @@ export class SkillIntelligenceStore {
     for (let i = 0; i < events.length; i++) {
       const ev = events[i]
       if (ev.type !== 'TOOL_CALL' && ev.type !== 'TOOL_RESULT') continue
-      const toolName = ev.tool ?? (ev.callId ? callsById.get(ev.callId)?.tool : undefined)
-      if (!toolName) continue
-
-      const isSkillTool =
-        toolName === 'get_academy_skill' ||
-        toolName === 'get_academy_skill_history' ||
-        toolName === 'list_academy_skills' ||
-        toolName === 'skills/get' ||
-        toolName === 'skills/list' ||
-        toolName === 'resources/read'
-
-      if (!isSkillTool) continue
-
-      // Pair TOOL_CALL with its TOOL_RESULT when possible; skip standalone TOOL_CALL if a TOOL_RESULT exists for the same callId
-      if (ev.type === 'TOOL_CALL' && ev.callId && events.some(other => other.type === 'TOOL_RESULT' && other.callId === ev.callId)) {
-        continue
-      }
-
       const callEv = ev.type === 'TOOL_RESULT' && ev.callId ? callsById.get(ev.callId) : ev
-      const callArgs = callEv ? parseJsonSafe(extractTextValue(callEv.content)) : undefined
-      const resultObj = ev.type === 'TOOL_RESULT' ? parseJsonSafe(extractTextValue(ev.content)) : undefined
-      const uri = typeof callArgs?.uri === 'string' ? callArgs.uri : (typeof resultObj?.uri === 'string' ? resultObj.uri : undefined)
+      const rawTool = ev.tool ?? callEv?.tool
+      const canonicalTool = resolveCanonicalSkillTool(rawTool)
+      if (!canonicalTool) continue
 
-      // For resources/read, only qualify explicit skill:// URIs
-      if (toolName === 'resources/read' && (!uri || !uri.startsWith('skill://'))) {
+      // Pair TOOL_CALL with its TOOL_RESULT by exact callId; skip standalone TOOL_CALL if a paired TOOL_RESULT exists
+      if (ev.type === 'TOOL_CALL' && ev.callId && resultsByCallId.has(ev.callId)) {
         continue
       }
-
+      // TOOL_RESULT without a matching TOOL_CALL in the same session cannot confirm request-side context unless tool was on result itself
       const hasResult = ev.type === 'TOOL_RESULT'
+      const callArgs = callEv ? extractSkillCallMetadata(canonicalTool, extractTextValue(callEv.content)) : {}
       const rawOutput = hasResult ? extractTextValue(ev.content) : ''
-      const statusInfo = hasResult
-        ? classifyStructuredOutput(rawOutput)
-        : { isError: false, status: 'UNKNOWN' as const, errorKind: 'UNPAIRED_TOOL_CALL' }
-
-      const skillId =
-        typeof callArgs?.skillId === 'string' ? callArgs.skillId :
-        typeof resultObj?.id === 'string' ? resultObj.id :
-        typeof resultObj?.skillId === 'string' ? resultObj.skillId :
-        undefined
-
-      const versionRaw = resultObj?.currentVersion ?? resultObj?.version ?? callArgs?.version
-      const version = typeof versionRaw === 'number' && Number.isSafeInteger(versionRaw) && versionRaw >= 1 ? versionRaw : null
-      const packageHash =
-        typeof resultObj?.packageHash === 'string' ? resultObj.packageHash :
-        (resultObj?.current && typeof resultObj.current === 'object' && typeof (resultObj.current as Record<string, unknown>).packageHash === 'string'
-          ? String((resultObj.current as Record<string, unknown>).packageHash)
-          : null)
-
-      const scopeRaw = resultObj?.scope
-      const skillScope: SkillScope = scopeRaw === 'GLOBAL' || scopeRaw === 'PROJECT'
-        ? scopeRaw
-        : uri?.startsWith('skill://global/')
-          ? 'GLOBAL'
-          : uri?.startsWith('skill://project/')
-            ? 'PROJECT'
-            : 'UNKNOWN'
-
-      const isHistoryMetadataOnly =
-        toolName === 'get_academy_skill_history' &&
-        (callArgs?.metadataOnly === true || !(resultObj?.package && typeof resultObj.package === 'object'))
-
-      let observationClass: SkillObservationClass
-      const gaps: string[] = []
-      if (!hasResult) {
-        observationClass = 'ATTEMPT_FAILED_OR_REFUSED'
-        gaps.push('TOOL_RESULT_MISSING')
-      } else if (statusInfo.isError) {
-        observationClass = 'ATTEMPT_FAILED_OR_REFUSED'
-      } else if (
-        toolName === 'list_academy_skills' ||
-        toolName === 'skills/list' ||
-        toolName === 'skills/get' ||
-        isHistoryMetadataOnly
-      ) {
-        observationClass = 'DISCOVERED_MANIFEST_FETCHED'
-      } else if (
-        (toolName === 'resources/read' && rawOutput.length > 0) ||
-        (toolName === 'get_academy_skill' && (Boolean(resultObj?.current) || Boolean(resultObj?.package))) ||
-        (toolName === 'get_academy_skill_history' && Boolean(resultObj?.package && typeof resultObj.package === 'object'))
-      ) {
-        observationClass = 'CONTENT_DELIVERED'
-      } else {
-        observationClass = 'DISCOVERED_MANIFEST_FETCHED'
-        gaps.push('CONTENT_PAYLOAD_NOT_CONFIRMED')
-      }
-
-      const operationStatus: SkillOperationStatus = !hasResult
-        ? 'UNKNOWN'
-        : statusInfo.status === 'REFUSAL'
-          ? 'REFUSAL'
-          : statusInfo.isError
-            ? 'FAILURE'
-            : 'SUCCESS'
-
-      this.recordSkillEvent({
+      const qualified = qualifySkillToolObservation({
+        canonicalTool,
+        callArgs,
+        rawOutput,
+        hasResult,
         sessionId,
         executionId: context?.executionId ?? null,
         nativeSessionId: context?.nativeSessionId ?? null,
+        repositoryId: context?.repositoryId ?? null,
         provider: context?.provider ?? null,
         worktreeId: context?.worktreeId ?? null,
         generation: context?.generation ?? null,
-        observationClass,
-        skillId: skillId ?? null,
-        skillScope,
-        version,
-        versionStatus: version !== null ? 'EXACT' : 'VERSION_UNKNOWN',
-        packageHash,
-        resourceUri: uri ?? null,
         sourceSurface: 'native_source_event',
-        sourceContract: 'native-source-events/v1',
+        sourceContract: 'native-source-events/v2',
+        sourceNamespace: sessionId,
+        callEventId: callEv?.eventId ?? callEv?.callId ?? null,
+        resultEventId: hasResult ? (ev.eventId ?? ev.callId ?? null) : null,
         originalEventId: ev.eventId ?? ev.callId ?? `native:${i}`,
-        operation: toolName,
-        operationStatus,
-        errorCode: statusInfo.errorKind ?? null,
+        turnId: ev.turnId ?? callEv?.turnId ?? null,
         sessionBindingState: 'BOUND_BY_WITNESS',
         bindingAuthority: 'native_session_ingest',
         captureOrder: ev.ordinal ?? i + 1,
-        sourceTimestamp: ev.timestamp ?? null,
-        timestampKind: ev.timestamp ? 'SOURCE_TIMESTAMP' : 'CAPTURE_TIME',
-        gaps
+        sourceTimestamp: ev.timestamp ?? null
       })
+      if (!qualified) continue
+      this.recordSkillEvent(qualified)
       recorded++
     }
 
@@ -488,9 +519,39 @@ export class SkillIntelligenceStore {
       where.push("sessionBindingState = 'BOUND_BY_WITNESS'")
     }
 
+    if (filter.repositoryId) {
+      where.push('(repositoryId IS NULL OR repositoryId = ?)')
+      params.push(filter.repositoryId)
+    }
     if (filter.skillId) {
       where.push('skillId = ?')
       params.push(filter.skillId)
+    }
+    if (filter.version !== undefined) {
+      where.push('version = ?')
+      params.push(filter.version)
+    }
+    if (filter.packageHash) {
+      where.push('packageHash = ?')
+      params.push(filter.packageHash)
+    }
+    if (filter.sourceNamespace) {
+      where.push('sourceNamespace = ?')
+      params.push(filter.sourceNamespace)
+    }
+    if (filter.sourceRevision !== undefined) {
+      where.push('sourceRevision = ?')
+      params.push(filter.sourceRevision)
+    }
+
+    // Never expose staged/unpromoted native_source_event observations
+    const hasNativeSources = Boolean(
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='native_reference_sources'").get()
+    )
+    if (hasNativeSources) {
+      where.push(
+        `(sourceNamespace IS NULL OR sourceRevision IS NULL OR EXISTS (SELECT 1 FROM native_reference_sources nrs WHERE nrs.nativeKey = skill_events.sourceNamespace AND nrs.revision = skill_events.sourceRevision))`
+      )
     }
 
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : ''
@@ -499,13 +560,39 @@ export class SkillIntelligenceStore {
       `SELECT * FROM skill_events ${whereSql} ORDER BY captureOrder ASC, observedAt ASC, eventId ASC LIMIT ? OFFSET ?`
     ).all(...params, limit, offset) as Array<Record<string, unknown>>
 
+    const unboundWhere: string[] = ["sessionBindingState = 'UNBOUND'"]
+    const unboundParams: Array<string | number> = []
+    if (filter.skillId) {
+      unboundWhere.push('skillId = ?')
+      unboundParams.push(filter.skillId)
+    }
+    if (filter.version !== undefined) {
+      unboundWhere.push('version = ?')
+      unboundParams.push(filter.version)
+    }
+    if (filter.packageHash) {
+      unboundWhere.push('packageHash = ?')
+      unboundParams.push(filter.packageHash)
+    }
     const unboundRow = this.db.prepare(
-      `SELECT COUNT(*) AS n FROM skill_events WHERE sessionBindingState = 'UNBOUND'${filter.skillId ? ' AND skillId = ?' : ''}`
-    ).get(...(filter.skillId ? [filter.skillId] : [])) as { n: number }
+      `SELECT COUNT(*) AS n FROM skill_events WHERE ${unboundWhere.join(' AND ')}`
+    ).get(...unboundParams) as { n: number }
 
-    const coverageRows = this.db.prepare(
-      `SELECT sourceSurface, scopeKey, coverageState, reason, updatedAt FROM skill_source_coverage ORDER BY updatedAt DESC LIMIT 20`
-    ).all() as SkillSourceCoverageRecord[]
+    const scopeKeys = [
+      filter.sessionId,
+      filter.executionId,
+      filter.nativeSessionId,
+      filter.sourceNamespace,
+      filter.repositoryId,
+      filter.skillId
+    ].filter((v): v is string => typeof v === 'string' && v.length > 0)
+    const coverageRows = scopeKeys.length > 0
+      ? (this.db.prepare(
+          `SELECT sourceSurface, scopeKey, coverageState, reason, updatedAt FROM skill_source_coverage WHERE scopeKey IN (${scopeKeys.map(() => '?').join(',')}) ORDER BY updatedAt DESC`
+        ).all(...scopeKeys) as SkillSourceCoverageRecord[])
+      : (this.db.prepare(
+          `SELECT sourceSurface, scopeKey, coverageState, reason, updatedAt FROM skill_source_coverage ORDER BY updatedAt DESC LIMIT 20`
+        ).all() as SkillSourceCoverageRecord[])
 
     const events = rows.map(rowToRecord)
     const scopeRevRows = this.db.prepare(

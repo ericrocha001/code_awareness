@@ -17,6 +17,16 @@ import {
   type OpaqueRecordBreakdown
 } from './native-session-references'
 import type { NativeSourceEventType } from './native-source-events'
+import type { CanonicalSkillTool, CompactSkillCallArgs } from './skill-intelligence-extractor'
+import type { SkillEventInput } from './skill-intelligence-store'
+
+export interface OpenSkillCallEntry extends CompactSkillCallArgs {
+  canonicalTool: CanonicalSkillTool
+  callEventId: string
+  ordinal: number
+  timestamp?: string
+  turnId?: string
+}
 
 export const NATIVE_LINE_MAX_BYTES = 512 * 1024
 export const NATIVE_IO_CHUNK_BYTES = 64 * 1024
@@ -51,6 +61,7 @@ export interface NativeIndexerState {
   errors: NativeIndexedDiagnosticRef[]
   totalErrors: number
   openCalls: Record<string, NativeIndexedDiagnosticRef>
+  openSkillCalls?: Record<string, OpenSkillCallEntry>
   unmatchedDangling: NativeIndexedDiagnosticRef[]
   turns: Record<string, { ordinal: number; id: string; firstObserved: string; lastObserved: string; eventCount: number }>
   turnOrder: number
@@ -108,6 +119,7 @@ export interface StepAccumulator {
   state: NativeIndexerState
   events: NativeIndexedEventRow[]
   pairUpdates: Array<{ eventId: string; status: string; pairing: string }>
+  skillEvents: SkillEventInput[]
   dirtyTurns: Set<string>
   makeEventId: (ordinal: number, part: number, payloadDigest: string) => string
 }
@@ -445,6 +457,7 @@ export function runNativeReferenceStep(options: {
   openHandle: () => NativeIndexedSourceHandle
   processRecord: (record: unknown, lineStart: number, lineEnd: number, acc: StepAccumulator) => void
   onUnavailableRecord?: (lineStart: number, lineEnd: number, limitation: 'RECORD_TOO_LARGE' | 'INVALID_RECORD_FORMAT', acc: StepAccumulator) => void
+  onFinalizeSkillCalls?: (acc: StepAccumulator) => void
   makeEventId: (ordinal: number, part: number, payloadDigest: string, snapshotIdentity: string) => string
   onReady?: (ready: { summary: NativeSourceRecordSummary; nativeKey: string; liveFingerprint: string; fd: number }) => void
 }, preopenedHandle?: NativeIndexedSourceHandle): NativeReferenceStepResult {
@@ -564,6 +577,7 @@ export function runNativeReferenceStep(options: {
       state,
       events: [],
       pairUpdates: [],
+      skillEvents: [],
       dirtyTurns: new Set<string>(),
       makeEventId: (ordinal, part, payloadDigest) => makeEventId(ordinal, part, payloadDigest, handle.identity)
     }
@@ -608,6 +622,10 @@ export function runNativeReferenceStep(options: {
       throw new Error(state.ordinal ? 'SOURCE_CONTENT_UNAVAILABLE' : formatError)
     }
 
+    if (stepOut.done) {
+      options.onFinalizeSkillCalls?.(acc)
+    }
+
     const turnRows = [...acc.dirtyTurns].map(id => {
       const t = state.turns[id]!
       return {
@@ -627,6 +645,7 @@ export function runNativeReferenceStep(options: {
         revision: checkpoint.revision,
         events: acc.events,
         pairUpdates: acc.pairUpdates,
+        skillEvents: acc.skillEvents,
         turns: turnRows,
         nextOffset: stepOut.nextOffset,
         tailDigest: '',
@@ -807,6 +826,7 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
       state,
       events: [],
       pairUpdates: [],
+      skillEvents: [],
       dirtyTurns: new Set<string>(),
       makeEventId: (ordinal, part, payloadDigest) => makeEventId(ordinal, part, payloadDigest, handle.identity)
     }
@@ -855,6 +875,10 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
       throw new Error(state.ordinal ? 'SOURCE_CONTENT_UNAVAILABLE' : formatError)
     }
 
+    if (stepOut.done) {
+      options.onFinalizeSkillCalls?.(acc)
+    }
+
     const turnRows = [...acc.dirtyTurns].map(id => {
       const t = state.turns[id]!
       return {
@@ -874,6 +898,7 @@ export async function runNativeReferenceStepAsync(options: Parameters<typeof run
         revision: checkpoint.revision,
         events: acc.events,
         pairUpdates: acc.pairUpdates,
+        skillEvents: acc.skillEvents,
         turns: turnRows,
         nextOffset: stepOut.nextOffset,
         tailDigest: '',
