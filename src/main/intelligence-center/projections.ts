@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { z } from 'zod'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { AcademyService } from '../academy/academy-service'
-import type { SkillEventRecord, SkillIntelligenceStore } from '../session-context/skill-intelligence-store'
+import type { SkillEventQuery, SkillEventQueryResult, SkillEventRecord } from '../session-context/skill-intelligence-store'
 import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 import type { McpToolResult } from '../mcp/mcp-types'
 import { assertValidSessionRepositoryId, type SessionContextPort, type SessionToolName } from '../session-context/mcp'
@@ -89,7 +89,12 @@ export interface EvidenceProjectionPorts {
   artifactReader?: IArtifactReader
   validationLedger?: Pick<ValidationLedger, 'listProofs'>
   academy?: Pick<AcademyService, 'history'> & Partial<Pick<AcademyService, 'getDeliveryStatus' | 'listChanges'>>
-  skillIntelligence?: Pick<SkillIntelligenceStore, 'querySkillEvents'>
+  skillIntelligence?: {
+    querySkillEvents: (
+      filter?: SkillEventQuery,
+      options?: { worktreeId?: string; allowNativeSource?: boolean }
+    ) => SkillEventQueryResult | Promise<SkillEventQueryResult>
+  }
   allowArtifactMetadata: boolean
   assertSourceAuthorized: (worktreeId?: string) => void
   assertCurrent: () => void
@@ -1078,20 +1083,24 @@ async function buildAcademyProjection(
   // 1. Reverse Skill target lookup (Skill/version/hash -> qualified acquisitions & sessions)
   if (reverseSkillTarget) {
     if (ports.skillIntelligence) {
-      const direct = ports.skillIntelligence.querySkillEvents({
-        ...(ports.repositoryId ? { repositoryId: ports.repositoryId } : {}),
-        skillId: reverseSkillTarget.skillId,
-        ...(reverseSkillTarget.version !== undefined ? { version: reverseSkillTarget.version } : {}),
-        ...(reverseSkillTarget.packageHash ? { packageHash: reverseSkillTarget.packageHash } : {}),
-        offset,
-        limit: input.limit
-      })
-      skillEvents = direct.events
-      totalSkillEvents = direct.total
-      hasMoreSkillEvents = direct.hasMore
-      unboundCount = direct.unboundCount
-      skillCoverage = direct.coverage
-      skillStoreRevision = direct.revision
+      try {
+        const direct = await ports.skillIntelligence.querySkillEvents({
+          ...(ports.repositoryId ? { repositoryId: ports.repositoryId } : {}),
+          skillId: reverseSkillTarget.skillId,
+          ...(reverseSkillTarget.version !== undefined ? { version: reverseSkillTarget.version } : {}),
+          ...(reverseSkillTarget.packageHash ? { packageHash: reverseSkillTarget.packageHash } : {}),
+          offset,
+          limit: input.limit
+        })
+        skillEvents = direct.events
+        totalSkillEvents = direct.total
+        hasMoreSkillEvents = direct.hasMore
+        unboundCount = direct.unboundCount
+        skillCoverage = direct.coverage
+        skillStoreRevision = direct.revision
+      } catch {
+        gaps.add('SKILL_INTELLIGENCE_UNAVAILABLE')
+      }
     } else {
       gaps.add('SKILL_INTELLIGENCE_UNAVAILABLE')
     }
@@ -1118,9 +1127,13 @@ async function buildAcademyProjection(
           skillStoreRevision = typeof si.revision === 'number' ? si.revision : 1
         }
         if (Array.isArray(inspected.data.errors)) {
+          const sessRev = typeof inspected.data.revision === 'number' ? inspected.data.revision : undefined
           for (const err of inspected.data.errors) {
             if (err && typeof err === 'object') {
-              sessionContextErrors.push(err as Record<string, unknown>)
+              sessionContextErrors.push({
+                ...(err as Record<string, unknown>),
+                ...(sessRev !== undefined ? { _sessionRevision: sessRev } : {})
+              })
             }
           }
         }
@@ -1129,29 +1142,35 @@ async function buildAcademyProjection(
 
     // 2. Direct SkillIntelligenceStore query for executionId / nativeSessionId or when session port had no skillIntelligence
     if (ports.skillIntelligence && (executionId || nativeSessionId || (sessionId && skillEvents.length === 0))) {
-      const direct = ports.skillIntelligence.querySkillEvents({
-        ...(sessionId ? { sessionId } : {}),
-        ...(executionId ? { executionId } : {}),
-        ...(nativeSessionId ? { nativeSessionId } : {}),
-        ...(input.skillId ? { skillId: input.skillId } : {}),
-        offset,
-        limit: input.limit
-      })
-      if (direct.events.length > 0 || skillEvents.length === 0) {
-        skillEvents = direct.events
-        totalSkillEvents = direct.total
-        hasMoreSkillEvents = direct.hasMore
-        unboundCount = Math.max(unboundCount, direct.unboundCount)
-        skillCoverage = direct.coverage
-        skillStoreRevision = direct.revision
+      try {
+        const direct = await ports.skillIntelligence.querySkillEvents({
+          ...(sessionId ? { sessionId } : {}),
+          ...(executionId ? { executionId } : {}),
+          ...(nativeSessionId ? { nativeSessionId } : {}),
+          ...(input.skillId ? { skillId: input.skillId } : {}),
+          offset,
+          limit: input.limit
+        })
+        if (direct.events.length > 0 || skillEvents.length === 0) {
+          skillEvents = direct.events
+          totalSkillEvents = direct.total
+          hasMoreSkillEvents = direct.hasMore
+          unboundCount = Math.max(unboundCount, direct.unboundCount)
+          skillCoverage = direct.coverage
+          skillStoreRevision = direct.revision
+        }
+      } catch {
+        gaps.add('SKILL_INTELLIGENCE_UNAVAILABLE')
       }
     } else if (ports.skillIntelligence && !sessionId && !executionId && !nativeSessionId) {
-      const meta = ports.skillIntelligence.querySkillEvents({
-        ...(input.skillId ? { skillId: input.skillId } : {}),
-        offset: 0,
-        limit: 1
-      })
-      unboundCount = meta.unboundCount
+      try {
+        const meta = await ports.skillIntelligence.querySkillEvents({
+          ...(input.skillId ? { skillId: input.skillId } : {}),
+          offset: 0,
+          limit: 1
+        })
+        unboundCount = meta.unboundCount
+      } catch {}
     }
   }
 
@@ -1171,18 +1190,25 @@ async function buildAcademyProjection(
   for (const err of sessionContextErrors) {
     const errTurnId = typeof err.turnId === 'string' ? err.turnId : undefined
     const errExecId = typeof err.executionId === 'string' ? err.executionId : undefined
+    const errSessRev = typeof err._sessionRevision === 'number' ? err._sessionRevision : undefined
+    const { _sessionRevision: _ignored, ...cleanErr } = err
     const hasConfirmedLink = Boolean(
       (errTurnId && skillTurnIds.has(errTurnId)) ||
       (errExecId && skillExecIds.has(errExecId))
     )
     const entry = {
       source: 'SESSION_ERROR',
-      ...err,
+      ...cleanErr,
       associationClass: hasConfirmedLink ? 'LINKED_BY_WITNESS' : 'CONTEXT_CANDIDATE',
-      deepen: {
-        tool: 'read_agent_session_event',
-        arguments: { sessionId, eventId: err.eventId }
-      }
+      deepen: errSessRev !== undefined && typeof err.eventId === 'string'
+        ? {
+            tool: 'read_agent_session_event',
+            arguments: { sessionId, expectedRevision: errSessRev, eventId: err.eventId }
+          }
+        : {
+            tool: 'inspect_agent_session',
+            arguments: { sessionId, view: 'FOCAL' }
+          }
     }
     if (hasConfirmedLink) {
       associatedFailures.push(entry)
@@ -1390,9 +1416,9 @@ async function buildAcademyProjection(
     ]
   }
 
-  // Build compact reverse acquisition entries with literal deepen selectors (no corpus fan-out)
+  // Build compact reverse acquisition entries with valid public deepen selectors (no corpus fan-out)
   const linkedProofsByExecution = new Map<string, string[]>()
-  if (reverseSkillTarget) {
+  if (reverseSkillTarget && ports.allowArtifactMetadata && ports.validationLedger) {
     const uniqueExecs = [...new Set(skillEvents.map(e => e.executionId).filter((x): x is string => Boolean(x)))].slice(0, 3)
     for (const execId of uniqueExecs) {
       try {
@@ -1404,43 +1430,68 @@ async function buildAcademyProjection(
     }
   }
 
-  const reverseAcquisitions = reverseSkillTarget
-    ? skillEvents.map(e => {
-        const eventRef = e.resultEventId ?? e.callEventId ?? e.originalEventId
-        const deepenSession = e.sessionId
-          ? {
-              tool: 'inspect_agent_session',
-              arguments: { sessionId: e.sessionId, view: 'FOCAL' }
-            }
-          : e.nativeSessionId && e.worktreeId && e.generation && e.provider === 'codex'
-            ? {
-                tool: 'inspect_native_session',
-                arguments: {
-                  provider: 'codex-native',
-                  nativeHash: e.nativeSessionId,
-                  worktreeId: e.worktreeId,
-                  generation: e.generation
-                }
-              }
-            : undefined
-        const deepenEvent = e.sessionId && eventRef
+  const buildSkillEventDeepen = (e: SkillEventRecord) => {
+    const repoArg = ports.repositoryId ? { repositoryId: ports.repositoryId } : {}
+    if (e.sessionId) {
+      const deepenSession = {
+        tool: 'inspect_agent_session',
+        arguments: { ...repoArg, sessionId: e.sessionId, view: 'FOCAL' }
+      }
+      const deepenCallEvent =
+        typeof e.sessionRevision === 'number' && e.callEventId && e.callEventPersisted
           ? {
               tool: 'read_agent_session_event',
-              arguments: { sessionId: e.sessionId, eventId: eventRef }
+              arguments: { ...repoArg, sessionId: e.sessionId, expectedRevision: e.sessionRevision, eventId: e.callEventId }
             }
-          : e.nativeSessionId && e.worktreeId && e.generation && e.provider === 'codex' && eventRef
-            ? {
-                tool: 'read_native_session_event',
-                arguments: {
-                  provider: 'codex-native',
-                  nativeHash: e.nativeSessionId,
-                  worktreeId: e.worktreeId,
-                  generation: e.generation,
-                  eventId: eventRef,
-                  ...(e.sourceRevision ? { expectedRevision: e.sourceRevision } : {})
-                }
-              }
-            : undefined
+          : undefined
+      const deepenResultEvent =
+        typeof e.sessionRevision === 'number' && e.resultEventId && e.resultEventPersisted
+          ? {
+              tool: 'read_agent_session_event',
+              arguments: { ...repoArg, sessionId: e.sessionId, expectedRevision: e.sessionRevision, eventId: e.resultEventId }
+            }
+          : undefined
+      return { deepenSession, deepenCallEvent, deepenResultEvent }
+    }
+    if (e.nativeSessionId && e.worktreeId && e.generation && e.provider === 'codex') {
+      if (!ports.allowArtifactMetadata) {
+        gaps.add('SOURCE_NOT_AUTHORIZED')
+        return {}
+      }
+      if (!e.sourceSessionId) {
+        gaps.add('SOURCE_SESSION_UNAVAILABLE')
+        return {}
+      }
+      const nativeSession = {
+        provider: 'codex-native' as const,
+        id: e.nativeSessionId,
+        worktreeId: e.worktreeId,
+        generation: e.generation
+      }
+      const deepenSession = {
+        tool: 'inspect_agent_session',
+        arguments: { ...repoArg, nativeSession, sourceSessionId: e.sourceSessionId }
+      }
+      const deepenCallEvent = e.callEventId
+        ? {
+            tool: 'list_agent_session_events',
+            arguments: { ...repoArg, nativeSession, sourceSessionId: e.sourceSessionId, eventId: e.callEventId }
+          }
+        : undefined
+      const deepenResultEvent = e.resultEventId
+        ? {
+            tool: 'list_agent_session_events',
+            arguments: { ...repoArg, nativeSession, sourceSessionId: e.sourceSessionId, eventId: e.resultEventId }
+          }
+        : undefined
+      return { deepenSession, deepenCallEvent, deepenResultEvent }
+    }
+    return {}
+  }
+
+  const reverseAcquisitions = reverseSkillTarget
+    ? skillEvents.map(e => {
+        const { deepenSession, deepenCallEvent, deepenResultEvent } = buildSkillEventDeepen(e)
         return {
           eventId: e.eventId,
           observationClass: e.observationClass,
@@ -1466,6 +1517,7 @@ async function buildAcademyProjection(
           sessionWitness: {
             ...(e.sessionId ? { sessionId: e.sessionId } : {}),
             ...(e.nativeSessionId ? { nativeSessionId: e.nativeSessionId } : {}),
+            ...(e.sourceSessionId && ports.allowArtifactMetadata ? { sourceSessionId: e.sourceSessionId } : {}),
             ...(e.provider ? { provider: e.provider } : {}),
             ...(e.worktreeId ? { worktreeId: e.worktreeId } : {}),
             ...(e.generation ? { generation: e.generation } : {}),
@@ -1475,7 +1527,8 @@ async function buildAcademyProjection(
             ? { linkedProofIds: linkedProofsByExecution.get(e.executionId) }
             : {}),
           ...(deepenSession ? { deepenSession } : {}),
-          ...(deepenEvent ? { deepenEvent } : {})
+          ...(deepenCallEvent ? { deepenCallEvent } : {}),
+          ...(deepenResultEvent ? { deepenResultEvent } : {})
         }
       })
     : undefined

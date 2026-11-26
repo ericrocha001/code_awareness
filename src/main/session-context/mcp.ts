@@ -180,7 +180,13 @@ export function nativeLiteralTarget(name: SessionToolName, args: unknown) {
   return { worktreeId: parsed.nativeSession.worktreeId, generation: parsed.nativeSession.generation }
 }
 export type SessionToolName = keyof typeof schemas
-export interface SessionContextPort { call(name: SessionToolName, args: unknown, allowArtifactMetadata?: boolean): Promise<McpToolResult> }
+export interface SessionContextPort {
+  call(name: SessionToolName, args: unknown, allowArtifactMetadata?: boolean): Promise<McpToolResult>
+  querySkillEvents?(
+    query: import('./skill-intelligence-store').SkillEventQuery,
+    options?: { worktreeId?: string; allowNativeSource?: boolean }
+  ): Promise<import('./skill-intelligence-store').SkillEventQueryResult>
+}
 export const scopedSessionReadTools = new Set<string>(['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event', 'search_agent_session_evidence', 'discover_execution_context'])
 const continuityReadTools = new Set<SessionToolName>(['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events', 'read_agent_session_event', 'search_agent_session_evidence'])
 export const SESSION_REPOSITORY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/

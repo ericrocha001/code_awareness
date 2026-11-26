@@ -16,6 +16,8 @@ import { correlateNativeArtifact } from './native-artifact-correlation'
 import type { PublicationProvenancePort, PublicationReceipt, PublicationAssociationResult } from '../../shared/types/publication-provenance-types'
 import { GitService } from '../core/git-service'
 import type { CapturedRuntimeHelperState } from './native-hook-profile'
+import { readCodexGrantStatus } from './native-codex-source'
+import type { SkillEventQuery } from './skill-intelligence-store'
 
 const { storageBase, repositoryId, root, cancellation, readOnlyStore, runtimeHelper } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer; readOnlyStore?: boolean; runtimeHelper?: CapturedRuntimeHelperState }
 const cancelled = new Int32Array(cancellation)
@@ -51,7 +53,7 @@ const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) =>
 })
 const yieldToEventLoop = () => new Promise<void>(resolve => setImmediate(resolve))
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; allowArtifactMetadata?: boolean; nativeTargets?: LiveSessionTarget[]; nativeMode?: 'FOCAL' | 'MAINTENANCE' | 'FULL'; nativeAgent?: NativeHookProvider; nativeBudgetMs?: number; hasMoreNativeTargets?: boolean; nativeTrust?: NativeTrustSnapshot; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { cancel: number } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string } | { publicationResult: number; result?: unknown; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; allowArtifactMetadata?: boolean; nativeTargets?: LiveSessionTarget[]; nativeMode?: 'FOCAL' | 'MAINTENANCE' | 'FULL'; nativeAgent?: NativeHookProvider; nativeBudgetMs?: number; hasMoreNativeTargets?: boolean; nativeTrust?: NativeTrustSnapshot; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { id: number; internalOp: 'query_skill_events'; args: SkillEventQuery; deadline: number } | { cancel: number } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string } | { publicationResult: number; result?: unknown; code?: string }) => {
   if ('cancel' in message) {
     const req = activeRequests.get(message.cancel)
     if (req) {
@@ -99,6 +101,26 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
   const onGlobalAbort = () => reqState.abort.abort()
   abort.signal.addEventListener('abort', onGlobalAbort, { once: true })
   try {
+    if ('internalOp' in message) {
+      if (message.internalOp === 'query_skill_events') {
+        parentPort?.postMessage({ id: message.id, phase: 'store-open' })
+        const activeStore = store ??= new SessionStore(storeIdentity.path, repositoryId, readOnlyStore)
+        assertActive()
+        if (reqState.cancelled || Date.now() >= message.deadline) throw new Error('SESSION_CONTEXT_TIMEOUT')
+        const grantStatus = readCodexGrantStatus(activeStore.path, repositoryId)
+        const grantValid = Boolean(grantStatus.configured && grantStatus.ok)
+        const query: SkillEventQuery = {
+          ...(message.args ?? {}),
+          repositoryId,
+          allowNativeSource: grantValid && message.args?.allowNativeSource !== false
+        }
+        const res = activeStore.skillIntelligence.querySkillEvents(query)
+        if (!closing && !reqState.cancelled && !Atomics.load(cancelled, 0)) {
+          parentPort?.postMessage({ id: message.id, result: { content: [{ type: 'text', text: JSON.stringify(res) }] } })
+        }
+      }
+      return
+    }
     let target = message.target
     const assertRequest = () => {
       assertActive()

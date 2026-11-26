@@ -640,7 +640,18 @@ export class ChannelMcpAdapter {
         artifactReader: this.artifactReader,
         validationLedger: this.validationLedger,
         academy: this.academy,
-        skillIntelligence: this.skillIntelligence,
+        skillIntelligence: this.skillIntelligence ?? (
+          this.sessionContext?.querySkillEvents
+            ? {
+                querySkillEvents: (q, opts) =>
+                  this.sessionContext!.querySkillEvents!(q ?? {}, {
+                    ...opts,
+                    ...(authority?.worktreeId ? { worktreeId: authority.worktreeId } : {}),
+                    allowNativeSource: allowArtifactMetadata && opts?.allowNativeSource !== false
+                  })
+              }
+            : undefined
+        ),
         allowArtifactMetadata,
         assertSourceAuthorized: (worktreeId?: string) => {
           try {
