@@ -23,8 +23,13 @@ export class ArtifactNavigation {
   private readonly key: string
   constructor(private readonly store: ArtifactStore) { this.key = store.structureKey() }
   private sign(value: string) { return createHmac('sha256', this.key).update(value).digest('base64url') }
-  private identity(a: Artifact) { return [this.store.repositoryId, a.artifactId, a.revision, a.contentHash, STRUCTURE_VERSION] }
-  private selector(a: Artifact, type: string, index: number) { return this.sign(JSON.stringify([...this.identity(a), type, index])) }
+  private identity(a: Pick<Artifact, 'artifactId' | 'revision' | 'contentHash'>) { return [this.store.repositoryId, a.artifactId, a.revision, a.contentHash, STRUCTURE_VERSION] }
+  private selector(a: Pick<Artifact, 'artifactId' | 'revision' | 'contentHash'>, type: string, index: number) { return this.sign(JSON.stringify([...this.identity(a), type, index])) }
+  selectLocation(a: Pick<Artifact, 'artifactId' | 'revision' | 'contentHash'>, section: number, block: number | null) {
+    const sectionId = this.selector(a, 'section', section)
+    return { sectionId, ...(block === null ? {} : { blockId: this.selector(a, sectionId, block) }) }
+  }
+
   private cursor(scope: string, offset: number, line?: number) {
     const data = Buffer.from(JSON.stringify({ scope, offset, ...(line === undefined ? {} : { line }) })).toString('base64url')
     return data + '.' + this.sign(data)
