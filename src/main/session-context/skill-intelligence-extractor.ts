@@ -104,6 +104,14 @@ function safeShortString(v: unknown, maxLen = 256): string | undefined {
   return sanitize(v)
 }
 
+function safeSkillUri(v: unknown): string | undefined {
+  if (typeof v !== 'string' || v.length === 0 || v.length > 512) return undefined
+  if (v.startsWith('skill://')) {
+    return /[\u0000-\u001f\u007f]/.test(v) ? undefined : v
+  }
+  return sanitize(v)
+}
+
 export function extractSkillCallMetadata(canonicalTool: CanonicalSkillTool, rawArgsText: string): CompactSkillCallArgs {
   const obj = parsePlainJsonObject(rawArgsText)
   if (!obj) return {}
@@ -121,7 +129,7 @@ export function extractSkillCallMetadata(canonicalTool: CanonicalSkillTool, rawA
     typeof obj.expectedPackageHash === 'string' && SHA256_RE.test(obj.expectedPackageHash)
       ? obj.expectedPackageHash.toLowerCase()
       : undefined
-  const uri = typeof obj.uri === 'string' && obj.uri.length <= 512 ? sanitize(obj.uri) : undefined
+  const uri = safeSkillUri(obj.uri)
   return {
     ...(safeShortString(obj.skillId, 200) ? { skillId: safeShortString(obj.skillId, 200) } : {}),
     ...(uri ? { uri } : {}),
@@ -302,8 +310,8 @@ export function qualifySkillToolObservation(params: QualifySkillObservationParam
 
   const uri =
     callArgs.uri ??
-    (typeof resultObj?.uri === 'string' ? sanitize(resultObj.uri) : undefined) ??
-    (typeof contentsFirst?.uri === 'string' ? sanitize(contentsFirst.uri) : undefined)
+    safeSkillUri(resultObj?.uri) ??
+    safeSkillUri(contentsFirst?.uri)
 
   // For resources/read, only qualify explicit skill:// URIs
   if (params.canonicalTool === 'resources/read' && (!uri || !uri.startsWith('skill://'))) {

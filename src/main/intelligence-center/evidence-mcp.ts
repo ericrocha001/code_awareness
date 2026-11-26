@@ -24,7 +24,7 @@ export const INSPECT_INTELLIGENCE_EVIDENCE_TOOL: McpToolDefinition = {
       },
       target: {
         type: 'object',
-        description: 'Explicit discriminating target. Provide exactly one of sessionId, nativeSession, entireSession (Q26 only), or relation.',
+        description: 'Explicit discriminating target. Provide exactly one of sessionId, nativeSession, entireSession (Q26 only), skill (Q20/Q21 only), or relation.',
         properties: {
           sessionId: uuid,
           nativeSession: {
@@ -51,6 +51,17 @@ export const INSPECT_INTELLIGENCE_EVIDENCE_TOOL: McpToolDefinition = {
               generation: hex64
             },
             required: ['providerSessionId', 'worktreeId', 'generation'],
+            additionalProperties: false
+          },
+          skill: {
+            type: 'object',
+            description: 'Reverse Skill target (Q20/Q21 only, mutually exclusive with other targets).',
+            properties: {
+              skillId: shortId,
+              version: { type: 'integer', minimum: 1 },
+              packageHash: hex64
+            },
+            required: ['skillId'],
             additionalProperties: false
           },
           relation: {

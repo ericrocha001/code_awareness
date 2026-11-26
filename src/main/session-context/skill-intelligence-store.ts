@@ -360,7 +360,9 @@ export class SkillIntelligenceStore {
       typeof input.version === 'number' && Number.isSafeInteger(input.version) && input.version >= 1 ? input.version : null,
       input.versionStatus,
       input.packageHash ?? null,
-      input.resourceUri ? sanitize(input.resourceUri) : null,
+      input.resourceUri
+        ? (input.resourceUri.startsWith('skill://') ? input.resourceUri : sanitize(input.resourceUri))
+        : null,
       input.resourcePath ? sanitize(input.resourcePath) : null,
       input.resourceSelector ? sanitize(input.resourceSelector) : null,
       resourceRangeJson,

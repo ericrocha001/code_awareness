@@ -465,7 +465,105 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
     expect(histEvt).toBeDefined()
     expect(histEvt!.observationClass).toBe('DISCOVERED_MANIFEST_FETCHED')
 
-    // 11. Verify SQLite does NOT persist Skill body
+    // 11. Reverse Skill target (Q20: Skill@v1 -> sessions & literal deepen selectors, even after v2 exists)
+    const q20ReverseV1 = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId, version: 1, packageHash: v1Hash } }
+    })
+    expect(q20ReverseV1.isError).toBe(false)
+    expect(q20ReverseV1.data.evidence.reverseAcquisitions.length).toBeGreaterThanOrEqual(1)
+    expect(
+      q20ReverseV1.data.evidence.reverseAcquisitions.every(
+        (a: any) => a.skillId === skillId && a.version === 1
+      )
+    ).toBe(true)
+    expect(q20ReverseV1.data.evidence.reverseAcquisitions[0].deepenSession).toEqual({
+      tool: 'inspect_agent_session',
+      arguments: expect.objectContaining({ sessionId: expect.any(String), view: 'FOCAL' })
+    })
+
+    // Historical version/hash mismatch on reverse Skill target emits HISTORICAL_VERSION_HASH_MISMATCH
+    const q20ReverseMismatch = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId, version: 1, packageHash: 'f'.repeat(64) } }
+    })
+    expect(q20ReverseMismatch.isError).toBe(false)
+    expect(q20ReverseMismatch.data.gaps).toContain('HISTORICAL_VERSION_HASH_MISMATCH')
+
+    // Reject target.skill on non-Q20/Q21, conflicting targets, and ambiguous top-level skillId
+    const q05SkillTarget = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q05',
+      repositoryId,
+      target: { skill: { skillId } }
+    })
+    expect(q05SkillTarget.isError).toBe(true)
+    expect(q05SkillTarget.data.code).toBe('UNSUPPORTED_TARGET_FOR_QUESTION')
+
+    const conflictingSkillTarget = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId }, sessionId: boundSessionId }
+    })
+    expect(conflictingSkillTarget.isError).toBe(true)
+    expect(conflictingSkillTarget.data.code).toBe('CONFLICTING_TARGET')
+
+    const ambiguousSkillIdTarget = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      skillId,
+      target: { skill: { skillId } }
+    })
+    expect(ambiguousSkillIdTarget.isError).toBe(true)
+    expect(ambiguousSkillIdTarget.data.code).toBe('CONFLICTING_TARGET')
+
+    // Q21 separation: session error without linked Skill failure/turn + input.skillId must return INDETERMINADO & CONTEXT_CANDIDATE
+    const { sessionId: coexistErrSessionId } = store.ingest({
+      providerSessionId: 'native-sess-coexist-err',
+      providerVersion: '0.169.0',
+      agent: 'codex',
+      state: 'ENDED',
+      endedAt: '2026-11-23T01:20:00.000Z',
+      coverage: 'COMPLETE',
+      importState: 'METADATA_ONLY',
+      sourceDigest: digest('native-sess-coexist-err'),
+      sourceBytes: 0
+    }, [])
+    const errDb = new Database(storePath)
+    errDb.prepare(`
+      INSERT INTO events (id, sessionId, ordinal, type, timestamp, tool, success, files, sourcePosition, digest, bytes, omission, sanitized)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      'evt-coexist-err-1',
+      coexistErrSessionId,
+      1,
+      'ERROR',
+      '2026-11-23T01:20:01.000Z',
+      'bash',
+      0,
+      '[]',
+      1,
+      digest('Unrelated build error'),
+      21,
+      null,
+      1
+    )
+    errDb.close()
+    const q21CoexistOnly = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q21',
+      repositoryId,
+      skillId,
+      target: { sessionId: coexistErrSessionId }
+    })
+    expect(q21CoexistOnly.isError).toBe(false)
+    expect(q21CoexistOnly.data.evidence.q21Diagnosis.conclusionState).toBe('INDETERMINADO')
+    expect(q21CoexistOnly.data.evidence.q21Diagnosis.discriminativeGap).toBe('MISSING_LINKED_FAILURE_OR_SKILL')
+    expect(q21CoexistOnly.data.evidence.q21Diagnosis.contextCandidateFailures).toEqual([
+      expect.objectContaining({ associationClass: 'CONTEXT_CANDIDATE' })
+    ])
+
+    // 12. Verify SQLite does NOT persist Skill body
     const rawDb = new Database(storePath, { readonly: true })
     const rows = rawDb.prepare('SELECT * FROM skill_events').all()
     rawDb.close()
