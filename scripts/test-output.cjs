@@ -5,7 +5,7 @@ const crypto = require('node:crypto')
 const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
 const { receiptDigest, evaluateAcceptanceSummary, readRecordedAcceptance } = require('../src/shared/validation/test-output-receipt.cjs')
-const { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds } = require('./local-agent/validation.cjs')
+const { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds, sendRegistration } = require('./local-agent/validation.cjs')
 const { publicError } = require('./local-agent/discovery.cjs')
 
 const root = path.resolve(__dirname, '..')
@@ -98,7 +98,10 @@ function project(receipt) {
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
   if (receipt.cleanupWarning) summary.cleanupWarning = receipt.cleanupWarning
   if (receipt.acceptance) summary.acceptance = receipt.acceptance
-  if (receipt.registration) summary.registration = receipt.registration
+  if (receipt.registration) {
+    const { intent: _intent, ...registration } = receipt.registration
+    summary.registration = registration
+  }
   if (receipt.state === 'PASS' && receipt.registration && !['PERSISTED'].includes(receipt.registration.state) && receipt.registration.reason !== 'REGISTRATION_NOT_REQUESTED') summary.evidenceStatus = 'TESTE LOCAL APROVADO / REGISTRO PENDENTE'
   if (receipt.reconciliation?.reconciled.length) summary.reconciled = receipt.reconciliation.reconciled.map(({ id, state, proofId }) => ({ id, state, ...(proofId ? { proofId } : {}) }))
   if (receipt.reconciliation?.remaining) summary.pendingRegistrations = receipt.reconciliation.remaining
@@ -333,11 +336,13 @@ async function run(command, args = [], options = {}) {
   }
   save()
   if (connection && requestedRegistration) {
-    try { receipt.registration = await connection.register(id, receipt.digest, undefined, deliveryContext) }
-    catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
-    save()
+    try { receipt.registration = await sendRegistration(receipt.cwd, connection, receipt, deliveryContext ? { deliveryContext } : {}) }
+    catch (error) {
+      const diagnostic = publicError(error)
+      receipt.registration = { state: 'REGISTRATION_PENDING', reason: diagnostic.code, diagnostic }
+    }
     if (receipt.registration.state === 'PERSISTED') {
-      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200, ...(deliveryContext ? { deliveryContext } : {}) }) } catch (error) { diagnostics.push(publicError(error)) }
+      try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3, scanLimit: 200 }) } catch (error) { diagnostics.push(publicError(error)) }
     } else {
       try {
         const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id, scanLimit: 200 }).pending
