@@ -320,7 +320,7 @@ describe('U2 cooperative draining, cancellation isolation and execution origin p
     const continuum = new RepositoryContinuumSession(join(base, 'continuum'), { findByPath: () => ({ id: 'repo-orig', localCheckout: { path: main } }) })
     continuum.activate(main); cleanup.push(() => continuum.dispose())
     const service = continuum.getActiveService()!
-    const planReceipt = service.publish('---\nname: Plan\ndescription: Origin check\nkind: EXECUTABLE_PLAN\nexecutionId: exec-b-1\ndate: 2026-11-19T00:00:00Z\n---\nBody')
+    const planReceipt = service.publish('---\nname: Plan\ndescription: Origin check\nkind: EXECUTABLE_PLAN\ndate: 2026-11-19T00:00:00Z\n---\nBody')
     const plan = service.get(planReceipt.artifactId)!
     const adapter = new ContinuumLocalAdapter(
       continuum,
@@ -331,7 +331,7 @@ describe('U2 cooperative draining, cancellation isolation and execution origin p
       }
     )
     const bound = await adapter.operations.bind_execution.execute(
-      { repositoryId: 'repo-orig', worktreeId: selB.worktreeId, worktreeGeneration: selB.generation, executionId: 'exec-b-1', sourceArtifactId: plan.artifactId },
+      { repositoryId: 'repo-orig', worktreeId: selB.worktreeId, worktreeGeneration: selB.generation, sourceArtifactId: plan.artifactId },
       { connected: () => true }
     ) as any
     expect(bound.sessionPreflight).toMatchObject({ worktreeId: selB.worktreeId, ready: false, origin: { observedOnTarget: false } })

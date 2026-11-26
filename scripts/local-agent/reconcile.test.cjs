@@ -5,7 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { randomUUID } = require('node:crypto')
 const { receiptDigest } = require('../../src/shared/validation/test-output-receipt.cjs')
-const { reconcileReceipts, registerReceipt, pendingReceiptIds } = require('./validation.cjs')
+const { reconcileReceipts, registerReceipt, pendingReceiptIds, sendRegistration } = require('./validation.cjs')
 
 function workspace(t) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'reconcile-'))
@@ -29,6 +29,46 @@ function writeReceipt(cwd, registration, extra = {}, mtimeMs) {
 
 const pendingTimeout = { state: 'REGISTRATION_PENDING', reason: 'IPC_TIMEOUT' }
 const read = file => JSON.parse(fs.readFileSync(file, 'utf8'))
+
+test('post-run intent survives a lost write, restart and concurrent reconciliation without regressing a confirmed proof', async t => {
+  const cwd = workspace(t)
+  const original = writeReceipt(cwd, { state: 'REGISTRATION_PENDING', reason: 'REGISTRATION_NOT_REQUESTED' })
+  const association = { kind: 'TARGETED_TEST', scope: ['fixture'], evidenceFor: ['plan-A'] }
+  const deliveryContext = { executionId: 'execution-A', planArtifactId: 'plan-A', planRevision: 1, bindingArtifactId: 'binding-A', bindingRevision: 1 }
+  const intent = { association, deliveryContext }
+  let release
+  let observed
+  const entered = new Promise(resolve => { observed = resolve })
+  const late = sendRegistration(cwd, { register: async (...args) => {
+    assert.deepEqual(args.slice(2, 4), [association, deliveryContext])
+    assert.deepEqual(read(original.file).registration.intent, intent)
+    observed()
+    return new Promise(resolve => { release = resolve })
+  } }, original, intent)
+  await entered
+  const second = ledger()
+  const verify = { ...second, lookup: async (id, digest, savedAssociation, savedDelivery) => {
+    assert.deepEqual([savedAssociation, savedDelivery], [association, deliveryContext])
+    return second.lookup(id, digest)
+  } }
+  assert.equal((await reconcileReceipts({ cwd, id: original.id, connection: verify })).reconciled[0].state, 'PERSISTED')
+  release(pendingTimeout)
+  assert.equal((await late).proofId, 'proof-1')
+  assert.equal(second.proofs.size, 1)
+  assert.deepEqual(read(original.file).registration.intent, intent)
+  assert.equal(receiptDigest(read(original.file)), original.digest)
+  assert.equal((await reconcileReceipts({ cwd, id: original.id, connection: verify, deliveryContext: { ...deliveryContext, executionId: 'execution-B' } })).reconciled[0].state, 'AMBIGUOUS')
+})
+
+test('cannot write again when an implicit registration lost its reply and no proof is visible', async t => {
+  const cwd = workspace(t), original = writeReceipt(cwd, pendingTimeout)
+  await sendRegistration(cwd, { register: async () => pendingTimeout }, original, {})
+  const next = ledger()
+  const result = await reconcileReceipts({ cwd, connection: next, id: original.id })
+  assert.equal(result.remaining, 1)
+  assert.deepEqual(result.reconciled, [{ id: original.id, state: 'REGISTRATION_PENDING', reason: 'REGISTRATION_TARGET_UNCONFIRMED' }])
+  assert.deepEqual(next.calls, ['lookup', 'lookup'])
+})
 
 function ledger() {
   const proofs = new Map(), calls = []

@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { fixture, markdown, withFixtureDatabase } from '../continuum/continuum-test-fixtures'
+import { fixture, markdown, storedLegacyPublication, withFixtureDatabase } from '../continuum/continuum-test-fixtures'
 import { SessionStore, sessionStorePath } from './store'
 import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { registrySources } from './registry-sources'
@@ -27,7 +27,7 @@ function setup(repositoryId = 'repo') {
   const read = registrySources({ repositoryId, root: f.dir, continuum: () => f.service, ledger, github, networkAllowed: () => false, assertCurrent: () => {} })
   const refresh = async (id: string) => sessions.registry.applyAll(await read({ selector: { kind: 'ARTIFACT', id }, cursors: sessions.registry.cursors() }), () => {})
   const publish = async (rawMarkdown: string, call = 'call', session = 'session', selectedBinding = binding) => {
-    const receipt = f.service.publish(rawMarkdown)
+    const receipt = rawMarkdown.includes('\nexecutionId:') ? storedLegacyPublication(f.store, rawMarkdown) : f.service.publish(rawMarkdown)
     const stamp = startCaptureFixture(sessions.registry, selectedBinding, nativeDigest(JSON.stringify([repositoryId, 'codex', session])))
     for (const hook_event_name of ['PreToolUse','PostToolUse']) {
       const event = normalizeNativeHook({ hook_event_name, session_id: session, tool_use_id: call, tool_name: 'mcp__code_awareness_local__publish_artifact', cwd: selectedBinding.root, tool_input: { rawMarkdown },
@@ -55,7 +55,7 @@ it('U1 composes exact publication, declared and derived relationships without co
   expect(graph.edges.some((e: any) => e.confidenceClass === 'VERIFIED_CAUSAL' && e.relation === 'published')).toBe(true)
   expect(graph.edges.some((e: any) => e.confidenceClass === 'DECLARED' && e.relation === 'implements')).toBe(true)
   expect(graph.edges.some((e: any) => e.confidenceClass === 'DERIVED' && e.relation === 'references')).toBe(true)
-  expect(graph.edges.some((e: any) => e.evidenceKind === 'EXECUTION_MEMBERSHIP')).toBe(true)
+  expect(graph.edges.some((e: any) => e.evidenceKind === 'EXECUTION_MEMBERSHIP' && e.confidenceClass === 'DERIVED' && e.relation === 'declares-execution')).toBe(true)
   expect(JSON.stringify(graph)).not.toContain('PRIVATE_BODY')
   expect(graph.edges.some((e: any) => e.from.startsWith('ARTIFACT:') && e.to.startsWith('COMMIT:'))).toBe(false)
   expect(f.service.get(receipt.artifactId)!.rawMarkdown).toBe(raw)

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { executeListArtifacts, executeGetArtifact, executePublishArtifact, executeUpdateArtifact, executeArtifactNavigation, LIST_ARTIFACTS_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL } from './continuum-mcp'
-import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
+import { fixture, markdown, storedLegacyArtifact, withFixtureDatabase } from './continuum-test-fixtures'
 import { ArtifactStore, computeContentHash } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import { ContinuumService } from './continuum-service'
@@ -157,8 +157,8 @@ describe('Repository Continuum MCP contracts', () => {
     expect(JSON.stringify(changed)).not.toContain('rawMarkdown')
   })
   it('intersects metadata filters and time, projects only selected keys, and never searches the body', () => {
-    const { service } = setup()
-    const local = service.publish(markdown('Needle', 'status: PENDING\nexecutionId: exec-1\npriority: 2\nfuture: {a: true, b: [1, 2]}\n', 'secret body'))
+    const { service, store } = setup()
+    const local = storedLegacyArtifact(store, markdown('Needle', 'status: PENDING\nexecutionId: exec-1\npriority: 2\nfuture: {a: true, b: [1, 2]}\n', 'secret body'))
     service.publish(markdown('Other')); service.publish(markdown('Third'))
     const list = (args: unknown) => data(executeListArtifacts(service, args))
     expect(list({}).count).toBe(3); expect(list({ query: 'Needle runtime' }).count).toBe(1); expect(list({ query: 'secret body' }).count).toBe(0)
@@ -196,9 +196,9 @@ describe('Repository Continuum MCP contracts', () => {
     expect(service.list().artifacts).toHaveLength(0)
   })
   it('finds sufficient context in a representative corpus with two metadata acquisitions and one selected body read', () => {
-    const { service } = setup()
-    for (let i = 0; i < 200; i++) service.publish(markdown('Unrelated-' + i, 'status: COMPLETED\nexecutionId: old-run\n', 'noise'.repeat(100)))
-    const source = service.publish(markdown('SpecificImplementation', 'status: BLOCKED\nexecutionId: canonical-run\n', 'SELECTED_CONTEXT'))
+    const { service, store } = setup()
+    for (let i = 0; i < 200; i++) storedLegacyArtifact(store, markdown('Unrelated-' + i, 'status: COMPLETED\nexecutionId: old-run\n', 'noise'.repeat(100)))
+    const source = storedLegacyArtifact(store, markdown('SpecificImplementation', 'status: BLOCKED\nexecutionId: canonical-run\n', 'SELECTED_CONTEXT'))
     const proof = service.publish(markdown('RelevantProof', `relations:\n  - artifactId: ${source.artifactId}\n    kind: validates\n`, 'SELECTED_PROOF'))
     const discovery = data(executeListArtifacts(service, { query: 'SpecificImplementation runtime', kind: 'DECISION', status: 'BLOCKED', metadata: { executionId: 'canonical-run' } }))
     expect(discovery.count).toBe(1); expect(discovery.nextCursor).toBeUndefined(); expect(discovery.artifacts[0].artifactId).toBe(source.artifactId)

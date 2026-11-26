@@ -15,6 +15,7 @@ export interface ArtifactMetadata {
   [key: string]: MetadataValue | ArtifactRelation[] | undefined
 }
 export interface Artifact {
+  documentaryMembership?: import('../../shared/types/publication-provenance-types').DocumentaryMembership
   lifecycle?: import('./artifact-lifecycle-policy').ReturnLifecycleProjection
   operationalActivity?: import('./artifact-lifecycle-policy').LifecycleActivity
   artifactId: string
@@ -81,9 +82,12 @@ export interface UpdateArtifactInput {
   provenance?: Record<string, MetadataValue>
 }
 export interface ArtifactSemanticFields { name?: string; description?: string; kind?: string }
+export interface ArtifactPublicationFields extends ArtifactSemanticFields {
+  membership?: import('../../shared/types/publication-provenance-types').DocumentaryMembershipIntent
+}
 import type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
 export type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
-export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string; publicationReceipt?: PublicationReceipt; replayed?: boolean }
+export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string; publicationReceipt?: PublicationReceipt; publicationExecutionId?: string; replayed?: boolean }
 export interface VisualMedia {
   mimeType: 'image/webp'
   sha256: string
@@ -114,8 +118,10 @@ export interface IContinuumService extends IArtifactReader {
   revokeExecutionActivation?: import('./continuum-service').ContinuumService['revokeExecutionActivation']
   getActiveExecutionContext?: import('./continuum-service').ContinuumService['getActiveExecutionContext']
   publicationDeliveryPage?: import('./continuum-service').ContinuumService['publicationDeliveryPage']
+  membershipSelection?: import('./continuum-service').ContinuumService['membershipSelection']
+  executionMembers?: import('./continuum-service').ContinuumService['executionMembers']
   readonly repositoryId?: string
   updateAgent?: import('./continuum-service').ContinuumService['updateAgent']
-  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: import('./agent-authority').AgentAuthority, anchor?: import('../../shared/types/delivery-context-types').DeliveryAnchor): ArtifactReceipt
+  publish(rawMarkdown: string, fields?: ArtifactPublicationFields, authority?: import('./agent-authority').AgentAuthority, anchor?: import('../../shared/types/delivery-context-types').DeliveryAnchor): ArtifactReceipt
   update(artifactId: string, expectedRevision: number, rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt
 }

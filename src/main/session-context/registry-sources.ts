@@ -113,6 +113,12 @@ export function registrySources(options: {
       }
       for (const neighbor of neighbors.slice(0, 20)) if (neighbor.kind === 'ARTIFACT') addArtifact(neighbor.id)
       const metadataKey = selector?.kind === 'PR' ? 'pullRequest' : selector?.kind === 'COMMIT' ? 'commitSha' : selector?.kind === 'EXECUTION' ? 'executionId' : undefined
+      if (selector?.kind === 'EXECUTION' && service.executionMembers) {
+        const page = service.executionMembers(selector.id, 8)
+        if (page.root) addArtifact(page.root.artifactId + ':' + page.root.revision)
+        for (const member of page.members) if (member) addArtifact(member.artifactId + ':' + member.revision)
+        selectedPartial ||= 'nextCursor' in page && Boolean(page.nextCursor)
+      }
       if (metadataKey && selector) for (const row of service.list({ metadata: { [metadataKey]: selector.kind === 'PR' ? Number(selector.id) : selector.id }, limit: 10 }).artifacts) addArtifact(row.artifactId)
     } else unavailable('CONTINUUM', 'UNAVAILABLE', 'SOURCE_UNAVAILABLE', 'CONTINUUM_SERVICE')
     let canonicalRepository: string | undefined
@@ -444,8 +450,17 @@ export function registrySources(options: {
       for (const id of extractArtifactReferences(artifact.rawMarkdown ?? '').slice(0, 20)) if (id !== artifact.artifactId && service?.get(id)) edges.push({ from, relation: 'references', to: { kind: 'ARTIFACT', id }, evidenceKind: 'CONTINUUM_REFERENCE', ...evidence })
       const nested = artifact.metadata.metadata
       const metadata = nested && typeof nested === 'object' && !Array.isArray(nested) ? { ...nested, ...artifact.metadata } : artifact.metadata
-      const artifactExecutionId = (artifact.provenance?.executionIdentity as { executionId?: unknown } | undefined)?.executionId ?? metadata.executionId
-      if (typeof artifactExecutionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(artifactExecutionId)) edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: artifactExecutionId }, evidenceKind: 'EXECUTION_MEMBERSHIP', ...evidence })
+      const membership = service?.membershipAt?.(artifact.artifactId, artifact.revision)
+      const rootId = (artifact.provenance?.executionIdentity as { executionId?: string } | undefined)?.executionId
+      const root = rootId ? service?.executionRoot?.(rootId) : null
+      if (membership) {
+        edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: membership.executionId }, evidenceKind: 'DOCUMENTARY_MEMBERSHIP_VERIFIED',
+          evidenceRef: membership.evidenceRef, digest: membership.digest, freshness: 'EXACT_REVISION' })
+      } else if (root?.artifactId === artifact.artifactId && root.revision === artifact.revision) {
+        edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: root.executionId }, evidenceKind: 'EXECUTION_ROOT_VERIFIED', ...evidence })
+      } else if (typeof metadata.executionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(metadata.executionId)) {
+        edges.push({ from, relation: 'declares-execution', to: { kind: 'EXECUTION', id: metadata.executionId }, evidenceKind: 'EXECUTION_MEMBERSHIP', ...evidence })
+      }
       if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF') {
         const revisionRelations: RegistryEdge[] = []
         for (const relation of (artifact.metadata.relations ?? []).slice(0, 10)) {
@@ -473,7 +488,8 @@ export function registrySources(options: {
         edges.push({ from, relation: 'branch-context', to: { kind: 'EXECUTION', id: metadata.executionId }, evidenceKind: 'BRANCH_CONTEXT_ONLY', ...evidence })
         edges.push({ from, relation: 'branch-context', to: { kind: 'WORKTREE', id: metadata.worktreeId + ':' + metadata.worktreeGeneration }, evidenceKind: 'BRANCH_CONTEXT_ONLY', ...evidence })
       }
-      const artifactAnchor = artifact.provenance?.deliveryContext ? validDeliveryAnchor(artifact.provenance.deliveryContext) : null
+      const receiptAnchor = service?.publicationContextAt?.(artifact.artifactId, artifact.revision)
+      const artifactAnchor = receiptAnchor ? validDeliveryAnchor(receiptAnchor) : null
       if (artifactAnchor) {
         const execNode = deliveryExecutionEntity(artifactAnchor)
         const ctxEvidence = { evidenceKind: 'OPERATION_EXECUTION_CONTEXT', evidenceRef: from.id, digest: digest(JSON.stringify([from.id, artifactAnchor])), freshness: service?.get(artifactAnchor.planArtifactId)?.revision === artifactAnchor.planRevision ? 'OPERATION_SNAPSHOT' : 'SOURCE_STALE' }
@@ -486,7 +502,7 @@ export function registrySources(options: {
       const authority = { nativeState: native?.state ?? 'UNAVAILABLE', receiptId: native?.receiptId }
       const label = { id: identity.id, title: artifact.metadata.name, description: artifact.metadata.description, artifactKind: artifact.metadata.kind,
         status: artifact.metadata.status, revision: artifact.revision, contentHash: artifact.contentHash }
-      addBatch({ source: 'CONTINUUM:' + from.id, revision: String(artifact.revision) + ':' + artifact.contentHash + ':' + digest(JSON.stringify(authority)) + ':P2:' + (isCurrent ? 'CURRENT' : 'HISTORICAL'), cursor: JSON.stringify(authority), status: 'COMPLETE', entities: [from], edges,
+      addBatch({ source: 'CONTINUUM:' + from.id, revision: String(artifact.revision) + ':' + artifact.contentHash + ':' + digest(JSON.stringify([authority, membership?.evidenceRef, root?.evidenceRef])) + ':P3:' + (isCurrent ? 'CURRENT' : 'HISTORICAL'), cursor: JSON.stringify(authority), status: 'COMPLETE', entities: [from], edges,
         artifactLabels: [{ id: from.id, snapshot: { ...label, freshness: isCurrent ? 'EXACT_REVISION' : 'SOURCE_STALE' } }] })
       if (isCurrent && (selectedId === identity.id || !artifacts.has(identity.id))) {
         addBatch({ source: 'CONTINUUM:' + artifact.artifactId, revision: 'REVISIONED_PROJECTION', status: 'REPLACED', edges: [] })

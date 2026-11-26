@@ -70,15 +70,15 @@ it('permits supported kind correction with explicit contextual judgment while en
   expect(f.store.get(before.artifactId)!.revision).toBe(2)
 })
 
-it.each(['{}', '{broken'])('repairs corrupted technical projections from immutable sources without decoding the damaged metadata: %s', damagedMetadata => {
+it.each(['{}', '{broken'])('repairs corrupted technical projections from immutable sources without decoding the damaged metadata: %s', async damagedMetadata => {
   const f = setup(), original = f.store.get(f.plan.artifactId)!
   withFixtureDatabase(f.path, db => db.prepare("UPDATE artifacts SET content_hash='corrupt', name='wrong', created_at='2000-01-01', metadata_json=? WHERE artifact_id=?").run(damagedMetadata, original.artifactId), false)
-  const repair = f.service.repairMetadata(f.authority, original.artifactId, 1)
+  const repair = await f.service.repairMetadata(f.authority, original.artifactId, 1)
   expect(repair).toMatchObject({ state: 'PERSISTED', revision: 2, publicationReceipt: { contentHash: original.contentHash } })
   const read = f.store.get(original.artifactId)!
   expect(read).toMatchObject({ artifactId: original.artifactId, contentHash: original.contentHash, createdAt: original.createdAt, metadata: original.metadata, provenance: { technicalRepair: { sourceRevision: 1, principalId: f.authority.principal.principalId } } })
   expect(f.store.getRevision(original.artifactId, 1)).toEqual(original)
-  expect(f.service.repairMetadata(f.authority, original.artifactId, 1)).toMatchObject({ replayed: true, revision: 2 })
+  expect(await f.service.repairMetadata(f.authority, original.artifactId, 1)).toMatchObject({ replayed: true, revision: 2 })
 })
 
 it('repairs visual metadata from its canonical revision while verifying and preserving the original media', async () => {
@@ -86,7 +86,7 @@ it('repairs visual metadata from its canonical revision while verifying and pres
   const published = await f.service.publishVisual('# Visual repair\n\nCanonical image bytes and descriptive context must remain intact.', data)
   const original = f.service.getVisual(published.artifactId)
   withFixtureDatabase(f.path, db => db.prepare("UPDATE artifacts SET metadata_json='{broken', content_hash='corrupt' WHERE artifact_id=?").run(published.artifactId), false)
-  expect(f.service.repairMetadata(f.authority, published.artifactId, 1)).toMatchObject({ state: 'PERSISTED', revision: 2 })
+  expect(await f.service.repairMetadata(f.authority, published.artifactId, 1)).toMatchObject({ state: 'PERSISTED', revision: 2 })
   const repaired = f.service.getVisual(published.artifactId)
   expect(repaired.media).toEqual(original.media)
   expect(repaired.data).toEqual(data)

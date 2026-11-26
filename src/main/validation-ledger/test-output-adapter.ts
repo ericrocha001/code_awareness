@@ -9,7 +9,7 @@ import { captureValidationSource, validationSourceFingerprint } from '../validat
 import type { ValidationLedger } from './validation-ledger'
 import type { RecordProofInput, ValidationProof } from './validation-ledger-types'
 import { receiptDigest } from '../../shared/validation/test-output-receipt.cjs'
-import { authenticatedSessionWitness, deliveryContextRequest, sameDeliveryRequest, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
+import { authenticatedSessionWitness, deliveryAnchor, deliveryContextRequest, sameDeliveryRequest, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
 import { authorizeArtifactAgent, authenticatedAgentPrincipal } from '../continuum/agent-authority'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
 import type { LocalRequestContext } from '../local-agent-channel/local-channel-types'
@@ -121,8 +121,8 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         throw error
       }
     }
-    const receiptRequest = target.extend({ receiptId: z.string().uuid(), digest: hash.optional(), association: association.optional(), deliveryContext: deliveryContextRequest.optional(), sessionWitness: authenticatedSessionWitness.optional() }).strict()
-    const prepareReceipt = async (request: z.infer<typeof receiptRequest>, context: LocalRequestContext, isLookup = false) => {
+    const receiptRequest = target.extend({ receiptId: z.string().uuid(), digest: hash.optional(), association: association.optional(), deliveryContext: deliveryContextRequest.optional(), sessionWitness: authenticatedSessionWitness.optional(), requireUnmanaged: z.literal(true).optional() }).strict()
+    const prepareReceipt = async (request: z.infer<typeof receiptRequest>, context: LocalRequestContext) => {
       const { active, current, git, registry, tree, assertCurrent } = await select(request, context.connected)
       const receipt = await readReceipt(await realpath(tree.path), request.receiptId)
       if (request.digest && request.digest !== receipt.digest) throw new Error('RECEIPT_CHANGED')
@@ -136,8 +136,16 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       if (request.deliveryContext && receipt.ledger.deliveryContext && !sameDeliveryRequest(request.deliveryContext, receipt.ledger.deliveryContext)) throw new Error('RECEIPT_ASSOCIATION_CONFLICT')
       const effectiveDelivery = request.deliveryContext ?? receipt.ledger.deliveryContext
       const before = receipt.ledger.before, after = receipt.ledger.after
-      let anchor: DeliveryAnchor | undefined
-      if (!isLookup) {
+      const checkAnchor = (anchor?: DeliveryAnchor) => {
+        if ((effectiveDelivery && (!anchor || !sameDeliveryRequest(anchor, effectiveDelivery))) ||
+          (anchor && (anchor.repositoryId !== request.repositoryId || anchor.snapshot.repositoryId !== request.repositoryId ||
+          anchor.snapshot.worktreeId !== tree.worktreeId || anchor.snapshot.worktreeGeneration !== tree.generation ||
+          (before && (anchor.snapshot.head !== before.head || (before.branch && anchor.snapshot.branchRef !== 'refs/heads/' + before.branch)))))) {
+          throw new Error('DELIVERY_CONTEXT_STALE')
+        }
+      }
+      const prepareAnchor = async () => {
+        let anchor: DeliveryAnchor | undefined
         const continuum = session.getActiveService()
         const inventory = new GitBranchInventory(active.repositoryPath, git, registry, { repositoryId: request.repositoryId, isActive: current })
         const authority = authorizeArtifactAgent(
@@ -152,10 +160,11 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         } else if (continuum?.resolveExecutionContext) {
           anchor = (await continuum.resolveExecutionContext(authority, undefined, () => inventory.executionSnapshot(tree.worktreeId, tree.generation))).anchor
         }
-        if (anchor && (anchor.repositoryId !== request.repositoryId || anchor.snapshot.worktreeId !== tree.worktreeId || anchor.snapshot.worktreeGeneration !== tree.generation ||
-          (before && (anchor.snapshot.head !== before.head || anchor.snapshot.repositoryId !== before.repositoryId)))) {
-          throw new Error('DELIVERY_CONTEXT_STALE')
-        }
+        checkAnchor(anchor)
+        if (request.requireUnmanaged && anchor) throw new Error('REGISTRATION_TARGET_UNCONFIRMED')
+        await select(request, context.connected)
+        assertCurrent()
+        return anchor
       }
       const changed = before && after && validationSourceFingerprint(before) !== validationSourceFingerprint(after)
       const tests = ['TARGETED_TEST', 'SUBSYSTEM_TEST', 'E2E'].includes(declared.kind)
@@ -183,7 +192,7 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         ? `; provider=${receipt.acceptance.provider}@${receipt.acceptance.version ?? 'unverified'}; pin=${receipt.acceptance.pin}; outcome=${receipt.acceptance.outcome}`
         : ''
       const workValidationAuthorized = declared.evidenceFor.length > 0 || Boolean(effectiveDelivery) || receipt.ledger.workValidationAuthorized === true
-      const input: RecordProofInput = { kind: declared.kind, producer: 'IMPLEMENTER', status,
+      const facts = (anchor?: DeliveryAnchor, witness = request.sessionWitness): RecordProofInput => ({ kind: declared.kind, producer: 'IMPLEMENTER', status,
         startedAt: receipt.startedAt, finishedAt: receipt.finishedAt, durationMs: receipt.durationMs, scope: declared.scope,
         evidenceFor: declared.evidenceFor.length ? declared.evidenceFor : (anchor && workValidationAuthorized ? [anchor.planArtifactId] : []),
         sourceFingerprint: before ? validationSourceFingerprint(before) : null,
@@ -192,12 +201,23 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         deduplicationKey: `test-output:${request.repositoryId}:${tree.worktreeId}:${tree.generation}:${receipt.id}`,
         commandProfile: { command: 'test-output', cwd: receipt.cwd, exitCode: receipt.exitCode ?? undefined, ...(before ? { source: before } : {}),
           ...(anchor ? { deliveryContext: anchor } : {}),
-          ...(request.sessionWitness ? { sessionWitness: request.sessionWitness } : {}),
+          ...(witness ? { sessionWitness: witness } : {}),
           receipt: { id: receipt.id, digest: receipt.digest, trust: 'EXECUTOR_REPORTED', association: request.association ? 'POST_RUN_DECLARED' : 'RUN_CONFIGURED',
-            ...(receipt.acceptance ? { acceptance: receipt.acceptance } : {}) } } }
+            ...(receipt.acceptance ? { acceptance: receipt.acceptance } : {}) } } })
+      const historical = (proof: ValidationProof) => {
+        const saved = proof.commandProfile?.deliveryContext
+        const witness = proof.commandProfile?.sessionWitness
+        try {
+          if (saved !== undefined && !deliveryAnchor.safeParse(saved).success) throw new Error()
+          if (witness !== undefined && !authenticatedSessionWitness.safeParse(witness).success) throw new Error()
+          if (request.sessionWitness && JSON.stringify(authenticatedSessionWitness.parse(witness)) !== JSON.stringify(request.sessionWitness)) throw new Error()
+          checkAnchor(saved)
+        } catch { throw new Error('RECEIPT_IDENTITY_CONFLICT') }
+        return facts(saved, witness)
+      }
       await select(request, context.connected)
       assertCurrent()
-      return { input, assertCurrent }
+      return { facts, historical, prepareAnchor, assertCurrent }
     }
     const persisted = (receiptId: string, proof: ValidationProof) =>
       ({ receiptId, proofId: proof.proofId, state: 'PERSISTED', status: proof.status, trust: 'EXECUTOR_REPORTED', freshness: 'UNVERIFIABLE', evidenceFor: proof.evidenceFor })
@@ -223,8 +243,14 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
         }
       }),
       register: operation(input => receiptRequest.parse(input), async (request, context) => {
-        const { input, assertCurrent } = await prepareReceipt(request, context, false)
+        const { facts, historical, prepareAnchor, assertCurrent } = await prepareReceipt(request, context)
         assertCurrent()
+        const existing = ledger.lookupReceiptProof(facts(), historical)
+        if (existing) return persisted(request.receiptId, existing)
+        const input = facts(await prepareAnchor())
+        assertCurrent()
+        const concurrent = ledger.lookupReceiptProof(input, historical)
+        if (concurrent) return persisted(request.receiptId, concurrent)
         const proof = ledger.recordReceiptProof(input)
         const confirmed = ledger.getProof(proof.proofId)
         if (!confirmed || confirmed.commandProfile?.receipt?.digest !== input.commandProfile?.receipt?.digest) throw new Error('PROOF_READBACK_FAILED')
@@ -232,9 +258,9 @@ export class TestOutputLocalAdapter implements LocalChannelAdapter {
       }),
       lookup: operation(input => receiptRequest.extend({ digest: hash }).parse(input), async (request, context) => {
         try {
-          const { input, assertCurrent } = await prepareReceipt(request, context, true)
+          const { facts, historical, assertCurrent } = await prepareReceipt(request, context)
           assertCurrent()
-          const proof = ledger.lookupReceiptProof(input)
+          const proof = ledger.lookupReceiptProof(facts(), historical)
           return proof ? persisted(request.receiptId, proof) : { state: 'NOT_FOUND' }
         } catch (error) {
           const code = (error as NodeJS.ErrnoException).code ?? (error instanceof Error ? error.message : '')

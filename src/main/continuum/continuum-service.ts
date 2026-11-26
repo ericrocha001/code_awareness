@@ -10,7 +10,7 @@ import { ArtifactStore } from './artifact-store'
 import type { PublicationReceiptContext } from './publication-receipts'
 import { canonicalJson, normalizeMetadataValue, parseArtifactMarkdown } from './artifact-metadata'
 import { canonicalizePublication } from './artifact-publication'
-import type { ArtifactSemanticFields, PublicationReceipt } from './continuum-types'
+import type { ArtifactPublicationFields, ArtifactSemanticFields, PublicationReceipt } from './continuum-types'
 import { publicationRequestDigest } from '../../shared/types/publication-provenance-types'
 import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { legacyInput } from './legacy-artifact-migrator'
@@ -25,13 +25,14 @@ import { getCanonicalTokenizer } from '../core/tokenizer'
 import type { ContinuumTagTokens } from '../../shared/types/continuum-ui-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
+  private readonly preparedMembership = new WeakMap<DeliveryAnchor, NonNullable<PublicationReceiptContext['activation']>>()
   get repositoryId() { return this.store.repositoryId }
   private async prepareAuthorityDelivery(authority: AgentAuthority | undefined, observeDelivery?: ObserveDelivery): Promise<PublicationReceiptContext | undefined> {
     if (!authority) return undefined
     const resolved = await this.resolveExecutionContext(authority, undefined, observeDelivery)
     const anchor = resolved.anchor
     return anchor || authority.sessionWitness
-      ? { ...(anchor ? { deliveryContext: anchor } : {}), ...(authority.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
+      ? { ...(anchor ? { deliveryContext: anchor, activation: this.preparedMembership.get(anchor) } : {}), ...(authority.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
       : undefined
   }
   async transitionLifecycle(request: LifecycleRequest, connected: () => boolean = () => true, authority?: AgentAuthority, observeDelivery?: ObserveDelivery) {
@@ -153,6 +154,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const publication = canonicalizePublication(rawMarkdown)
     const { metadata } = publication
+    this.assertDocumentaryMetadata(metadata)
     const tags = artifactTags(metadata.tags)
     tags.forEach(slug => this.store.requireTag(slug))
     if (tags.length && !confirmedTags) throw new Error('TAGS_CONFIRMATION_REQUIRED: ' + tags.join(', '))
@@ -196,6 +198,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.reconcile?.()
     const publication = canonicalizePublication(rawMarkdown, /^(?:\uFEFF)?---(?:\r?\n|$)/.test(rawMarkdown) ? {} : { kind: 'VISUAL_REFERENCE' })
     const { metadata } = publication
+    this.assertDocumentaryMetadata(metadata)
     this.assertAgentTags(metadata)
     if (metadata.kind !== 'VISUAL_REFERENCE' || metadata.media !== undefined) throw new Error('RESERVED_VISUAL_METADATA')
     const data = Buffer.from(input)
@@ -221,9 +224,18 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   }
   private receipt(artifact: Artifact): ArtifactReceipt { return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, updatedAt: artifact.updatedAt } }
   private publishedReceipt(value: { artifact: Artifact; publicationReceipt: PublicationReceipt }): ArtifactReceipt {
-    return { ...this.receipt(value.artifact), publicationReceipt: value.publicationReceipt, replayed: false }
+    const publicationExecutionId = value.publicationReceipt.deliveryContext?.executionId
+    return { ...this.receipt(value.artifact), publicationReceipt: value.publicationReceipt, ...(publicationExecutionId ? { publicationExecutionId } : {}), replayed: false }
   }
   readPublicationReceipt(receiptId: string): PublicationReceipt | null { this.assertActive(); return this.store.readPublicationReceipt(receiptId) }
+  publicationContextAt(artifactId: string, revision: number) {
+    this.assertActive()
+    return this.store.publicationReceiptAt(artifactId, revision, revision === 1 ? 'PUBLISH' : 'UPDATE')?.deliveryContext
+  }
+  membershipAt(artifactId: string, revision?: number) { this.assertActive(); return this.store.membershipAt(artifactId, revision) }
+  membershipSelection(artifactId: string, revision?: number) { this.assertActive(); return this.store.membershipSelection(artifactId, revision) }
+  executionRoot(executionId: string) { this.assertActive(); return this.store.executionRoot(executionId) }
+  executionMembers(executionId: string, limit?: number, cursor?: string) { this.assertActive(); return this.store.executionMembers(executionId, limit, cursor) }
   publicationDeliveryPage(after?: string, limit?: number, filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter): DeliveryProjectionPage { this.assertActive(); return this.store.publicationDeliveryPage(after, limit, filter) }
   associatePublication(value: PublicationAssociation) { this.assertActive(); return this.store.associatePublication(value) }
   invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.assertActive(); this.store.invalidatePublication(invocationId, state) }
@@ -232,7 +244,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     if (!receipt) throw new Error('PUBLICATION_RECEIPT_NOT_FOUND')
     const artifact = this.store.get(receipt.artifactId)!
     if (artifact.revision !== receipt.revision) throw new Error('STALE_PUBLICATION_RECEIPT')
-    return { ...this.receipt(artifact), publicationReceipt: receipt, replayed: true }
+    return { ...this.publishedReceipt({ artifact, publicationReceipt: receipt }), replayed: true }
   }
   async prepareDeliveryContext(authority: AgentAuthority | undefined, request: DeliveryContextRequest, observe: ObserveDelivery, options?: { worktreeId?: string }): Promise<DeliveryAnchor> {
     deliveryContextRequest.parse(request)
@@ -268,8 +280,11 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     if (JSON.stringify(before) !== JSON.stringify(after) || before.repositoryId !== this.repositoryId || targetWorktreeId && targetWorktreeId !== before.worktreeId ||
       metadata.worktreeId !== before.worktreeId || metadata.worktreeGeneration !== before.worktreeGeneration || metadata.branchRef !== before.branchRef || metadata.branchGeneration !== before.branchGeneration ||
       initial.binding.contentHash !== current.binding.contentHash || initial.plan.contentHash !== current.plan.contentHash) throw new Error('DELIVERY_CONTEXT_STALE')
-    return { ...request, schemaVersion: 1, repositoryId: this.repositoryId, planDigest: current.plan.contentHash, bindingDigest: current.binding.contentHash,
+    const anchor: DeliveryAnchor = { ...request, schemaVersion: 1, repositoryId: this.repositoryId, planDigest: current.plan.contentHash, bindingDigest: current.binding.contentHash,
       snapshot: before, classification: 'AUTHENTICATED_EXECUTION_CONTEXT' }
+    const activation = this.store.getActiveActivation(before.worktreeId)
+    if (activation) this.preparedMembership.set(anchor, { id: activation.activationId, revision: activation.revision })
+    return anchor
   }
 
   async resolveExecutionContext(
@@ -433,14 +448,24 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return { publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: this.store.repositoryId, sessionEvidence: 'UNAVAILABLE' } }
   }
   private assertDocumentaryMetadata(metadata: Artifact['metadata'], prior?: Artifact['metadata']) {
-    for (const key of ['artifactId', 'repositoryId', 'revision', 'createdAt', 'updatedAt', 'contentHash', 'provenance', 'nativeArtifact', 'publication', 'lifecycle']) {
-      if (key === 'repositoryId' && metadata.bindingRole === 'EXECUTION_BRANCH' && !prior) continue
+    for (const key of ['artifactId', 'repositoryId', 'revision', 'createdAt', 'updatedAt', 'contentHash', 'provenance', 'nativeArtifact', 'publication', 'lifecycle',
+      'executionId', 'executionIdentity', 'publicationExecutionId', 'documentaryMembership', 'documentaryUnlinkReason', 'deliveryContext', 'bindingRole']) {
       if (Object.hasOwn(metadata, key) !== Object.hasOwn(prior ?? {}, key) || canonicalJson(normalizeMetadataValue(metadata[key] ?? null)) !== canonicalJson(normalizeMetadataValue(prior?.[key] ?? null))) throw new Error('AUTHORITATIVE_METADATA_RESERVED: ' + key)
     }
+    const nestedIdentity = (value: unknown): unknown => {
+      if (!value || typeof value !== 'object') return null
+      return Object.fromEntries(Object.entries(value).flatMap(([key, field]) => {
+        if (['executionId', 'executionIdentity', 'publicationExecutionId', 'documentaryMembership', 'documentaryUnlinkReason', 'deliveryContext'].includes(key)) return [[key, field]]
+        const nested = nestedIdentity(field)
+        return nested && Object.keys(nested).length ? [[key, nested]] : []
+      }))
+    }
+    if (canonicalJson(normalizeMetadataValue(nestedIdentity(metadata))) !== canonicalJson(normalizeMetadataValue(nestedIdentity(prior ?? {})))) throw new Error('AUTHORITATIVE_METADATA_RESERVED: nested execution identity')
   }
-  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: AgentAuthority, preparedAnchor?: DeliveryAnchor): ArtifactReceipt {
+  publish(rawMarkdown: string, fields: ArtifactPublicationFields = {}, authority?: AgentAuthority, preparedAnchor?: DeliveryAnchor): ArtifactReceipt {
     this.assertActive(); this.reconcile?.(); this.assertActive()
-    const publication = canonicalizePublication(rawMarkdown, fields)
+    const { membership, ...semanticFields } = fields
+    const publication = canonicalizePublication(rawMarkdown, semanticFields)
     const { metadata } = publication
     this.assertDocumentaryMetadata(metadata)
     if (authority) assertArtifactAgent(authority, this.store.repositoryId)
@@ -459,14 +484,14 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
       throw new Error('DELIVERY_CONTEXT_INVALID')
     }
     const receiptContext: PublicationReceiptContext | undefined = verifiedAnchor || authority?.sessionWitness
-      ? { ...(verifiedAnchor ? { deliveryContext: verifiedAnchor } : {}), ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
+      ? { ...(verifiedAnchor ? { deliveryContext: verifiedAnchor, activation: preparedAnchor && this.preparedMembership.get(preparedAnchor) } : {}), ...(authority?.sessionWitness ? { sessionWitness: authority.sessionWitness } : {}) }
       : undefined
     const provenance: Record<string, import('./continuum-types').MetadataValue> = {
       ...this.publicationProvenance(),
       ...(verifiedAnchor ? { deliveryContext: normalizeMetadataValue(verifiedAnchor) } : {}),
       ...(authority?.sessionWitness ? { sessionWitness: normalizeMetadataValue(authority.sessionWitness) } : {})
     }
-    const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance }, publicationRequestDigest('PUBLISH', { rawMarkdown, ...fields }), receiptContext))
+    const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance }, publicationRequestDigest('PUBLISH', { rawMarkdown, ...fields }), authority ? receiptContext : undefined, membership))
     this.changed()
     return receipt
   }
@@ -483,7 +508,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.changed()
     return receipt
   }
-  async updateAgent(authority: AgentAuthority, artifactId: string, expectedRevision: number, rawMarkdown: string, fields: ArtifactSemanticFields = {},
+  async updateAgent(authority: AgentAuthority, artifactId: string, expectedRevision: number, rawMarkdown: string, fields: ArtifactPublicationFields = {},
     lifecycle: Pick<LifecycleRequest, 'evidenceMode' | 'attestation' | 'evidenceRefs' | 'supportingArtifactId'> = { evidenceRefs: [] }, observeDelivery?: ObserveDelivery) {
     const assertContext = () => { this.assertActive(); assertArtifactAgent(authority, this.store.repositoryId) }
     assertContext(); this.reconcile?.(); assertContext()
@@ -492,9 +517,14 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     if (!prior) throw new Error('ARTIFACT_NOT_FOUND')
     const requestDigest = lifecycleDigest({ artifactId, expectedRevision, rawMarkdown, fields, lifecycle })
     const correction = prior.provenance.editorialCorrection as { requestDigest?: string } | undefined
-    if (correction?.requestDigest === requestDigest) return { ...this.receipt(prior), state: 'PERSISTED' as const, replayed: true, lifecycleReceipt: lifecycleReceipt(prior) }
+    if (correction?.requestDigest === requestDigest && prior.revision === expectedRevision + 1) {
+      const publicationReceipt = this.store.publicationReceiptAt(prior.artifactId, prior.revision, 'UPDATE')
+      const receipt = publicationReceipt ? this.publishedReceipt({ artifact: prior, publicationReceipt }) : this.receipt(prior)
+      return { ...receipt, state: 'PERSISTED' as const, replayed: true, lifecycleReceipt: lifecycleReceipt(prior) }
+    }
     if (prior.revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
-    const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
+    const { membership, ...semanticFields } = fields
+    const publication = canonicalizePublication(rawMarkdown, semanticFields, prior.metadata)
     this.assertDocumentaryMetadata(publication.metadata, prior.metadata)
     const policy = lifecyclePolicy(prior.metadata), nextPolicy = lifecyclePolicy(publication.metadata)
     const policyChanged = policy?.key !== nextPolicy?.key
@@ -522,22 +552,24 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
         if (!lifecycle.attestation) return automatic
         Object.assign(request, { evidenceMode: 'REVIEWED_ATTESTATION', evidenceRefs: [], attestation: lifecycle.attestation })
       }
-      const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext, authority, { rawMarkdown: publication.rawMarkdown, provenance }, receiptContext)
+      const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext, authority, { rawMarkdown: publication.rawMarkdown, provenance }, receiptContext, membership)
       if (result.state === 'PERSISTED' && !result.replayed) this.changed()
       return result
     }
     assertContext()
-    const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance }, requestDigest, receiptContext))
+    const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance }, requestDigest, receiptContext, membership))
     this.changed()
     return { ...receipt, state: 'PERSISTED' as const }
   }
-  repairMetadata(authority: AgentAuthority, artifactId: string, expectedRevision: number) {
+  async repairMetadata(authority: AgentAuthority, artifactId: string, expectedRevision: number, observeDelivery?: ObserveDelivery) {
     this.assertActive(); assertArtifactAgent(authority, this.store.repositoryId)
     const requestDigest = lifecycleDigest({ action: 'REPAIR', artifactId, expectedRevision })
     let current: Artifact | null = null
     try { current = this.store.get(artifactId) } catch { /* Canonical repair reads the immutable source even when the live projection cannot decode. */ }
     if ((current?.provenance.technicalRepair as { requestDigest?: string } | undefined)?.requestDigest === requestDigest) return { ...this.receipt(current!), state: 'PERSISTED' as const, replayed: true }
-    const receipt = this.publishedReceipt(this.store.repairPublished(artifactId, expectedRevision, requestDigest, authority.principal.principalId))
+    const receiptContext = current?.metadata.kind === 'EXECUTABLE_PLAN' ? undefined : await this.prepareAuthorityDelivery(authority, observeDelivery)
+    this.assertActive(); assertArtifactAgent(authority, this.store.repositoryId)
+    const receipt = this.publishedReceipt(this.store.repairPublished(artifactId, expectedRevision, requestDigest, authority.principal.principalId, receiptContext))
     this.changed()
     return { ...receipt, state: 'PERSISTED' as const }
   }
@@ -581,7 +613,8 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const artifact = this.store.get(artifactId)
     if (!artifact) return null
     const nativeArtifact = this.store.publicationProvenance(artifactId, artifact.revision)
-    return { ...artifact, ...(nativeArtifact ? { provenance: { ...artifact.provenance, nativeArtifact } } : {}), lifecycle: lifecycleProjection(artifact, lifecycleReceipt(artifact)),
+    const documentaryMembership = this.store.membershipAt(artifactId, artifact.revision)
+    return { ...artifact, ...(documentaryMembership ? { documentaryMembership } : {}), ...(nativeArtifact ? { provenance: { ...artifact.provenance, nativeArtifact } } : {}), lifecycle: lifecycleProjection(artifact, lifecycleReceipt(artifact)),
       operationalActivity: this.lifecycleDependencies.activity?.(this.store.repositoryId, artifactId) ?? { state: 'UNKNOWN', source: 'NO_ACTIVE_OPERATION_OBSERVED' } }
   }
   provenanceSnapshot(artifactId: string, revision?: number): Artifact | null {
@@ -609,6 +642,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   importArtifact(source: string, input: CreateArtifactInput): ArtifactReceipt {
     const existing = this.store.get(input.artifactId)
     if (!existing) {
+      if (input.provenance && ['executionIdentity', 'executionBranchBinding', 'deliveryContext', 'documentaryMembership'].some(key => Object.hasOwn(input.provenance!, key))) throw new Error('AUTHORITATIVE_METADATA_RESERVED')
       if (/^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown)) this.assertAgentTags(parseArtifactMarkdown(input.rawMarkdown, true).metadata)
       this.assertAgentTags(input.metadata)
     }
@@ -621,6 +655,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const source = 'inbox:' + envelope.repositoryKey
     if (envelope.protocol === 'continuum-artifact/v1') return this.importArtifact(source, legacyInput(envelope))
     const { metadata } = parseArtifactMarkdown(envelope.rawMarkdown)
+    if (!this.store.get(envelope.artifactId)) this.assertDocumentaryMetadata(metadata)
     return this.importArtifact(source, { artifactId: envelope.artifactId, rawMarkdown: envelope.rawMarkdown, metadata,
       createdAt: envelope.createdAt, contentHash: envelope.contentHash })
   }

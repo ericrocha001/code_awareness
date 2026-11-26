@@ -8,7 +8,7 @@ import { visualMarkdown } from './artifact-metadata'
 import { publicationFields } from './artifact-publication'
 import { navigationQuery } from './artifact-navigation'
 import { countCanonicalTokens } from '../core/tokenizer'
-import { CONTINUUM_AGENT_TOOLS, parseAgentArtifactUpdate } from './continuum-agent'
+import { CONTINUUM_AGENT_TOOLS, documentaryTargetSchema, parseAgentArtifactUpdate } from './continuum-agent'
 import { assertArtifactAgent, type AgentAuthority } from './agent-authority'
 import type { IArtifactStructureReader } from './continuum-types'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
@@ -40,9 +40,11 @@ export function executeArtifactNavigation(service: IArtifactStructureReader, nam
   catch (error) { return failure(error) }
 }
 const semanticFields = { kind: { ...string, description: 'Explicit semantic kind; open vocabulary. Required for body-only generic publication, never inferred from words.' }, name: { ...string, description: 'Only needed when a unique document title cannot supply the name.' }, description: { ...string, description: 'Only needed when an explicit introductory sentence cannot supply the description.' } }
-export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown to the active repository Continuum. Legacy YAML is preserved literally. Body-only publication derives name from a unique document title and description from a plain introductory sentence (24–512 characters); select kind explicitly. Missing or ambiguous semantics return MISSING_SEMANTIC_FIELD. Returns a compact receipt. After an implementation Handoff is persisted, use assess_execution_closure for its explicit planArtifactId when available; diagnosis never revokes persistence. Another repository requires switching the active context.', { rawMarkdown: string, ...semanticFields }, ['rawMarkdown'])
+const documentaryTarget = { type: 'object', additionalProperties: false, required: ['planArtifactId', 'expectedPlanRevision'], properties: { planArtifactId: string, expectedPlanRevision: { type: 'integer', minimum: 1 } } }
+export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown to the active repository Continuum. Legacy YAML is preserved literally. Body-only publication derives name from a unique document title and description from a plain introductory sentence (24–512 characters); select kind explicitly. Missing or ambiguous semantics return MISSING_SEMANTIC_FIELD. Returns a compact receipt. After an implementation Handoff is persisted, use assess_execution_closure for its explicit planArtifactId when available; diagnosis never revokes persistence. Another repository requires switching the active context.', { rawMarkdown: string, ...semanticFields, membership: documentaryTarget }, ['rawMarkdown'])
 const transitionProperties = CONTINUUM_AGENT_TOOLS.find(tool => tool.name === 'transition_artifact_lifecycle')!.inputSchema.properties as Record<string, unknown>
 export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Authenticated delegated editing of all editorial metadata including status, tags and automation corrections, with one atomic CAS revision and receipts; no desktop confirmation. Legacy YAML replaces metadata literally. Technical identity, hashes and native provenance use repair_artifact_metadata, never invented YAML. Status uses canonical lifecycle internally; when automatic evidence is insufficient, supply honest contextual lifecycle.attestation. Reread on conflict.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string, ...semanticFields,
+  membership: { type: 'object', oneOf: [documentaryTarget, { type: 'object', additionalProperties: false, required: ['action', 'reason'], properties: { action: { const: 'UNLINK' }, reason: string } }] },
   lifecycle: { type: 'object', additionalProperties: false, properties: Object.fromEntries(['evidenceMode', 'attestation', 'evidenceRefs', 'supportingArtifactId'].map(key => [key, transitionProperties[key]])) }
 }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
 export async function executeAgentUpdateArtifact(
@@ -108,7 +110,10 @@ export function executePublishArtifact(
   authority?: AgentAuthority,
   anchor?: import('../../shared/types/delivery-context-types').DeliveryAnchor
 ): McpToolResult<McpTextContent> {
-  try { const { rawMarkdown, ...fields } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string, publicationFields(fields), authority, anchor)) } catch (error) { return failure(error) }
+  try {
+    const { rawMarkdown, membership, ...fields } = argsFor(PUBLISH_ARTIFACT_TOOL, args)
+    return ok(service.publish(rawMarkdown as string, { ...publicationFields(fields), ...(membership === undefined ? {} : { membership: documentaryTargetSchema.parse(membership) }) }, authority, anchor))
+  } catch (error) { return failure(error) }
 }
 export function executeUpdateArtifact(service: IContinuumService, args: unknown): McpToolResult<McpTextContent> {
   try {

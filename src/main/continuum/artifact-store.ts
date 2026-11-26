@@ -1,7 +1,7 @@
 import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
 import { PublicationReceipts, type PublicationReceiptContext } from './publication-receipts'
 import { PublicationAssociations } from './publication-associations'
-import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
+import type { DocumentaryMembership, DocumentaryMembershipIntent, PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
 import { artifactTags, quickTag, tagDescription, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -67,20 +67,137 @@ export class ArtifactStore {
       contentHash: row.content_hash }
   }
   readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
+  publicationReceiptAt(artifactId: string, revision: number, action: 'PUBLISH' | 'UPDATE') {
+    return this.publicationReceipts.atRevision(artifactId, revision, action)
+  }
+  private revisionHeader(artifactId: string, revision: number) {
+    return this.db.prepare(`SELECT json_extract(snapshot_json, '$.contentHash') AS hash,
+      json_extract(snapshot_json, '$.metadata') AS metadata,
+      json_extract(snapshot_json, '$.provenance.executionBranchBinding') AS binding
+      FROM artifact_revisions WHERE artifact_id = ? AND revision = ?`).get(artifactId, revision) as
+      { hash: string; metadata: string; binding: number | null } | undefined
+  }
+  private describeMembership(receipt: import('./continuum-types').PublicationReceipt | null): DocumentaryMembership | null {
+    if (!receipt?.documentaryMembership || !receipt.deliveryContext) return null
+    const anchor = receipt.deliveryContext
+    const document = this.revisionHeader(receipt.artifactId, receipt.revision)
+    const plan = this.revisionHeader(anchor.planArtifactId, anchor.planRevision)
+    const binding = this.revisionHeader(anchor.bindingArtifactId, anchor.bindingRevision)
+    if (!document || document.hash !== receipt.contentHash || !plan || plan.hash !== anchor.planDigest ||
+      !binding || binding.hash !== anchor.bindingDigest || binding.binding !== 1) throw new Error('MEMBERSHIP_RECEIPT_INTEGRITY')
+    const planMetadata = JSON.parse(plan.metadata) as Artifact['metadata']
+    const bindingMetadata = JSON.parse(binding.metadata) as Artifact['metadata']
+    const metadata = JSON.parse(document.metadata) as Artifact['metadata']
+    const targets = relationsOf(metadata).filter(relation => relation.kind === 'implements')
+    if (planMetadata.kind !== 'EXECUTABLE_PLAN' || metadata.kind === 'EXECUTABLE_PLAN' ||
+      this.getExecutionIdentity(anchor.planArtifactId)?.executionId !== anchor.executionId ||
+      this.db.prepare('SELECT 1 FROM execution_identities WHERE execution_id = ? AND artifact_id <> ?').get(anchor.executionId, anchor.planArtifactId) ||
+      bindingMetadata.repositoryId !== this.repositoryId || bindingMetadata.sourceArtifactId !== anchor.planArtifactId ||
+      bindingMetadata.executionId !== anchor.executionId || bindingMetadata.bindingRole !== 'EXECUTION_BRANCH' ||
+      bindingMetadata.worktreeId !== anchor.snapshot.worktreeId || bindingMetadata.worktreeGeneration !== anchor.snapshot.worktreeGeneration ||
+      bindingMetadata.branchRef !== anchor.snapshot.branchRef || bindingMetadata.branchGeneration !== anchor.snapshot.branchGeneration ||
+      targets.length > 1 || targets.some(target => target.artifactId !== anchor.planArtifactId) ||
+      receipt.documentaryMembership === 'HANDOFF_IMPLEMENTS' && (metadata.kind !== 'IMPLEMENTATION_HANDOFF' || targets.length !== 1)) throw new Error('MEMBERSHIP_RECEIPT_INTEGRITY')
+    return { repositoryId: this.repositoryId, artifactId: receipt.artifactId, revision: receipt.revision, contentHash: receipt.contentHash,
+      executionId: anchor.executionId, planArtifactId: anchor.planArtifactId, planRevision: anchor.planRevision, planDigest: anchor.planDigest,
+      bindingArtifactId: anchor.bindingArtifactId, bindingRevision: anchor.bindingRevision, bindingDigest: anchor.bindingDigest,
+      evidenceRef: receipt.receiptId, digest: receipt.digest, intent: receipt.documentaryMembership, classification: 'VERIFIED' as const }
+  }
+  membershipAt(artifactId: string, revision?: number) {
+    const currentRevision = revision ?? (this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id = ?').get(artifactId) as { revision: number } | undefined)?.revision
+    return currentRevision === undefined ? null : this.describeMembership(this.publicationReceipts.membershipAt(artifactId, currentRevision))
+  }
+  executionRoot(executionId: string) {
+    const rows = this.db.prepare('SELECT artifact_id, assigned_revision FROM execution_identities WHERE execution_id = ? LIMIT 2')
+      .all(executionId) as Array<{ artifact_id: string; assigned_revision: number }>
+    if (rows.length !== 1) return null
+    const row = rows[0]!
+    const header = this.revisionHeader(row.artifact_id, row.assigned_revision)
+    if (!header || JSON.parse(header.metadata).kind !== 'EXECUTABLE_PLAN') return null
+    return { executionId, artifactId: row.artifact_id, revision: row.assigned_revision,
+      contentHash: header.hash, evidenceRef: row.artifact_id + ':' + row.assigned_revision, classification: 'VERIFIED' as const }
+  }
+  membershipSelection(artifactId: string, revision?: number) {
+    const current = this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id = ?').get(artifactId) as { revision: number } | undefined
+    const selected = revision ?? current?.revision
+    if (selected === undefined || !this.revisionHeader(artifactId, selected)) throw new Error('ARTIFACT_REVISION_NOT_FOUND')
+    const membership = this.membershipAt(artifactId, selected)
+    const identity = this.getExecutionIdentity(artifactId)
+    const root = identity && identity.assignedRevision === selected ? this.executionRoot(identity.executionId) : null
+    return { artifactId, revision: selected, membership, root, coverage: 'COMPLETE' as const,
+      ...(!membership && !root ? { reason: 'NO_VERIFIED_MEMBERSHIP_FOR_REVISION' } : {}) }
+  }
+  executionMembers(executionId: string, limit = 20, cursor?: string) {
+    const bounded = Math.max(1, Math.min(50, limit))
+    const prefix = computeContentHash(JSON.stringify([this.repositoryId, executionId, bounded])).slice(0, 16) + ':'
+    if (cursor && (!cursor.startsWith(prefix) || !/^\d+$/.test(cursor.slice(prefix.length)))) throw new Error('INVALID_MEMBERSHIP_CURSOR')
+    const root = this.executionRoot(executionId)
+    if (!root) return { root, members: [], coverage: 'PARTIAL', reason: 'CANONICAL_EXECUTION_UNAVAILABLE' }
+    const rows = this.publicationReceipts.membershipRows(executionId, cursor ? Number(cursor.slice(prefix.length)) : 0, bounded + 1)
+    const page = rows.slice(0, bounded)
+    const members = page.map(row => this.describeMembership(this.publicationReceipts.read(row.receipt_id, true)))
+    return { root, members, coverage: rows.length > bounded ? 'PARTIAL' : 'COMPLETE',
+      ...(rows.length > bounded ? { nextCursor: prefix + page.at(-1)!.rowid } : {}) }
+  }
   publicationDeliveryPage(after?: string, limit?: number, filter?: import('../../shared/types/delivery-context-types').DeliveryProjectionFilter) { return this.publicationReceipts.deliveryPage(after, limit, filter) }
-  createPublished(input: CreateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext) {
+  private qualifyPublication(metadata: Artifact['metadata'], context?: PublicationReceiptContext, intent?: DocumentaryMembershipIntent, prior?: Artifact | null): PublicationReceiptContext | undefined {
+    const anchor = context?.deliveryContext
+    const previous = prior ? this.publicationReceipts.latestMembershipEvent(prior.artifactId) : null
+    const origin = previous?.documentaryMembership ? previous.deliveryContext : undefined
+    const implementsTargets = (value: Artifact['metadata']) => relationsOf(value).filter(relation => relation.kind === 'implements').map(relation => relation.artifactId)
+    const targets = implementsTargets(metadata)
+    const sameOrigin = Boolean(origin && anchor && origin.planArtifactId === anchor.planArtifactId && origin.executionId === anchor.executionId)
+    const assertAnchor = () => {
+      if (!anchor || anchor.repositoryId !== this.repositoryId) throw new Error('MEMBERSHIP_AUTHORITY_REQUIRED')
+      const plan = this.get(anchor.planArtifactId), binding = this.get(anchor.bindingArtifactId)
+      if (!plan || !binding || plan.metadata.kind !== 'EXECUTABLE_PLAN' || binding.provenance.executionBranchBinding !== true ||
+        binding.metadata.sourceArtifactId !== plan.artifactId || binding.metadata.executionId !== anchor.executionId ||
+        this.resolvePlanExecutionId(plan) !== anchor.executionId) throw new Error('MEMBERSHIP_SOURCE_MISMATCH')
+      const activation = this.getActiveActivation(anchor.snapshot.worktreeId)
+      if (!activation || activation.activationId !== context?.activation?.id || activation.revision !== context.activation.revision ||
+        activation.executionId !== anchor.executionId || activation.planArtifactId !== plan.artifactId ||
+        activation.bindingArtifactId !== binding.artifactId || activation.repositoryId !== this.repositoryId ||
+        activation.worktreeGeneration !== anchor.snapshot.worktreeGeneration || activation.branchRef !== anchor.snapshot.branchRef ||
+        activation.branchGeneration !== anchor.snapshot.branchGeneration) throw new Error('MEMBERSHIP_ACTIVATION_INVALID')
+      if (plan.revision !== anchor.planRevision || plan.contentHash !== anchor.planDigest ||
+        binding.revision !== anchor.bindingRevision || binding.contentHash !== anchor.bindingDigest ||
+        activation.planRevision !== anchor.planRevision || activation.planContentHash !== anchor.planDigest ||
+        activation.bindingRevision !== anchor.bindingRevision || activation.bindingContentHash !== anchor.bindingDigest) throw new Error('MEMBERSHIP_CONTEXT_STALE')
+    }
+    if (intent && 'action' in intent) {
+      if (!sameOrigin || !intent.reason.trim()) throw new Error('MEMBERSHIP_ORIGIN_REQUIRED')
+      assertAnchor()
+      return { ...context, documentaryUnlinkReason: intent.reason }
+    }
+    const changedTarget = prior && (prior.metadata.kind !== metadata.kind || JSON.stringify(implementsTargets(prior.metadata)) !== JSON.stringify(targets))
+    if (origin && changedTarget && !(sameOrigin && intent)) {
+      throw new Error('MEMBERSHIP_UNLINK_REQUIRED')
+    }
+    if (origin && !sameOrigin && intent) throw new Error('MEMBERSHIP_ORIGIN_REQUIRED')
+    if (origin && !sameOrigin) return context
+    const handoffIntent = metadata.kind === 'IMPLEMENTATION_HANDOFF' && targets.length > 0 && Boolean(anchor) && (!prior || changedTarget)
+    const kind = intent ? 'EXPLICIT_TARGET' : previous?.documentaryMembership ?? (handoffIntent ? 'HANDOFF_IMPLEMENTS' : undefined)
+    if (!kind) return context
+    assertAnchor()
+    if (metadata.kind === 'EXECUTABLE_PLAN' || targets.length > 1 || targets.some(target => target !== anchor!.planArtifactId) ||
+      (intent && (intent.planArtifactId !== anchor!.planArtifactId || intent.expectedPlanRevision !== anchor!.planRevision))) throw new Error('MEMBERSHIP_TARGET_CONFLICT')
+    return { ...context, documentaryMembership: kind }
+  }
+  createPublished(input: CreateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext, intent?: DocumentaryMembershipIntent) {
     return this.db.transaction(() => {
+      const context = this.qualifyPublication(input.metadata, receiptContext, intent)
       const artifact = this.createInsideTransaction(input)
-      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest, receiptContext) }
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest, context) }
     }).immediate()
   }
-  updatePublished(input: UpdateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext) {
+  updatePublished(input: UpdateArtifactInput, requestDigest: string, receiptContext?: PublicationReceiptContext, intent?: DocumentaryMembershipIntent) {
     return this.db.transaction(() => {
+      const context = this.qualifyPublication(input.metadata, receiptContext, intent, this.get(input.artifactId))
       const artifact = this.update(input)
-      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest, receiptContext) }
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest, context) }
     }).immediate()
   }
-  repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string) {
+  repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string, receiptContext?: PublicationReceiptContext) {
     return this.db.transaction(() => {
       const current = this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id=?').get(artifactId) as { revision: number } | undefined
       if (!current) throw new Error('ARTIFACT_NOT_FOUND')
@@ -91,16 +208,19 @@ export class ArtifactStore {
       if (!initial) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
       const metadata = /^(?:\uFEFF)?---\r?\n/.test(canonical.rawMarkdown) ? parseArtifactMarkdown(canonical.rawMarkdown, true).metadata : canonical.metadata
       if (canonical.metadata.kind === 'VISUAL_REFERENCE') metadata.media = canonical.metadata.media
+      const context = this.qualifyPublication(metadata, receiptContext, undefined, canonical)
       this.db.prepare(`UPDATE artifacts SET revision=?, metadata_json=?, name=?, description=?, kind=?, status=?, created_at=?, updated_at=?, raw_markdown=?, content_hash=?, provenance_json=? WHERE artifact_id=? AND revision=?`)
         .run(canonical.revision, JSON.stringify(metadata), metadata.name, metadata.description ?? null, metadata.kind, metadata.status ?? null, initial.createdAt, canonical.updatedAt,
           canonical.rawMarkdown, computeContentHash(canonical.rawMarkdown), JSON.stringify(canonical.provenance), artifactId, expectedRevision)
       if (canonical.metadata.kind === 'VISUAL_REFERENCE') this.getVisual(artifactId)
-      const provenance = { ...canonical.provenance, technicalRepair: { principalId, requestDigest, source: 'IMMUTABLE_REVISION', sourceRevision: canonical.revision, sourceContentHash: canonical.contentHash } }
+      const { deliveryContext: _anchor, sessionWitness: _witness, ...canonicalProvenance } = canonical.provenance
+      const provenance = { ...canonicalProvenance, ...(context?.deliveryContext ? { deliveryContext: normalizeMetadataValue(context.deliveryContext) } : {}),
+        technicalRepair: { principalId, requestDigest, source: 'IMMUTABLE_REVISION', sourceRevision: canonical.revision, sourceContentHash: canonical.contentHash } }
       const artifact: Artifact = { ...canonical, metadata, createdAt: initial.createdAt, revision: canonical.revision + 1,
         updatedAt: new Date(Math.max(Date.now(), Date.parse(canonical.updatedAt) + 1)).toISOString(), contentHash: computeContentHash(canonical.rawMarkdown), provenance }
       this.db.prepare('UPDATE artifacts SET revision=?, updated_at=?, provenance_json=? WHERE artifact_id=?').run(artifact.revision, artifact.updatedAt, JSON.stringify(provenance), artifactId)
       this.writeIndexes(artifact)
-      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest, context) }
     }).immediate()
   }
   createVisualPublished(input: CreateArtifactInput, data: Buffer, media: VisualMedia, requestDigest: string) {
@@ -373,8 +493,11 @@ export class ArtifactStore {
     const identity = this.getExecutionIdentity(artifact.artifactId)
     const declared = typeof artifact.metadata.executionId === 'string' && artifact.metadata.executionId.trim()
       ? artifact.metadata.executionId.trim() : undefined
-    if (identity && declared && identity.executionId !== declared) throw new Error('EXECUTION_SOURCE_MISMATCH')
-    return identity?.executionId ?? declared
+    if (identity?.source === 'PLAN_METADATA' && declared && identity.executionId !== declared) throw new Error('EXECUTION_SOURCE_MISMATCH')
+    if (identity && this.db.prepare('SELECT 1 FROM execution_identities WHERE execution_id = ? AND artifact_id <> ?').get(identity.executionId, artifact.artifactId)) {
+      throw new Error('EXECUTION_IDENTITY_CONFLICT')
+    }
+    return identity?.executionId
   }
 
   outline(artifact: Artifact): OutlineSection[] {
@@ -554,17 +677,14 @@ export class ArtifactStore {
         throw new ArtifactRevisionConflictError(plan.artifactId, plan.revision)
       }
       const existingIdentity = this.getExecutionIdentity(plan.artifactId)
-      const declared = typeof plan.metadata.executionId === 'string' && plan.metadata.executionId.trim()
-        ? plan.metadata.executionId.trim() : undefined
-      if (existingIdentity && declared && existingIdentity.executionId !== declared) throw new Error('EXECUTION_SOURCE_MISMATCH')
-      const knownId = existingIdentity?.executionId ?? declared
+      const knownId = this.resolvePlanExecutionId(plan)
       if (input.executionId !== undefined && input.executionId !== knownId) throw new Error('EXECUTION_SOURCE_MISMATCH')
       if (input.activate === false && !knownId) throw new Error('EXECUTION_SOURCE_MISMATCH')
       const now = new Date().toISOString()
       const executionId = knownId ?? ('exec-' + randomUUID())
       if (!existingIdentity) {
         this.db.prepare('INSERT INTO execution_identities(artifact_id, execution_id, assigned_revision, source, created_at) VALUES (?, ?, ?, ?, ?)')
-          .run(plan.artifactId, executionId, plan.revision, declared ? 'PLAN_METADATA' : 'BACKEND_ASSIGNED', now)
+          .run(plan.artifactId, executionId, plan.revision, 'BACKEND_ASSIGNED', now)
       }
       const bindingInput = input.buildBinding(executionId, plan)
       if (bindingInput.metadata.repositoryId !== this.repositoryId || bindingInput.metadata.executionId !== executionId || bindingInput.metadata.sourceArtifactId !== plan.artifactId) {
@@ -663,10 +783,11 @@ export class ArtifactStore {
       const checked = this.validate(input, false, visual)
       if (visual) checked.metadata = { ...checked.metadata, media: current.metadata.media }
       const existingIdentity = this.getExecutionIdentity(input.artifactId)
-      if (existingIdentity && checked.metadata.executionId !== undefined && checked.metadata.executionId !== existingIdentity.executionId) {
+      if (existingIdentity && checked.metadata.kind !== 'EXECUTABLE_PLAN' ||
+        existingIdentity?.source === 'PLAN_METADATA' && checked.metadata.executionId !== undefined && checked.metadata.executionId !== existingIdentity.executionId) {
         throw new Error('EXECUTION_SOURCE_MISMATCH')
       }
-      const { executionIdentity: _omittedIdentity, ...currentProvenance } = current.provenance
+      const { executionIdentity: _omittedIdentity, deliveryContext: _anchor, sessionWitness: _witness, ...currentProvenance } = current.provenance
       const artifact: Artifact = { ...current, metadata: checked.metadata, rawMarkdown: checked.rawMarkdown,
         provenance: { ...currentProvenance, ...input.provenance },
         revision: current.revision + 1, updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString(),

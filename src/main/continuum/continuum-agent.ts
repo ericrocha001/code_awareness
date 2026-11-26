@@ -8,6 +8,8 @@ import { assertArtifactAgent, type AgentAuthority } from './agent-authority'
 const name = z.string().trim().min(1).max(80)
 const selection = z.array(z.object({ artifactId: z.string().min(1).max(200), expectedRevision: z.number().int().positive() }).strict()).length(1)
 const identifier = z.string().trim().min(1).max(200)
+export const documentaryTargetSchema = z.object({ planArtifactId: identifier, expectedPlanRevision: z.number().int().positive() }).strict()
+const documentaryIntentSchema = z.union([documentaryTargetSchema, z.object({ action: z.literal('UNLINK'), reason: z.string().trim().min(1).max(1000) }).strict()])
 const attestationSchema = z.object({
   rationale: z.string().trim().min(1).max(1000), limitations: z.string().trim().min(1).max(1000),
   references: z.array(z.discriminatedUnion('type', [
@@ -17,7 +19,7 @@ const attestationSchema = z.object({
 }).strict()
 export const lifecycleEditSchema = z.object({ evidenceMode: z.enum(['AUTO_VERIFIED', 'REVIEWED_ATTESTATION']).optional(), attestation: attestationSchema.optional(), evidenceRefs: z.array(identifier).max(10).default([]), supportingArtifactId: identifier.optional() }).strict()
 export function parseAgentArtifactUpdate(input: unknown) {
-  return z.object({ artifactId: identifier, expectedRevision: z.number().int().positive(), rawMarkdown: z.string().min(1), name: z.string().min(1).optional(), description: z.string().min(1).optional(), kind: z.string().min(1).optional(), lifecycle: lifecycleEditSchema.optional() }).strict().parse(input)
+  return z.object({ artifactId: identifier, expectedRevision: z.number().int().positive(), rawMarkdown: z.string().min(1), name: z.string().min(1).optional(), description: z.string().min(1).optional(), kind: z.string().min(1).optional(), membership: documentaryIntentSchema.optional(), lifecycle: lifecycleEditSchema.optional() }).strict().parse(input)
 }
 const schemas = {
   repair_artifact_metadata: z.object({ artifactId: identifier, expectedRevision: z.number().int().positive() }).strict(),
@@ -78,7 +80,7 @@ export async function executeContinuumAgent(
     if (!service.repairMetadata) throw new Error('CANONICAL_PRODUCER_UNAVAILABLE')
     assertArtifactAgent(authority, authority?.repositoryId ?? '')
     const request = args as z.infer<typeof schemas.repair_artifact_metadata>
-    return service.repairMetadata(authority, request.artifactId, request.expectedRevision)
+    return service.repairMetadata(authority, request.artifactId, request.expectedRevision, observeDelivery)
   }
   if (operation === 'transition_artifact_lifecycle') {
     if (!service.transitionLifecycle) throw new Error('LIFECYCLE_SERVICE_UNAVAILABLE')

@@ -235,9 +235,9 @@ export class ValidationLedger {
     }).immediate()
   }
 
-  lookupReceiptProof(input: RecordProofInput): ValidationProof | null {
+  lookupReceiptProof(input: RecordProofInput, historical?: (proof: ValidationProof) => RecordProofInput): ValidationProof | null {
     const proof = input.deduplicationKey ? this.getProofByDeduplicationKey(input.deduplicationKey) : null
-    if (proof) this.assertReceiptProof(input, proof)
+    if (proof) this.assertReceiptProof(historical ? historical(proof) : input, proof)
     return proof
   }
 

@@ -85,18 +85,17 @@ describe('Code Provenance Intelligence — U1-U4 integrated MCP HTTP/AJV accepta
     const baseAuthority = authorizeArtifactAgent(principal, repositoryId, () => true)
 
     // Publish Plan & bind execution
-    const executionId = 'exec-cpi-e2e-1'
     const plan = continuum.publish(
-      `---\nname: "CPI E2E Plan"\ndescription: "Literal decision rationale for CPI feature."\nkind: EXECUTABLE_PLAN\nstatus: PENDING\nexecutionId: ${executionId}\n---\n\n# CPI E2E Plan\n\n## Decision\nUse selective delivery lookup without draining global backlog.\n`,
+      `---\nname: "CPI E2E Plan"\ndescription: "Literal decision rationale for CPI feature."\nkind: EXECUTABLE_PLAN\nstatus: PENDING\n---\n\n# CPI E2E Plan\n\n## Decision\nUse selective delivery lookup without draining global backlog.\n`,
       undefined,
       baseAuthority
     )
     const snapshot = await gitOps.deliverySnapshot()
-    const binding = await continuum.bindExecutionBranch(
-      executionId,
-      plan.artifactId,
+    const binding = await continuum.bootstrapExecution(
+      { planArtifactId: plan.artifactId },
       () => gitOps.deliverySnapshot()
     )
+    const { executionId } = binding
     const deliveryRequest = {
       bindingArtifactId: binding.artifactId,
       bindingRevision: binding.revision,

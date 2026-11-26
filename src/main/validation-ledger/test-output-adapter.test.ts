@@ -47,6 +47,7 @@ function fixture() {
     await host.start(); cleanup.push(() => host.dispose())
   }
   return { directory, root, profile, session, git, start, stop: () => host.dispose(), ledger: () => ledger,
+    dropResponse: () => { for (const socket of host['sockets']) socket.destroy() },
     restart: () => { ledger.close(); ledger = new ValidationLedger(db) } }
 }
 const association = { kind: 'TARGETED_TEST', scope: ['test.cjs'], evidenceFor: ['plan'] }
@@ -115,31 +116,68 @@ it('no tests, source drift, foreign checkout and launch failure cannot produce a
 }, 60000)
 
 
-it('isolates validation from a slow global status and recovers a persisted receipt after the response deadline', async () => {
+it('recovers a governed SQLite commit after losing the IPC response and after rebinding the Worktree', async () => {
   const f = fixture()
+  const service = f.session.getActiveService()!
+  const plan = service.publish('# Test plan A\n\nExercise recovery through a real binding.', { kind: 'EXECUTABLE_PLAN' })
   let registrations = 0, lookups = 0, statuses = 0
+  let dropBeforeWrite = false
   await f.start((validation, continuum) => {
     Object.assign(continuum, { status: { execute: () => { statuses++; return new Promise(() => {}) } } })
     const register = validation.register, lookup = validation.lookup
     Object.assign(validation, {
       register: { execute: async (...args: Parameters<typeof register.execute>) => {
         registrations++
-        await register.execute(...args)
-        return new Promise(() => {})
+        if (!dropBeforeWrite) await register.execute(...args)
+        f.dropResponse()
       } },
       lookup: { execute: (...args: Parameters<typeof lookup.execute>) => { lookups++; return lookup.execute(...args) } }
     })
   })
-  const receipt = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile, association })
+  const connection = await validationConnection(f.root, f.profile)
+  const descriptor = readDescriptor(f.profile, { directory: 'local-agent-channel', protocol: 'code-awareness-local/v1' })
+  const bind = (planArtifactId: string) => connect(descriptor, { domain: 'continuum', action: 'bind_execution', args: {
+    repositoryId: connection.identity.repositoryId, worktreeId: connection.identity.worktreeId,
+    worktreeGeneration: connection.identity.generation, sourceArtifactId: planArtifactId
+  } })
+  const { deliveryContext } = await bind(plan.artifactId)
+  const receipt = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile, deliveryContext })
   expect(receipt.registration).toMatchObject({ state: 'PERSISTED', trust: 'EXECUTOR_REPORTED', freshness: 'UNVERIFIABLE' })
   expect(statuses).toBe(0)
   expect(registrations).toBe(1)
   expect(lookups).toBe(1)
-  const connection = await validationConnection(f.root, f.profile)
+  const proof = f.ledger().getProof(receipt.registration.proofId)!
+  expect(proof.commandProfile?.deliveryContext).toMatchObject(deliveryContext)
+  expect(proof.evidenceFor).toEqual([plan.artifactId])
+  service.revokeExecutionActivation({ worktreeId: connection.identity.worktreeId, executionId: deliveryContext.executionId })
+  const other = service.publish('# Test plan B\n\nExercise recovery after an activation change.', { kind: 'EXECUTABLE_PLAN' })
+  const nextBinding = await bind(other.artifactId)
+  const prepare = vi.spyOn(service, 'prepareDeliveryContext')
+  const resolveContext = vi.spyOn(service, 'resolveExecutionContext')
+  const recovered = { state: 'PERSISTED', proofId: proof.proofId, evidenceFor: [plan.artifactId] }
+  expect(await connection.lookup(receipt.id, receipt.digest)).toMatchObject(recovered)
+  expect(await registerReceipt(receipt.id, { cwd: f.root, profile: f.profile })).toMatchObject(recovered)
   expect(await connection.lookup(receipt.id, receipt.digest, { ...association, evidenceFor: ['other'] })).toMatchObject({ state: 'AMBIGUOUS' })
+  expect(await connection.lookup(receipt.id, receipt.digest, undefined, { ...deliveryContext, executionId: 'execution-wrong' })).toMatchObject({ state: 'AMBIGUOUS' })
+  expect(await connect(descriptor, { domain: 'validation', action: 'lookup', args: {
+    ...connection.identity, cwd: f.root, receiptId: receipt.id, digest: receipt.digest, sessionWitness: { provider: 'codex', sessionId: 'different-witness' }
+  } })).toMatchObject({ state: 'AMBIGUOUS' })
   expect(await connection.lookup(receipt.id, 'a'.repeat(64))).toMatchObject({ state: 'SOURCE_CHANGED' })
-  expect(await f.ledger().listProofs({ requirementId: 'plan' })).toHaveLength(1)
-}, 60000)
+  expect(prepare).not.toHaveBeenCalled()
+  expect(resolveContext).not.toHaveBeenCalled()
+  expect(await f.ledger().listProofs()).toHaveLength(1)
+
+  dropBeforeWrite = true
+  const next = await runner.run(node, ['--test', '--test-reporter=tap', 'test.cjs'], { cwd: f.root, profile: f.profile, deliveryContext: nextBinding.deliveryContext })
+  expect(next.registration).toMatchObject({ state: 'REGISTRATION_PENDING', reason: 'IPC_CLOSED', recovery: { state: 'NOT_FOUND' } })
+  expect(await f.ledger().listProofs()).toHaveLength(1)
+  dropBeforeWrite = false
+  f.stop(); f.restart(); await f.start()
+  const repaired = await reconcileReceipts({ id: next.id, cwd: f.root, profile: f.profile })
+  expect(repaired.reconciled).toMatchObject([{ id: next.id, state: 'PERSISTED' }])
+  expect(f.ledger().getProof(repaired.reconciled[0].proofId)?.commandProfile?.deliveryContext).toMatchObject(nextBinding.deliveryContext)
+  expect(await f.ledger().listProofs()).toHaveLength(2)
+}, 120000)
 
 it('captures only the selected worktree and keeps full dirty and index evidence', async () => {
   const f = fixture()

@@ -101,13 +101,14 @@ async function attestationSourcesCurrent(receipt: LifecycleReceipt, dependencies
 
 export async function transitionLifecycle(store: ArtifactStore, dependencies: LifecycleDependencies, request: LifecycleRequest, assertContext: () => void,
   authority?: AgentAuthority, publication?: { rawMarkdown: string; provenance: Artifact['provenance'] },
-  receiptContext?: import('./publication-receipts').PublicationReceiptContext) {
+  receiptContext?: import('./publication-receipts').PublicationReceiptContext,
+  membership?: import('../../shared/types/publication-provenance-types').DocumentaryMembershipIntent) {
   assertContext()
   if (authority) assertArtifactAgent(authority, store.repositoryId)
   const current = store.get(request.artifactId)
   if (!current) throw new Error('ARTIFACT_NOT_FOUND')
   const { action: _action, ...intent } = request
-  const requestDigest = lifecycleDigest({ ...Object.fromEntries(Object.entries(intent).filter(([, value]) => value !== undefined)), ...(publication ? { proposedContentHash: lifecycleDigest(publication.rawMarkdown) } : {}) })
+  const requestDigest = lifecycleDigest({ ...Object.fromEntries(Object.entries(intent).filter(([, value]) => value !== undefined)), ...(publication ? { proposedContentHash: lifecycleDigest(publication.rawMarkdown) } : {}), ...(membership ? { membership } : {}) })
   const priorReceipt = lifecycleReceipt(current)
   if (request.action === 'TRANSITION' && priorReceipt?.requestDigest === requestDigest) return { state: 'PERSISTED' as const, replayed: true, artifactId: current.artifactId, revision: current.revision, lifecycleReceipt: priorReceipt }
   if (current.revision !== request.expectedRevision) throw new ArtifactRevisionConflictError(current.artifactId, current.revision)
@@ -221,7 +222,7 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
     revision: current.revision + 1, contentHash: createHash('sha256').update(rawMarkdown).digest('hex') }
   const receipt: LifecycleReceipt = { ...receiptBody, digest: lifecycleDigest(receiptBody) }
   const published = store.updatePublished({ artifactId: current.artifactId, expectedRevision: current.revision, rawMarkdown, metadata: parseArtifactMarkdown(rawMarkdown, true).metadata,
-    provenance: { ...publication?.provenance, ...(receiptContext?.deliveryContext ? { deliveryContext: normalizeMetadataValue(receiptContext.deliveryContext) } : {}), lifecycle: normalizeMetadataValue(receipt) } }, requestDigest, receiptContext)
+    provenance: { ...publication?.provenance, ...(receiptContext?.deliveryContext ? { deliveryContext: normalizeMetadataValue(receiptContext.deliveryContext) } : {}), lifecycle: normalizeMetadataValue(receipt) } }, requestDigest, receiptContext, membership)
   if (!lifecycleReceipt(published.artifact)) throw new Error('LIFECYCLE_READBACK_INTEGRITY')
   return { state: 'PERSISTED' as const, replayed: false, artifactId: current.artifactId, revision: published.artifact.revision, lifecycleReceipt: receipt, publicationReceipt: published.publicationReceipt }
 }

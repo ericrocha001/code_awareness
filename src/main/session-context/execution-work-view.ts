@@ -39,7 +39,7 @@ function pathsFrom(graph: Graph, root: string, depth: number, allowArtifactMetad
   return paths
 }
 
-const confidenceRank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_CAUSAL: 4 }
+const confidenceRank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_MEMBERSHIP: 3, VERIFIED_CAUSAL: 4 }
 
 function workDiagnostics(graph: Graph, root: string, selector: ExecutionSelector, work: {
   role: string; witness: { confidenceClass: Edge['confidenceClass']; state: string }[]

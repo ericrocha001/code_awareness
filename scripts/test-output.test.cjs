@@ -255,7 +255,9 @@ test('direct Vitest invocation without summaries remains unknown', async () => {
 function diagnosticRunner(connection, extraValidation = {}) {
   const { createRequire } = require('node:module'), { runInNewContext } = require('node:vm')
   const filename = path.join(__dirname, 'test-output.cjs'), localRequire = createRequire(filename), module = { exports: {} }
-  const mockedRequire = name => name === './local-agent/validation.cjs' ? { validationConnection: connection, ...extraValidation } : localRequire(name)
+  const mockedRequire = name => name === './local-agent/validation.cjs'
+    ? { ...localRequire(name), validationConnection: connection, ...extraValidation }
+    : localRequire(name)
   runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, require: mockedRequire, __dirname, process, Buffer, setTimeout, clearTimeout, console }, { filename })
   return module.exports
 }

@@ -6,11 +6,26 @@ import { ArtifactStore, computeContentHash } from './artifact-store'
 import { ContinuumService } from './continuum-service'
 import { deriveRepositoryKey } from './repository-key'
 import type { ArtifactEnvelope } from './artifact-envelope'
+import { parseArtifactMarkdown } from './artifact-metadata'
+import { randomUUID } from 'node:crypto'
+import { publicationRequestDigest } from '../../shared/types/publication-provenance-types'
 export function withFixtureDatabase<T>(path: string, inspect: (db: Database.Database) => T, readonly = true): T {
   const db = new Database(path, { readonly })
   try { return inspect(db) } finally { db.close() }
 }
 export function markdown(name = 'Decision', extra = '', body = '# Exact body\n\nç 🚀 ${literal}') { return `---\nname: ${name}\ndescription: Locate the ${name} runtime context\nkind: DECISION\n${extra}---\n${body}` }
+export function storedLegacyArtifact(store: ArtifactStore, rawMarkdown: string) {
+  return store.create({ artifactId: 'artifact-' + randomUUID(), rawMarkdown, metadata: parseArtifactMarkdown(rawMarkdown).metadata })
+}
+export function storedLegacyPublication(store: ArtifactStore, rawMarkdown: string) {
+  const { artifact, publicationReceipt } = store.createPublished({ artifactId: 'artifact-' + randomUUID(), rawMarkdown,
+    metadata: parseArtifactMarkdown(rawMarkdown).metadata }, publicationRequestDigest('PUBLISH', { rawMarkdown }))
+  return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, publicationReceipt, replayed: false }
+}
+export function storedLegacyIdentity(path: string, artifact: ReturnType<typeof storedLegacyArtifact>, executionId: string) {
+  withFixtureDatabase(path, db => db.prepare("INSERT INTO execution_identities VALUES (?, ?, ?, 'PLAN_METADATA', ?)")
+    .run(artifact.artifactId, executionId, artifact.revision, artifact.createdAt), false)
+}
 export function fixture(repositoryId = 'catalog-A') {
   const dir = mkdtempSync(join(tmpdir(), 'continuum-'))
   const path = join(dir, 'continuum.db')

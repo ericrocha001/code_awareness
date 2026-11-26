@@ -74,6 +74,7 @@ import type { RepositoryFileEditing } from '../repository-file-ingress/repositor
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orchestration/runtime-preview/mcp'
 import { assertValidSessionRepositoryId, nativeLiteralTarget, SESSION_CONTEXT_TOOLS, scopedSessionReadTools, type SessionToolName } from '../session-context/mcp'
+import { executionContextQuery } from '../session-context/execution-context'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
 import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
@@ -698,6 +699,22 @@ export class ChannelMcpAdapter {
         } catch { return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SOURCE_NOT_AUTHORIZED' }) }] } }
       }
       if (name === 'discover_execution_context') {
+        if (args && typeof args === 'object' && 'view' in args && args.view === 'MEMBERSHIP') {
+          try {
+            assertArtifactAgent(authority, this.repositoryId ?? '')
+            const { selector, limit, cursor } = executionContextQuery.parse(args)
+            if (!this.continuum?.membershipSelection || !this.continuum.executionMembers) throw new Error('MEMBERSHIP_UNAVAILABLE')
+            const data = selector.type === 'EXECUTION'
+              ? this.continuum.executionMembers(selector.id, limit, cursor)
+              : selector.type === 'ARTIFACT' && !cursor
+                ? this.continuum.membershipSelection(selector.id, selector.revision)
+                : null
+            if (!data) throw new Error('INVALID_MEMBERSHIP_SELECTOR')
+            return { content: [{ type: 'text', text: JSON.stringify(data) }] }
+          } catch (error) {
+            return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] }
+          }
+        }
         try { assertArtifactAgent(authority, this.repositoryId ?? '') }
         catch { return this.sessionContext.call(name, args) }
         const result = await this.sessionContext.call(name, args, true)

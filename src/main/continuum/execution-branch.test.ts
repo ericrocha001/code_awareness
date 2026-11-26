@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { join } from 'node:path'
 import { ArtifactStore } from './artifact-store'
 import { ContinuumService } from './continuum-service'
+import { storedLegacyArtifact, storedLegacyIdentity } from './continuum-test-fixtures'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from './agent-authority'
 import type { RepositoryContinuumSession } from './project-continuum-session'
 import { GitService } from '../core/git-service'
@@ -21,7 +22,8 @@ describe('execution binding with real Git and SQLite', () => {
     const registry = new GitWorktreeRegistry(root, git, identity), reader = new GitBranchInventory(root, git, registry, identity)
     store = new ArtifactStore(join(root, '.git', 'binding.db'), 'fixture')
     service = new ContinuumService(store, undefined, () => current)
-    const plan = service.publish('---\nname: Plan on main\ndescription: Binding fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nPlan')
+    const plan = storedLegacyArtifact(store, '---\nname: Plan on main\ndescription: Binding fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nPlan')
+    storedLegacyIdentity(join(root, '.git', 'binding.db'), plan, 'execution-A')
     await gitExec(root, ['switch', '-c', 'executor'])
     const tree = (await reader.inventory()).worktrees[0]
     const observe = () => reader.executionSnapshot(tree.worktreeId, tree.generation)
@@ -44,12 +46,13 @@ describe('execution binding with real Git and SQLite', () => {
     store.close(); store = new ArtifactStore(join(root, '.git', 'binding.db'), 'fixture'); service = new ContinuumService(store)
     const page = await projection() as any
     expect(page.bindings).toHaveLength(1); expect(page.bindings[0].classification).toBe('VERIFIED_CURRENT')
-    const document = service.publish('---\nname: Validation\ndescription: Binding fixture\nkind: VALIDATION_PROOF\nexecutionId: execution-A\n---\nSecret body')
+    const document = storedLegacyArtifact(store, '---\nname: Validation\ndescription: Binding fixture\nkind: VALIDATION_PROOF\nexecutionId: execution-A\n---\nSecret body')
     const docs = await projection(undefined, { bindingId: receipts[0].artifactId, executionId: 'execution-A' }) as any
     expect(docs.artifacts.map((a: { artifactId: string }) => a.artifactId)).toContain(document.artifactId)
     expect(JSON.stringify(docs)).not.toContain('Secret body')
     expect(service.list({ metadata: { bindingRole: 'EXECUTION_BRANCH' } }).artifacts).toHaveLength(1)
-    const other = service.publish('---\nname: Second execution\ndescription: Another execution\nkind: EXECUTABLE_PLAN\nexecutionId: execution-B\n---\nPlan B')
+    const other = storedLegacyArtifact(store, '---\nname: Second execution\ndescription: Another execution\nkind: EXECUTABLE_PLAN\nexecutionId: execution-B\n---\nPlan B')
+    storedLegacyIdentity(join(root, '.git', 'binding.db'), other, 'execution-B')
     await service.bindExecutionBranch('execution-B', other.artifactId, observe)
     expect((await projection() as any).bindings).toHaveLength(2)
     await gitExec(root, ['switch', 'main'])
@@ -64,8 +67,8 @@ describe('execution binding with real Git and SQLite', () => {
     let n = 0
     await expect(service.bindExecutionBranch('execution-A', plan.artifactId, async () => ++n === 1 ? before : { ...before, head: 'changed' })).rejects.toThrow('EXECUTION_BINDING_DRIFT')
     await service.bindExecutionBranch('execution-A', plan.artifactId, observe)
-    const alternate = service.publish('---\nname: Other source\ndescription: Binding fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nOther')
-    await expect(service.bindExecutionBranch('execution-A', alternate.artifactId, observe)).rejects.toThrow('EXECUTION_BINDING_CONFLICT')
+    const alternate = storedLegacyArtifact(store, '---\nname: Other source\ndescription: Binding fixture\nkind: EXECUTABLE_PLAN\nexecutionId: execution-A\n---\nOther')
+    await expect(service.bindExecutionBranch('execution-A', alternate.artifactId, observe)).rejects.toThrow('EXECUTION_SOURCE_MISMATCH')
     let observations = 0
     await expect(service.bindExecutionBranch('execution-A', plan.artifactId, async () => {
       if (++observations === 2) await gitExec(root, ['switch', 'main'])
@@ -105,7 +108,7 @@ describe('execution binding with real Git and SQLite', () => {
   it('does not certify manual declarations, enforces repository identity and immutable receipts', async () => {
     const { observe, plan, projection } = await setup()
     const snapshot = await observe()
-    service.publish(`---\nname: Unverified\ndescription: Binding fixture\nkind: OBSERVATION\nbindingRole: EXECUTION_BRANCH\nrepositoryId: fixture\nexecutionId: execution-A\nbranchRef: refs/heads/executor\nbranchGeneration: ${snapshot.branchGeneration}\n---\nDeclared`)
+    storedLegacyArtifact(store, `---\nname: Unverified\ndescription: Binding fixture\nkind: OBSERVATION\nbindingRole: EXECUTION_BRANCH\nrepositoryId: fixture\nexecutionId: execution-A\nbranchRef: refs/heads/executor\nbranchGeneration: ${snapshot.branchGeneration}\n---\nDeclared`)
     expect((await projection() as any).bindings[0].classification).toBe('DECLARED_UNVERIFIED')
     await expect(service.bindExecutionBranch('execution-A', plan.artifactId, async () => ({ ...snapshot, repositoryId: 'other' }))).rejects.toThrow('EXECUTION_SOURCE_MISMATCH')
     const receipt = await service.bindExecutionBranch('execution-A', plan.artifactId, observe)
@@ -119,13 +122,13 @@ describe('execution binding with real Git and SQLite', () => {
     let reads = 0
     await expect(service.bindExecutionBranch('execution-A', plan.artifactId, async () => {
       const snapshot = await observe()
-      if (++reads === 2) service.update(plan.artifactId, 1, original.replace('execution-A', 'execution-changed'))
+      if (++reads === 2) service.update(plan.artifactId, 1, original.replace('Binding fixture', 'Revised binding fixture'))
       return snapshot
-    })).rejects.toThrow('EXECUTION_SOURCE_MISMATCH')
+    })).rejects.toThrow('EXECUTION_BINDING_DRIFT')
     expect(service.list({ metadata: { bindingRole: 'EXECUTION_BRANCH' } }).artifacts).toHaveLength(0)
     service.update(plan.artifactId, 2, original)
     const receipt = await service.bindExecutionBranch('execution-A', plan.artifactId, observe)
-    for (let i = 0; i < 12; i++) service.publish(`---\nname: Document ${i}\ndescription: Pagination fixture\nkind: DOCUMENT\nexecutionId: execution-A\n---\nBody`)
+    for (let i = 0; i < 12; i++) storedLegacyArtifact(store, `---\nname: Document ${i}\ndescription: Pagination fixture\nkind: DOCUMENT\nexecutionId: execution-A\n---\nBody`)
     const first = await projection(undefined, { bindingId: receipt.artifactId, executionId: 'execution-A' }) as any
     expect(first.artifacts).toHaveLength(10); expect(first.nextCursor).toBeTruthy()
     const next = await projection(undefined, { bindingId: receipt.artifactId, executionId: 'execution-A', cursor: first.nextCursor }) as any
