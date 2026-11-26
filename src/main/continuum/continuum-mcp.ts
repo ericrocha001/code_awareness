@@ -6,6 +6,7 @@ import { acquireHostFile, type HostFileDescriptor } from '../local-agent-channel
 import { VISUAL_MAX_BYTES } from './visual-media'
 import { visualMarkdown } from './artifact-metadata'
 import { publicationFields } from './artifact-publication'
+import { SEARCH_FIELDS, SEARCH_MODES } from './artifact-search-query'
 import { navigationQuery } from './artifact-navigation'
 import { countCanonicalTokens } from '../core/tokenizer'
 import { CONTINUUM_AGENT_TOOLS, documentaryTargetSchema, parseAgentArtifactUpdate } from './continuum-agent'
@@ -29,6 +30,34 @@ export const LIST_ARTIFACTS_TOOL = tool('list_artifacts', 'Discover only the act
   limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: string, includeTokenUsage, includeRawMarkdownTokenCount
 })
 export const GET_ARTIFACT_TOOL = tool('get_artifact', 'Read one explicitly selected Artifact in the active repository, including current revision, metadata and exact Markdown. Relations are identity hints and never expand related content.', { artifactId: string, includeTokenUsage }, ['artifactId'])
+const searchExpression = {
+  query: { ...string, maxLength: 512 }, mode: { type: 'string', enum: SEARCH_MODES, default: 'ALL_TERMS' },
+  distance: { type: 'integer', minimum: 1, maximum: 50 }, caseSensitive: { type: 'boolean' }
+}
+export const SEARCH_ARTIFACTS_TOOL: McpToolDefinition = {
+  ...tool('search_artifacts', 'Locate current Artifact evidence in the active repository. Use LITERAL for paths, IDs and exact errors (ASCII case-insensitive by default), PHRASE for tokenized phrases, NEAR for proximity within one field or block, and ALL_TERMS for lexical discovery. If COMPLETE results are insufficient, reformulate, use ANY_TERMS or add explicit alternatives. Interpret PARTIAL or UNAVAILABLE before concluding absence. Use returned selectors for optional literal reading.', {
+    ...searchExpression,
+    alternatives: { type: 'array', maxItems: 3, items: { type: 'object', properties: searchExpression, required: ['query'], additionalProperties: false } },
+    fields: { type: 'array', minItems: 1, maxItems: SEARCH_FIELDS.length, uniqueItems: true, items: { type: 'string', enum: SEARCH_FIELDS } },
+    blockType: string, artifactId: string, kind: string, status: string, tag: string,
+    metadata: { type: 'object', additionalProperties: true },
+    updatedAfter: { ...string, format: 'date-time' }, updatedBefore: { ...string, format: 'date-time' },
+    limit: { type: 'integer', minimum: 1, maximum: 20, default: 5 },
+    tokenBudget: { type: 'integer', minimum: 1, maximum: 4000, default: 1200 },
+    cursor: string, explain: { type: 'boolean', default: false }, includeTokenUsage: { type: 'boolean', default: false }
+  }, ['query']),
+  annotations: { readOnlyHint: true },
+  outputSchema: {
+    type: 'object', required: ['repositoryId', 'authority', 'coverage', 'hits'],
+    properties: { repositoryId: string, authority: { const: 'CONTINUUM' }, coverage: { type: 'object' }, hits: { type: 'array' }, nextCursor: string }
+  }
+}
+
+export function executeArtifactSearch(service: { searchArtifacts(input: unknown): Record<string, unknown> }, args: unknown): McpToolResult {
+  try { return { content: [], structuredContent: service.searchArtifacts(args) } }
+  catch (error) { return failure(error) }
+}
+
 export const INSPECT_ARTIFACT_STRUCTURE_TOOL = tool('inspect_artifact_structure', 'Inspect a selected Artifact outline without its body. Select a sectionId to inspect direct blocks with includeBlocks. IDs and cursors belong to this repository and revision. Metadata before content: list, inspect, then read_artifact_section.', {
   artifactId: string, sectionId: string, includeBlocks: { type: 'boolean', default: false }, limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 }, cursor: string, includeRawMarkdownTokenCount
 }, ['artifactId'])

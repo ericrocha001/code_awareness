@@ -45,7 +45,7 @@ import {
   executePublishArtifact,
   executeUpdateArtifact
 } from '../continuum/continuum-mcp'
-import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL, executeArtifactNavigation, WORKTREE_EXECUTION_TOOLS, executeWorktreeExecutionTool } from '../continuum/continuum-mcp'
+import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact, SEARCH_ARTIFACTS_TOOL, executeArtifactSearch, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL, executeArtifactNavigation, WORKTREE_EXECUTION_TOOLS, executeWorktreeExecutionTool } from '../continuum/continuum-mcp'
 import type { IVisualContinuumService } from '../continuum/continuum-types'
 import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
@@ -481,6 +481,7 @@ export class ChannelMcpAdapter {
     if (this.continuum?.bootstrapExecution && this.gitOperations) tools.push(...WORKTREE_EXECUTION_TOOLS)
     if (this.executionClosure && this.artifactReader) tools.push(ASSESS_EXECUTION_CLOSURE_TOOL)
     if (supportsContinuumAgent(this.continuum)) tools.push(...CONTINUUM_AGENT_TOOLS)
+    if (typeof this.continuum?.searchArtifacts === 'function') tools.push(SEARCH_ARTIFACTS_TOOL)
     if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
@@ -559,6 +560,7 @@ export class ChannelMcpAdapter {
       const first = result.content[0]
       if (first.type !== 'text') throw new Error('INVALID_HEALTH_CONTENT')
       const health = JSON.parse(first.text)
+      if (this.continuum?.searchHealth) health.continuumSearch = this.continuum.searchHealth()
       return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
     }
     if ((literalReadTools.has(name) || name === 'inspect_entire_checkpoint') && !result.isError && result.content.length === 1 && result.content[0].type === 'text') {
@@ -591,7 +593,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, ...WORKTREE_EXECUTION_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, ...WORKTREE_EXECUTION_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, SEARCH_ARTIFACTS_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name || name === REQUEST_DEV_UPDATE_TOOL.name) return 'Runtime Identity/Restart'
     if (WEB_EXTENSION_MANAGER_TOOLS.some(tool => tool.name === name)) return 'Web Extension Manager'
@@ -842,6 +844,11 @@ export class ChannelMcpAdapter {
       const observeDelivery = this.gitOperations ? () => this.gitOperations!.deliverySnapshot(authority?.worktreeId) : undefined
       try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args, undefined, authority, observeDelivery)) }] } }
       catch (error) { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
+    }
+    if (name === 'search_artifacts') {
+      const continuum = this.continuum
+      if (!continuum?.searchArtifacts) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
+      return executeArtifactSearch({ searchArtifacts: input => continuum.searchArtifacts!(input) }, args)
     }
     if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
       if (!this.continuum || !('inspectStructure' in this.continuum) || !('readSection' in this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }

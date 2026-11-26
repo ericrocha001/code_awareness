@@ -17,7 +17,7 @@ import sharp from 'sharp'
 import { canonicalDesktopProfile } from '../../src/main/desktop-profile'
 
 const run = promisify(execFile)
-process.once('message', async (input: { temporary: string; node: string; cli: string; channelCli: string }) => {
+process.once('message', async (input: { temporary: string; node: string; cli: string; channelCli: string; searchOnly?: boolean }) => {
   let catalog: RepositoryCatalogStore | undefined, session: RepositoryContinuumSession | undefined, channel: LocalChannelHost | undefined, academy: AcademyService | undefined
   try {
     const appData = join(input.temporary, 'appData')
@@ -89,6 +89,26 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
     await invoke(['inspect_artifact_structure', ...selected, '--id', structured.artifactId], other, 'WORKTREE_UNLINKED')
     service.update(structured.artifactId, 1, md('Structural fixture', 'DOCUMENT', '', '# Changed'))
     await invoke(['read_artifact_section', ...selected, '--id', structured.artifactId, '--filter', JSON.stringify(readQuery)], worktree, 'REVISION_CONFLICT')
+    const searchable = service.publish(md('Hidden evidence', 'DOCUMENT', '', '# History\n\nBefore correction: /transient/path {}.'))
+    const filter = JSON.stringify({ query: '/transient/path', mode: 'LITERAL', fields: ['body'] })
+    const searchArgs = ['search_artifacts', ...selected, '--id', searchable.artifactId, '--filter', filter]
+    const found = await invoke(searchArgs)
+    assert.equal(found.coverage.state, 'COMPLETE')
+    assert.equal(found.hits.length, 1)
+    const searchHit = found.hits[0]
+    assert.equal(searchHit.artifactId, searchable.artifactId)
+    const readEvidence = ['read_artifact_section', ...selected, '--id', searchHit.artifactId, '--filter', JSON.stringify({
+      sectionId: searchHit.location.sectionId, blockId: searchHit.location.blockId, expectedRevision: searchHit.revision
+    })]
+    assert.equal((await invoke(readEvidence)).content, 'Before correction: /transient/path {}.')
+    await invoke(searchArgs, other, 'WORKTREE_UNLINKED')
+    await invoke(['search_artifacts', '--repository', second.id, '--filter', filter], worktree, 'REPOSITORY_MISMATCH')
+    const currentChannel = await invoke(['continuum', ...searchArgs], worktree, undefined, input.channelCli)
+    assert.deepEqual(currentChannel, found)
+    if (input.searchOnly) {
+      process.send?.({ success: true, runtime: 'Electron Main', proofs: ['CLI search on both local protocols', 'direct literal evidence', 'repository and worktree binding'] })
+      return
+    }
     const suggestionSource = service.publish(md('SQLite migration rollback', 'DOCUMENT'))
     const suggestionTarget = service.publish(md('SQLite migration transaction', 'DOCUMENT'))
     const shortlist = await invoke(['suggestions', ...selected, '--id', suggestionSource.artifactId, '--filter', '{"limit":3}'])

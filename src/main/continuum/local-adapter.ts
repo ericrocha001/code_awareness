@@ -11,7 +11,8 @@ import { validateSuggestionQuery } from './artifact-suggestions'
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { VISUAL_MAX_BYTES } from './visual-media'
-import { executeGetVisualArtifact } from './continuum-mcp'
+import { executeGetVisualArtifact, SEARCH_ARTIFACTS_TOOL } from './continuum-mcp'
+import { artifactSearchQuery } from './artifact-search-query'
 import { navigationQuery } from './artifact-navigation'
 import type { Artifact } from './continuum-types'
 import { publicationFields } from './artifact-publication'
@@ -39,6 +40,11 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         const authority = this.authority(request, context)
         return executeContinuumAgent(service, tool.name, request.args, () => context.connected(), authority, this.observeDelivery(request, service, context))
       })])),
+      search_artifacts: operation(input => {
+        const request = selection(input, Object.keys(SEARCH_ARTIFACTS_TOOL.inputSchema.properties ?? {}))
+        const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value
+        return { ...request, query: artifactSearchQuery(query) }
+      }, async (request, context) => (await this.service(request, context)).searchArtifacts(request.query)),
       inspect_artifact_structure: operation(input => {
         const request = selection(input, ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor'])
         const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value

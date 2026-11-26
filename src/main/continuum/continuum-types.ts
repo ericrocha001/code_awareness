@@ -112,6 +112,8 @@ export interface IArtifactStructureReader {
   readSection(query: import('./artifact-structure').SectionQuery): import('./artifact-structure').SectionPage
 }
 export interface IContinuumService extends IArtifactReader {
+  searchArtifacts?(input: unknown): ReturnType<import('./artifact-store').ArtifactStore['searchArtifacts']>
+  searchHealth?(): ReturnType<import('./artifact-store').ArtifactStore['searchHealth']>
   prepareDeliveryContext?: import('./continuum-service').ContinuumService['prepareDeliveryContext']
   resolveExecutionContext?: import('./continuum-service').ContinuumService['resolveExecutionContext']
   bootstrapExecution?: import('./continuum-service').ContinuumService['bootstrapExecution']

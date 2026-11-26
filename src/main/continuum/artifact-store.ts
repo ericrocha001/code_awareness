@@ -871,6 +871,8 @@ export class ArtifactStore {
     return { clauses, params }
   }
 
+  searchHealth() { return { repositoryId: this.repositoryId, ...this.searchProjection.health() } }
+
   searchArtifacts(input: unknown) {
     const query = artifactSearchQuery(input)
     const { kind, status, tag, metadata, updatedAfter, updatedBefore } = query
