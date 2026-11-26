@@ -564,4 +564,137 @@ describe('AcademySkillLintService & U1 opt-in list/history', () => {
       await service.close()
     }
   })
+
+  it('supports view:actions (focal & catalog) and deepen:REFERENCE_COST without body leaks or rule changes', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-lint-actions-'))
+    roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    const principal = authenticatedAgentPrincipal('MCP', () => true)
+    const authority = authorizeArtifactAgent(principal, 'repo-1', () => true)
+    try {
+      const refDirect = '# Direct\n\nDirect reference tokens here.\n[indirect](indirect.md)\n[also-direct](direct.md)\n'
+      const refIndirect = '# Indirect\n\nIndirect content.\n'
+      const skillMd = [
+        '---',
+        'name: actions-skill',
+        'description: ' + 'Trigger phrase '.repeat(28) + 'end',
+        '---',
+        '# Main',
+        'BODY_SECRET_DO_NOT_LEAK',
+        '[direct-1](references/direct.md)',
+        '[direct-dup](references/direct.md)',
+        '[self](SKILL.md)',
+        '[missing](references/missing.md)',
+        '[ext](https://example.com/docs)',
+        '[dyn](references/${VAR}.md)',
+        '<div>partial coverage html</div>'
+      ].join('\n')
+
+      const created = await service.create({
+        package: {
+          skillMd,
+          artifacts: {
+            'references/direct.md': refDirect,
+            'references/indirect.md': refIndirect,
+            'scripts/run.sh': '#!/bin/sh\necho hi\n'
+          }
+        },
+        scope: 'GLOBAL',
+        origin: 'MCP'
+      })
+
+      await service.create({
+        package: {
+          skillMd: '---\nname: clean-skill\ndescription: Short clean skill.\n---\n# Clean\nOk.\n',
+          artifacts: {}
+        },
+        scope: 'GLOBAL',
+        origin: 'MCP'
+      })
+
+      const actionsRes = await executeAcademyTool(service, 'get_academy_skill_lint', {
+        skillId: created.id,
+        view: 'actions',
+        limit: 1
+      })
+      expect(actionsRes.isError).toBeUndefined()
+      const actionsText = actionsRes.content[0].text
+      expect(actionsText).not.toContain('BODY_SECRET_DO_NOT_LEAK')
+      expect(actionsText).not.toContain('sizeBreakdown')
+      expect(actionsText).not.toContain('deltaFromPredecessor')
+      const actionsPage1 = JSON.parse(actionsText)
+      expect(actionsPage1.view).toBe('actions')
+      expect(actionsPage1.nextAction.priority).toBe('HIGH')
+      expect(actionsPage1.nextAction.ruleId).toBe('CAPABILITY_SURFACE_CHANGE')
+      expect(actionsPage1.nextCursor).toBeTruthy()
+
+      const crossCursor = await executeAcademyTool(service, 'get_academy_skill_lint', {
+        skillId: created.id,
+        view: 'report',
+        cursor: actionsPage1.nextCursor
+      })
+      expect(crossCursor.isError).toBe(true)
+      expect(JSON.parse(crossCursor.content[0].text).error).toBe('LINT_CURSOR_STALE')
+
+      const allActions = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: created.id, view: 'actions', limit: 50 })).content[0].text
+      )
+      const fullRep = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: created.id, limit: 50 })).content[0].text
+      )
+      for (const f of fullRep.findings.filter((x: { category: string }) => x.category === 'REVIEW')) {
+        await executeAcademyTool(
+          service,
+          'review_academy_skill_lint',
+          {
+            skillId: created.id,
+            expectedVersion: 1,
+            findingId: f.findingId,
+            evidenceFingerprint: f.evidenceFingerprint,
+            action: 'RECORD',
+            rationale: 'Reviewed in actions test'
+          },
+          { authority }
+        )
+      }
+      expect(allActions.actions.length).toBeGreaterThan(0)
+      const afterReviewActions = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: created.id, view: 'actions' })).content[0].text
+      )
+      expect(afterReviewActions.actions).toEqual([])
+      expect(afterReviewActions.nextAction).toBeNull()
+      expect(afterReviewActions.lintHealth).toBe('UNKNOWN')
+
+      const reviewedOnly = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { skillId: created.id, view: 'actions', state: 'REVIEWED' })).content[0].text
+      )
+      expect(reviewedOnly.actions.length).toBe(allActions.actions.length)
+
+      const catActions = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', { view: 'actions', limit: 10 })).content[0].text
+      )
+      expect(catActions.view).toBe('actions')
+      expect(catActions.pageAnalyzed).toBe(2)
+      expect(catActions.notice).toContain('no global ranking')
+
+      const repWithCost = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', {
+          skillId: created.id,
+          deepen: ['REFERENCE_COST']
+        })).content[0].text
+      )
+      const directTok = getCanonicalTokenizer().count(refDirect)
+      expect(repWithCost.referenceCost).toMatchObject({
+        directReferenceCount: 1,
+        directReferencePaths: ['references/direct.md'],
+        directReferenceTokens: directTok,
+        rootPlusDirectReferenceTokens: repWithCost.sizeBreakdown.measures.skillMdTokens + directTok,
+        coverage: 'PARTIAL'
+      })
+      expect(repWithCost.referenceCost.limitation).toContain('hypothetical full-read volume only')
+      expect(repWithCost.findings).toEqual(fullRep.findings.map((f: any) => ({ ...f, state: 'REVIEWED', review: expect.any(Object) })))
+    } finally {
+      await service.close()
+    }
+  })
 })

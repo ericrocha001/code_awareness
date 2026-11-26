@@ -1,20 +1,36 @@
 const window = { type: 'object', properties: { offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50 }, textOffset: { type: 'integer', minimum: 0 }, textLimit: { type: 'integer', minimum: 1, maximum: 4000 } }, additionalProperties: false }
 const version = { type: 'integer', minimum: 1 }
+const hash = { type: 'string', pattern: '^[a-f0-9]{64}$' }
+const focalEditItem = {
+  type: 'object',
+  properties: {
+    op: { type: 'string', enum: ['replace', 'add', 'remove', 'move'] },
+    path: { type: 'string', minLength: 1 },
+    toPath: { type: 'string', minLength: 1 },
+    oldText: { type: 'string', minLength: 1 },
+    newText: { type: 'string' },
+    selector: { type: 'string', minLength: 1 },
+    content: { type: 'string' }
+  },
+  required: ['op'],
+  additionalProperties: false
+}
 export const academyImpactSchema = {
   type: 'object',
   properties: {
-    skillId: { type: 'string', minLength: 1 }, expectedVersion: version, baseVersion: version, targetVersion: version,
+    skillId: { type: 'string', minLength: 1 }, expectedVersion: version, expectedPackageHash: hash, baseVersion: version, targetVersion: version,
     package: { type: 'object', properties: { skillMd: { type: 'string', minLength: 1 }, artifacts: { type: 'object', additionalProperties: { type: 'string' } } }, required: ['skillMd', 'artifacts'], additionalProperties: false },
+    edits: { type: 'array', minItems: 1, maxItems: 50, items: focalEditItem },
     changes: window, consumers: window, evidence: window, consumerId: { type: 'string', minLength: 1 }
   },
   required: ['skillId'], additionalProperties: false,
   oneOf: [
-    { required: ['expectedVersion', 'package'], not: { anyOf: [{ required: ['baseVersion'] }, { required: ['targetVersion'] }] } },
-    { required: ['baseVersion', 'targetVersion'], not: { anyOf: [{ required: ['expectedVersion'] }, { required: ['package'] }] } }
+    { required: ['expectedVersion', 'package'], not: { anyOf: [{ required: ['baseVersion'] }, { required: ['targetVersion'] }, { required: ['expectedPackageHash'] }, { required: ['edits'] }] } },
+    { required: ['expectedVersion', 'expectedPackageHash', 'edits'], not: { anyOf: [{ required: ['package'] }, { required: ['baseVersion'] }, { required: ['targetVersion'] }] } },
+    { required: ['baseVersion', 'targetVersion'], not: { anyOf: [{ required: ['expectedVersion'] }, { required: ['package'] }, { required: ['expectedPackageHash'] }, { required: ['edits'] }] } }
   ]
 }
 
-const hash = { type: 'string', pattern: '^[a-f0-9]{64}$' }
 export const academyImpactFreshnessSchema = {
   type: 'object', properties: {
     candidateHash: hash,

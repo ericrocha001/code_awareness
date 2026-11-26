@@ -191,6 +191,19 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     expect(focalAudit.data.findings[0].priority).toBe('HIGH')
     expect(focalAudit.data.inventory.scripts.map((s: any) => s.path)).toEqual(['scripts/helper.sh'])
 
+    const focalActions = await callMcp('get_academy_skill_lint', { skillId, view: 'actions' })
+    expect(focalActions.isError).toBe(false)
+    expect(focalActions.data.view).toBe('actions')
+    expect(focalActions.data.nextAction.priority).toBe('HIGH')
+
+    const catalogActions = await callMcp('get_academy_skill_lint', { view: 'actions', limit: 10 })
+    expect(catalogActions.isError).toBe(false)
+    expect(catalogActions.data.items[0].nextAction.priority).toBe('NORMAL')
+
+    const focalRefCost = await callMcp('get_academy_skill_lint', { skillId, deepen: ['REFERENCE_COST'] })
+    expect(focalRefCost.isError).toBe(false)
+    expect(focalRefCost.data.referenceCost.directReferenceCount).toBe(0)
+
     // 3. Selective navigation: manifest (no body), outline, section (no siblings) + structuredContent
     const manifest = await callMcp('get_academy_skill', { skillId, view: 'manifest' })
     expect(manifest.raw).not.toContain('BODY_SENTINEL_SECRET_V1')
@@ -285,6 +298,17 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     expect(JSON.stringify(preview.data.lint)).not.toContain('pass@')
     expect(preview.data.lint.delta.resolved.some((f: any) => f.ruleId === 'LOCAL_REFERENCE_BROKEN')).toBe(true)
     expect(preview.data.lint.delta.introduced.some((f: any) => f.ruleId === 'CAPABILITY_SURFACE_CHANGE')).toBe(true)
+    expect(academy.get(skillId).currentVersion).toBe(1)
+
+    // 4b. Impact preflight via edits (AJV-validated, without sending full package) matches PREVIEW hash
+    const impactByEdits = await callMcp('analyze_academy_change_impact', {
+      skillId,
+      expectedVersion: 1,
+      expectedPackageHash: v1Hash,
+      edits
+    })
+    expect(impactByEdits.isError).toBe(false)
+    expect(impactByEdits.data.snapshot.candidateHash).toBe(preview.data.candidateHash)
     expect(academy.get(skillId).currentVersion).toBe(1)
 
     // 5. APPLY focal edit -> v2 with automatic lint

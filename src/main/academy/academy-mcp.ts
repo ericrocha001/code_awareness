@@ -146,11 +146,12 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   {
     ...tool(
       'get_academy_skill_lint',
-      'Read-only deterministic Skill Linter diagnostics, derived lintHealth, coverage, persistence/stagnation and capability review priority. Provide skillId (optional version) for a focal report, or omit skillId for a paged catalog summary (default ACTIVE; only skills in the page are analyzed).',
+      'Read-only deterministic Skill Linter diagnostics, derived lintHealth, coverage, persistence/stagnation and capability review priority. Use view:"actions" for a compact prioritized action list without deltas/breakdown, or omit view (default "report") for the full report. Provide skillId (optional version) for a focal view, or omit skillId for a paged catalog summary (default ACTIVE; only skills in the page are analyzed).',
       {
         type: 'object',
         properties: {
           skillId: id,
+          view: { type: 'string', enum: ['report', 'actions'] },
           version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
           status: { type: 'string', enum: ['ACTIVE', 'DISABLED'] },
           scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] },
@@ -159,7 +160,7 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
           state: { type: 'string', enum: ['OPEN', 'REVIEWED'] },
           lintHealth: { type: 'string', enum: ['INVALID', 'REVIEW_OPEN', 'REVIEWED', 'NO_FINDINGS', 'UNKNOWN'] },
           includeInventory: { type: 'boolean' },
-          deepen: { type: 'array', items: { type: 'string', enum: ['DESCRIPTION_TERMS', 'CATALOG_PRESSURE'] }, uniqueItems: true },
+          deepen: { type: 'array', items: { type: 'string', enum: ['DESCRIPTION_TERMS', 'CATALOG_PRESSURE', 'REFERENCE_COST'] }, uniqueItems: true },
           limit: { type: 'integer', minimum: 1, maximum: 50 },
           cursor: { type: 'string', minLength: 1 }
         },
@@ -495,15 +496,50 @@ export async function executeAcademyTool(
       case 'get_openai_plugin_release': result = service.getOpenAiRelease(string(values.releaseId, 'releaseId')); break
       case 'confirm_openai_plugin_upload': result = service.confirmOpenAiUpload(string(values.releaseId, 'releaseId'), sha256(values.artifactHash)); break
       case 'get_academy_skill_lint': {
-        const allowed = ['skillId', 'version', 'status', 'scope', 'ruleId', 'category', 'state', 'lintHealth', 'includeInventory', 'deepen', 'limit', 'cursor']
+        const allowed = ['skillId', 'view', 'version', 'status', 'scope', 'ruleId', 'category', 'state', 'lintHealth', 'includeInventory', 'deepen', 'limit', 'cursor']
         if (Object.keys(values).some(key => !allowed.includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+        const view = optionalEnum(values.view, ['report', 'actions']) as 'report' | 'actions' | undefined
         if (values.cursor !== undefined && (typeof values.cursor !== 'string' || !values.cursor)) throw new AcademyError('INVALID_ARGUMENT')
         if (values.includeInventory !== undefined && typeof values.includeInventory !== 'boolean') throw new AcademyError('INVALID_ARGUMENT')
         if (values.ruleId !== undefined && (typeof values.ruleId !== 'string' || !values.ruleId)) throw new AcademyError('INVALID_ARGUMENT')
-        if (values.deepen !== undefined && (!Array.isArray(values.deepen) || values.deepen.some(d => d !== 'DESCRIPTION_TERMS' && d !== 'CATALOG_PRESSURE'))) {
+        if (
+          values.deepen !== undefined &&
+          (!Array.isArray(values.deepen) ||
+            values.deepen.some(d => d !== 'DESCRIPTION_TERMS' && d !== 'CATALOG_PRESSURE' && d !== 'REFERENCE_COST'))
+        ) {
           throw new AcademyError('INVALID_ARGUMENT')
         }
         const category = optionalEnum(values.category, ['INVALID', 'REVIEW', 'OBSERVATION']) as FindingCategory | undefined
+        if (view === 'actions') {
+          if (values.includeInventory !== undefined || values.deepen !== undefined) {
+            throw new AcademyError('INVALID_ARGUMENT')
+          }
+          if (values.skillId !== undefined) {
+            result = service.lint.actions({
+              skillId: string(values.skillId, 'skillId'),
+              version: values.version === undefined ? undefined : integer(values.version, 'version'),
+              ruleId: values.ruleId,
+              category,
+              state: optionalEnum(values.state, ['OPEN', 'REVIEWED']) as 'OPEN' | 'REVIEWED' | undefined,
+              limit: values.limit as number | undefined,
+              cursor: values.cursor
+            })
+          } else {
+            if (values.version !== undefined || values.state !== undefined) {
+              throw new AcademyError('INVALID_ARGUMENT')
+            }
+            result = service.lint.catalogActions({
+              status: optionalEnum(values.status, ['ACTIVE', 'DISABLED']) as AcademySkillStatus | undefined,
+              scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined,
+              ruleId: values.ruleId,
+              category,
+              lintHealth: optionalEnum(values.lintHealth, ['INVALID', 'REVIEW_OPEN', 'REVIEWED', 'NO_FINDINGS', 'UNKNOWN']) as LintHealth | undefined,
+              limit: values.limit as number | undefined,
+              cursor: values.cursor
+            })
+          }
+          break
+        }
         if (values.skillId !== undefined) {
           result = service.lint.report({
             skillId: string(values.skillId, 'skillId'),

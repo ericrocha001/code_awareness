@@ -29,8 +29,9 @@ export type AcademyImpactInput = {
   consumers?: AcademyImpactWindow
   consumerId?: string
   evidence?: AcademyImpactWindow
-} & ({ expectedVersion: number; package: AcademyPackage; baseVersion?: never; targetVersion?: never } |
-  { baseVersion: number; targetVersion: number; expectedVersion?: never; package?: never })
+} & ({ expectedVersion: number; package: AcademyPackage; expectedPackageHash?: never; edits?: never; baseVersion?: never; targetVersion?: never } |
+  { expectedVersion: number; expectedPackageHash: string; edits: unknown[]; package?: never; baseVersion?: never; targetVersion?: never } |
+  { baseVersion: number; targetVersion: number; expectedVersion?: never; package?: never; expectedPackageHash?: never; edits?: never })
 
 export interface AcademyImpactSnapshot {
   schema: 1

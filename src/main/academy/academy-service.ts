@@ -26,7 +26,7 @@ import type {
   AcademyImportConfirmationMode,
   AcademyImportConfirmationPreference
 } from '../../shared/types/academy-types'
-import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
+import { analyzeAcademyImpact, parseImpactInput, verifyAcademyImpact } from './academy-impact'
 import { compareAcademyPackages, windowNumber } from './academy-change-evidence'
 import type { AcademyChangeDiffResult, AcademyChangeListResult, AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
@@ -201,7 +201,34 @@ export class AcademyService {
       semanticEffect: diff.semanticEffect
     }
   }
-  analyzeChangeImpact(input: unknown) { this.assertNotClosed(); return analyzeAcademyImpact(this.store, input) }
+  analyzeChangeImpact(input: unknown) {
+    this.assertNotClosed()
+    const parsed = parseImpactInput(input)
+    if ('edits' in parsed && parsed.edits !== undefined) {
+      const prep = this.lint.prepareFocalEdit({
+        skillId: parsed.skillId,
+        expectedVersion: parsed.expectedVersion,
+        expectedPackageHash: parsed.expectedPackageHash,
+        edits: parsed.edits
+      })
+      if (!prep.editResult.candidateValid) {
+        throw new AcademyError(
+          prep.editResult.validationError?.code ?? 'INVALID_PACKAGE',
+          prep.editResult.validationError?.message ?? 'Invalid candidate package'
+        )
+      }
+      return analyzeAcademyImpact(this.store, {
+        skillId: parsed.skillId,
+        expectedVersion: parsed.expectedVersion,
+        package: prep.editResult.candidate,
+        ...(parsed.changes ? { changes: parsed.changes } : {}),
+        ...(parsed.consumers ? { consumers: parsed.consumers } : {}),
+        ...(parsed.consumerId ? { consumerId: parsed.consumerId } : {}),
+        ...(parsed.evidence ? { evidence: parsed.evidence } : {})
+      })
+    }
+    return analyzeAcademyImpact(this.store, input)
+  }
   verifyChangeImpact(input: unknown) { return verifyAcademyImpact(this.store, input) }
   scheduleDestinationReconciliation(destinationId: string): Promise<void> {
     if (this.isClosed || this.store.isClosed) return Promise.resolve()

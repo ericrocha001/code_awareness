@@ -30,14 +30,21 @@ function window(value: unknown): AcademyImpactWindow | undefined {
 
 export function parseImpactInput(value: unknown): AcademyImpactInput {
   const raw = record(value)
-  if (Object.keys(raw).some(key => !['skillId', 'expectedVersion', 'package', 'baseVersion', 'targetVersion', 'changes', 'consumers', 'consumerId', 'evidence'].includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+  if (Object.keys(raw).some(key => !['skillId', 'expectedVersion', 'expectedPackageHash', 'package', 'edits', 'baseVersion', 'targetVersion', 'changes', 'consumers', 'consumerId', 'evidence'].includes(key))) throw new AcademyError('INVALID_ARGUMENT')
   const common = { skillId: text(raw.skillId), changes: window(raw.changes), consumers: window(raw.consumers), consumerId: raw.consumerId === undefined ? undefined : text(raw.consumerId), evidence: window(raw.evidence) }
   if (raw.package !== undefined) {
-    if (raw.baseVersion !== undefined || raw.targetVersion !== undefined) throw new AcademyError('INVALID_ARGUMENT')
+    if (raw.baseVersion !== undefined || raw.targetVersion !== undefined || raw.expectedPackageHash !== undefined || raw.edits !== undefined) throw new AcademyError('INVALID_ARGUMENT')
     const pkg = record(raw.package)
     if (Object.keys(pkg).some(key => !['skillMd', 'artifacts'].includes(key))) throw new AcademyError('INVALID_PACKAGE')
     record(pkg.artifacts)
     return { ...common, expectedVersion: positive(raw.expectedVersion), package: normalizeAcademyPackage(pkg as unknown as AcademyPackage) }
+  }
+  if (raw.edits !== undefined || raw.expectedPackageHash !== undefined) {
+    if (raw.baseVersion !== undefined || raw.targetVersion !== undefined) throw new AcademyError('INVALID_ARGUMENT')
+    const expectedPackageHash = text(raw.expectedPackageHash)
+    if (!/^[a-f0-9]{64}$/.test(expectedPackageHash)) throw new AcademyError('INVALID_ARGUMENT')
+    if (!Array.isArray(raw.edits) || raw.edits.length < 1 || raw.edits.length > 50) throw new AcademyError('INVALID_ARGUMENT')
+    return { ...common, expectedVersion: positive(raw.expectedVersion), expectedPackageHash, edits: raw.edits }
   }
   if (raw.expectedVersion !== undefined) throw new AcademyError('INVALID_ARGUMENT')
   return { ...common, baseVersion: positive(raw.baseVersion), targetVersion: positive(raw.targetVersion) }

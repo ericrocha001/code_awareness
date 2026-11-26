@@ -143,4 +143,98 @@ describe('Academy impact projection', () => {
       expect(() => local.change_impact.execute(invalid, { connected: () => true })).toThrow()
     }
   })
+
+  it('supports focal edits preflight mode in analyze_academy_change_impact with full parity to candidate package and PREVIEW/APPLY hash', async () => {
+    const { service, source } = setup()
+    const consumer = service.store.create({
+      package: pkg('consumer', `Uses ${source.name} and ${source.name}/references/rule.md`),
+      scope: 'GLOBAL',
+      origin: 'IMPORT'
+    })
+    const v1Hash = source.current.packageHash
+    const edits = [
+      { op: 'replace', path: 'SKILL.md', oldText: 'Você pode revisar.', newText: 'Você pode revisar com preflight.' },
+      { op: 'add', path: 'references/added.md', content: '# Added\n' }
+    ]
+    const expectedCandidate = {
+      skillMd: source.current.package.skillMd.replace('Você pode revisar.', 'Você pode revisar com preflight.'),
+      artifacts: { ...source.current.package.artifacts, 'references/added.md': '# Added\n' }
+    }
+
+    const before = service.snapshot()
+    const history = service.history(source.id)
+    const write = vi.spyOn(service.store, 'update')
+    const distribution = vi.spyOn(service, 'scheduleReconciliationForSkill')
+
+    const viaPackage = await executeAcademyTool(service, 'analyze_academy_change_impact', {
+      skillId: source.id,
+      expectedVersion: 1,
+      package: expectedCandidate,
+      changes: { limit: 10 },
+      consumers: { limit: 10 },
+      evidence: { limit: 5 }
+    })
+    const viaEdits = await executeAcademyTool(service, 'analyze_academy_change_impact', {
+      skillId: source.id,
+      expectedVersion: 1,
+      expectedPackageHash: v1Hash,
+      edits,
+      changes: { limit: 10 },
+      consumers: { limit: 10 },
+      evidence: { limit: 5 }
+    })
+
+    expect(viaPackage.isError).toBeUndefined()
+    expect(viaEdits.isError).toBeUndefined()
+    const pkgResult = JSON.parse((viaPackage.content[0] as { text: string }).text)
+    const editsResult = JSON.parse((viaEdits.content[0] as { text: string }).text)
+    expect(editsResult).toEqual(pkgResult)
+    expect(editsResult.consumers.items[0].skillId).toBe(consumer.id)
+
+    // Verify freshness & PREVIEW hash parity
+    const freshness = JSON.parse(
+      ((await executeAcademyTool(service, 'verify_academy_change_impact', { snapshot: editsResult.snapshot })).content[0] as { text: string }).text
+    )
+    expect(freshness.state).toBe('CURRENT')
+
+    const preview = JSON.parse(
+      ((await executeAcademyTool(service, 'edit_academy_skill', {
+        skillId: source.id,
+        expectedVersion: 1,
+        expectedPackageHash: v1Hash,
+        mode: 'PREVIEW',
+        edits
+      })).content[0] as { text: string }).text
+    )
+    expect(preview.candidateHash).toBe(editsResult.snapshot.candidateHash)
+
+    // No-op edits
+    const noop = JSON.parse(
+      ((await executeAcademyTool(service, 'analyze_academy_change_impact', {
+        skillId: source.id,
+        expectedVersion: 1,
+        expectedPackageHash: v1Hash,
+        edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'Você pode revisar.', newText: 'Você pode revisar.' }]
+      })).content[0] as { text: string }).text
+    )
+    expect(noop.diff.changes.total).toBe(0)
+    expect(noop.snapshot.candidateHash).toBe(v1Hash)
+
+    // Error cases: stale version, stale hash, mixed modes, ambiguous edit
+    for (const bad of [
+      { skillId: source.id, expectedVersion: 99, expectedPackageHash: v1Hash, edits },
+      { skillId: source.id, expectedVersion: 1, expectedPackageHash: '0'.repeat(64), edits },
+      { skillId: source.id, expectedVersion: 1, expectedPackageHash: v1Hash, edits, package: expectedCandidate },
+      { skillId: source.id, expectedVersion: 1, expectedPackageHash: v1Hash, edits, baseVersion: 1, targetVersion: 1 },
+      { skillId: source.id, expectedVersion: 1, expectedPackageHash: v1Hash, edits: [{ op: 'replace', path: 'SKILL.md', oldText: 'absent', newText: 'x' }] }
+    ]) {
+      const errRes = await executeAcademyTool(service, 'analyze_academy_change_impact', bad)
+      expect(errRes.isError).toBe(true)
+    }
+
+    expect(service.snapshot()).toEqual(before)
+    expect(service.history(source.id)).toEqual(history)
+    expect(write).not.toHaveBeenCalled()
+    expect(distribution).not.toHaveBeenCalled()
+  })
 })
