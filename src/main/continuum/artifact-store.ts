@@ -15,6 +15,9 @@ import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continu
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import type { ExecutionActivationRecord, ExecutionActivationScopeKind, ExecutionActivationStatus, ExecutionIdentityRecord } from '../../shared/types/delivery-context-types'
 import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
+import { artifactSearchQuery } from './artifact-search-query'
+import { searchArtifacts } from './artifact-search'
+import { ArtifactSearchProjection } from './artifact-search-projection'
 import { ArtifactNavigation } from './artifact-navigation'
 import type { StructureQuery, SectionQuery } from './artifact-structure'
 import { inspectWebP, mediaHash } from './visual-media'
@@ -322,6 +325,7 @@ export class ArtifactStore {
     return this.structureSecret = (this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string }).secret
   }
   private readonly db: Database.Database
+  private readonly searchProjection: ArtifactSearchProjection
   private readonly graphIndex: ArtifactGraph
   suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
   graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
@@ -373,6 +377,8 @@ export class ArtifactStore {
       this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
+      this.searchProjection = new ArtifactSearchProjection(this.db)
+      this.searchProjection.schedule()
     } catch (error) { this.db.close(); throw error }
   }
 
@@ -551,6 +557,7 @@ export class ArtifactStore {
     this.db.prepare('INSERT INTO artifact_revisions(artifact_id, revision, snapshot_json) VALUES (?, ?, ?)').run(artifact.artifactId, artifact.revision, JSON.stringify(artifact))
     this.tagIndex.project(artifact.artifactId, artifact.metadata.tags)
     this.graphIndex.project(artifact)
+    this.searchProjection.schedule()
   }
 
   private createInsideTransaction(input: CreateArtifactInput, legacy = false, media?: VisualMedia): Artifact {
@@ -815,22 +822,13 @@ export class ArtifactStore {
     return executionIdentity ? { ...artifact, provenance: { ...artifact.provenance, executionIdentity: executionIdentity as unknown as MetadataValue } } : artifact
   }
 
-  list(filter: ListArtifactsFilter = {}, options: { kinds?: readonly string[] } = {}): ArtifactPage {
-    if (filter.sortBy !== undefined && filter.sortBy !== 'createdAt' && filter.sortBy !== 'updatedAt') throw new Error('INVALID_ARGUMENT: invalid sortBy')
-    if (filter.includeTags !== undefined && typeof filter.includeTags !== 'boolean') throw new Error('INVALID_ARGUMENT: includeTags must be boolean')
-    const timestampKey = filter.sortBy === 'createdAt' ? 'createdAt' : 'updatedAt'
-    const timestampColumn = timestampKey === 'createdAt' ? 'created_at' : 'updated_at'
-    validatePeriods(filter.periods, filter.metadata)
-    const limit = filter.limit ?? 20
-    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_ARGUMENT: limit must be 1-100')
-    if (filter.direction && !['inbound', 'outbound', 'both'].includes(filter.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
-    if (filter.metadataKeys && (filter.metadataKeys.length > 20 || filter.metadataKeys.some(key => typeof key !== 'string' || !key.trim() || ['__proto__', 'constructor', 'prototype'].includes(key)))) throw new Error('INVALID_ARGUMENT: invalid metadataKeys')
+  private catalogConditions(filter: ListArtifactsFilter, kinds?: readonly string[]) {
     if (filter.tag !== undefined) validateTagSlug(filter.tag)
     const clauses: string[] = []
     const params: (string | number)[] = []
-    if (options.kinds?.length) {
-      clauses.push(`a.kind IN (${options.kinds.map(() => '?').join(',')})`)
-      params.push(...options.kinds)
+    if (kinds?.length) {
+      clauses.push(`a.kind IN (${kinds.map(() => '?').join(',')})`)
+      params.push(...kinds)
     }
     if (filter.tag !== undefined) { clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_tags WHERE slug = ?)'); params.push(filter.tag) }
     for (const key of ['kind', 'status'] as const) if (filter[key] !== undefined) { clauses.push(`a.${key} = ?`); params.push(filter[key]!) }
@@ -870,6 +868,32 @@ export class ArtifactStore {
       }
       clauses.push(`a.artifact_id IN (${parts.join(' UNION ')})`)
     } else if (filter.direction || filter.relationKind) throw new Error('INVALID_ARGUMENT: relation filters require relatedToArtifactId')
+    return { clauses, params }
+  }
+
+  searchHealth() { return { repositoryId: this.repositoryId, ...this.searchProjection.health() } }
+
+  searchArtifacts(input: unknown) {
+    const query = artifactSearchQuery(input)
+    const { kind, status, tag, metadata, updatedAfter, updatedBefore } = query
+    const { clauses, params } = this.catalogConditions({ kind, status, tag, metadata, updatedAfter, updatedBefore })
+    const navigation = new ArtifactNavigation(this)
+    const key = this.structureKey()
+    return this.db.transaction(() => searchArtifacts(this.db, this.repositoryId, navigation, key,
+      this.searchProjection.available, query, clauses, params))()
+  }
+
+  list(filter: ListArtifactsFilter = {}, options: { kinds?: readonly string[] } = {}): ArtifactPage {
+    if (filter.sortBy !== undefined && filter.sortBy !== 'createdAt' && filter.sortBy !== 'updatedAt') throw new Error('INVALID_ARGUMENT: invalid sortBy')
+    if (filter.includeTags !== undefined && typeof filter.includeTags !== 'boolean') throw new Error('INVALID_ARGUMENT: includeTags must be boolean')
+    const timestampKey = filter.sortBy === 'createdAt' ? 'createdAt' : 'updatedAt'
+    const timestampColumn = timestampKey === 'createdAt' ? 'created_at' : 'updated_at'
+    validatePeriods(filter.periods, filter.metadata)
+    const limit = filter.limit ?? 20
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_ARGUMENT: limit must be 1-100')
+    if (filter.direction && !['inbound', 'outbound', 'both'].includes(filter.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
+    if (filter.metadataKeys && (filter.metadataKeys.length > 20 || filter.metadataKeys.some(key => typeof key !== 'string' || !key.trim() || ['__proto__', 'constructor', 'prototype'].includes(key)))) throw new Error('INVALID_ARGUMENT: invalid metadataKeys')
+    const { clauses, params } = this.catalogConditions(filter, options.kinds)
     const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, sortBy, includeTags, ...legacySelection } = filter
     const selection = { ...legacySelection, ...(sortBy === 'createdAt' ? { sortBy } : {}), ...(options.kinds ? { kinds: options.kinds } : {}) }
     const signature = computeContentHash(this.repositoryId + ':' + canonicalJson(normalizeMetadataValue(selection)))
@@ -1005,5 +1029,8 @@ export class ArtifactStore {
   completeMigration(source: string): void { this.db.prepare('INSERT OR IGNORE INTO legacy_migrations VALUES (?, ?)').run(source, new Date().toISOString()) }
   registerLocator(locator: string): void { this.db.prepare('INSERT OR IGNORE INTO repository_locators VALUES (?)').run(locator) }
   hasLocator(locator: string): boolean { return !!this.db.prepare('SELECT 1 FROM repository_locators WHERE locator = ?').get(locator) }
-  close(): void { if (this.db.open) this.db.close() }
+  close(): void {
+    this.searchProjection.stop()
+    if (this.db.open) this.db.close()
+  }
 }

@@ -27,5 +27,5 @@ try {
     if (!result?.success) process.exitCode = 1
     rmSync(temporary, { recursive: true, force: true })
   })
-  child.send({ temporary, node: process.execPath, cli: join(__dirname, '../continuum/local.cjs'), channelCli: join(__dirname, 'local.cjs') })
+  child.send({ temporary, node: process.execPath, cli: join(__dirname, '../continuum/local.cjs'), channelCli: join(__dirname, 'local.cjs'), searchOnly: process.argv.includes('--search-only') })
 } catch (error) { console.error(String(error)); rmSync(temporary, { recursive: true, force: true }); process.exitCode = 1 }

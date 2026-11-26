@@ -44,15 +44,20 @@ function rangeLocator(raw: string) {
   }
   return (start: number, end: number): LiteralRange => ({ start, end, startLine: line(start), endLine: line(end) })
 }
+export function structuralBody(raw: string): string {
+  try { return parseArtifactMarkdown(raw, true).body } catch { return raw }
+}
 export function parseStructure(raw: string) {
-  let body = raw
-  try { body = parseArtifactMarkdown(raw, true).body } catch { /* Legacy text may have no valid frontmatter. */ }
+  const body = structuralBody(raw)
   const offset = raw.length - body.length
   const tree = fromMarkdown(body, { extensions: [gfm()], mdastExtensions: [gfmFromMarkdown()] })
   return { offset, nodes: tree.children }
 }
 export function extractOutline(raw: string): OutlineSection[] {
-  const { offset, nodes } = parseStructure(raw)
+  return outlineFromStructure(raw, parseStructure(raw))
+}
+
+function outlineFromStructure(raw: string, { offset, nodes }: ReturnType<typeof parseStructure>): OutlineSection[] {
   const range = rangeLocator(raw)
   const headings = nodes.filter(node => node.type === 'heading')
   const sections: OutlineSection[] = []
@@ -85,4 +90,27 @@ export function extractBlocks(raw: string, section: OutlineSection): (LiteralRan
   const range = rangeLocator(raw)
   return nodes.filter(node => node.type !== 'heading' && offset + node.position!.start.offset! >= section.start && offset + node.position!.end.offset! <= section.ownEnd)
     .map(node => ({ ...range(offset + node.position!.start.offset!, offset + node.position!.end.offset!), type: node.type }))
+}
+
+export function extractSearchUnits(raw: string) {
+  const parsed = parseStructure(raw)
+  const sections = outlineFromStructure(raw, parsed)
+  const units: Array<{ field: 'headings' | 'body'; section: number; block?: number; type: string; text: string }> = []
+  let sectionIndex = 0
+  let blockIndex = 0
+  for (const node of parsed.nodes) {
+    const start = parsed.offset + node.position!.start.offset!
+    const end = parsed.offset + node.position!.end.offset!
+    while (sectionIndex + 1 < sections.length && sections[sectionIndex + 1].start <= start) {
+      sectionIndex++
+      blockIndex = 0
+    }
+    const text = raw.slice(start, end)
+    if (node.type === 'heading') {
+      units.push({ field: 'headings', section: sectionIndex, type: node.type, text })
+    } else {
+      units.push({ field: 'body', section: sectionIndex, block: blockIndex++, type: node.type, text })
+    }
+  }
+  return { sections, units }
 }

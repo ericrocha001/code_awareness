@@ -161,6 +161,17 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('PUBLISH', { rawMarkdown })))
     this.changed(); return receipt
   }
+  searchHealth() {
+    this.assertActive()
+    return this.store.searchHealth()
+  }
+
+  searchArtifacts(input: unknown) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const result = this.store.searchArtifacts(input)
+    this.assertActive(); return result
+  }
+
   inspectStructure(query: import('./artifact-structure').StructureQuery) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const result = this.store.inspectStructure(query)
