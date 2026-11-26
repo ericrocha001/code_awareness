@@ -29,9 +29,11 @@ import {
 import {
   findingInvolvesChangedPaths,
   getMagnitudeDimensions,
+  resolveLocalTarget,
   ruleCatalogPressure
 } from './skill-lint-rules'
 import {
+  SKILL_LINT_DETECTORS,
   SKILL_LINT_PARAMS,
   SKILL_LINT_RULESET,
   STAGNATION_RECOMMENDATION_NOTICE
@@ -649,10 +651,311 @@ export class AcademySkillLintService {
             }
           }
         : {}),
+      ...(input.deepen?.includes('REFERENCE_COST')
+        ? { referenceCost: buildReferenceCost(skill.id, targetMeta.version, targetRes.facts) }
+        : {}),
       deepen: {
-        reportDeepen: ['DESCRIPTION_TERMS', 'CATALOG_PRESSURE'],
+        reportDeepen: ['DESCRIPTION_TERMS', 'CATALOG_PRESSURE', 'REFERENCE_COST'],
         navigation: ['get_academy_skill(view:"outline")', 'get_academy_skill(view:"section")']
       }
+    }
+  }
+
+  actions(input: {
+    skillId: string
+    version?: number
+    ruleId?: string
+    category?: FindingCategory
+    state?: 'OPEN' | 'REVIEWED'
+    limit?: number
+    cursor?: string
+  }) {
+    const limit = normalizePageLimit(input.limit, 20, 50)
+    const skill = this.store.get(input.skillId)
+    const historyMeta = this.store.history(input.skillId, { metadataOnly: true })
+    const targetIdx =
+      input.version !== undefined
+        ? historyMeta.findIndex(item => item.version === input.version)
+        : historyMeta.findIndex(item => item.version === skill.currentVersion)
+
+    if (targetIdx < 0) {
+      throw new AcademyError('VERSION_NOT_FOUND', `Skill ${input.skillId} version ${input.version} not found`)
+    }
+
+    const targetMeta = historyMeta[targetIdx]
+    const baseMeta = targetIdx + 1 < historyMeta.length ? historyMeta[targetIdx + 1] : null
+    const memo = new Map<string, PackageFacts>()
+
+    const sig = sha256Hex(
+      canonicalJson({
+        mode: 'focal_actions',
+        skillId: input.skillId,
+        version: targetMeta.version,
+        packageHash: targetMeta.packageHash,
+        ruleId: input.ruleId ?? null,
+        category: input.category ?? null,
+        state: input.state ?? null,
+        limit,
+        ruleSetVersion: this.ruleSetVersion,
+        tokenizerId: this.tokenizer.id
+      })
+    )
+    const offset = input.cursor !== undefined ? decodeLintCursor(input.cursor, sig) : 0
+
+    const targetRes = this.factsForVersionMeta(input.skillId, targetMeta, memo)
+    const baseRes = baseMeta ? this.factsForVersionMeta(input.skillId, baseMeta, memo) : null
+
+    const identity = {
+      skillId: skill.id,
+      name: skill.name,
+      scope: skill.scope,
+      status: skill.status,
+      version: targetMeta.version,
+      packageHash: targetMeta.packageHash,
+      ruleSetVersion: this.ruleSetVersion,
+      tokenizerId: this.tokenizer.id,
+      lineConvention: LINE_CONVENTION
+    }
+
+    const recurrence = this.computeRecurrence(
+      targetMeta.version,
+      targetMeta.packageHash,
+      baseMeta?.version ?? null,
+      baseMeta?.packageHash ?? null,
+      historyMeta.slice(targetIdx + 1)
+    )
+
+    if (!targetRes.facts) {
+      return {
+        view: 'actions' as const,
+        identity,
+        coverage: 'UNAVAILABLE' as LintCoverage,
+        lintHealth: 'UNKNOWN' as LintHealth,
+        counts: { invalid: 0, openReview: 0, reviewed: 0, observations: 0, total: 0 } satisfies LintCounts,
+        nextAction: null,
+        actions: [] as LintActionItem[],
+        totalMatchedActions: 0,
+        ...(recurrence.state !== 'NONE' ? { recurrence } : {})
+      }
+    }
+
+    const activeCatalog = this.store.list('ACTIVE')
+    const reviews = this.store.lint.listActiveReviews(skill.id)
+    const projected = projectReportFindings(targetRes.facts, {
+      targetSkill: skill,
+      activeCatalog,
+      baseFacts: baseRes?.facts ?? null,
+      reviews
+    })
+
+    const deltaRank = new Map<string, number>()
+    if (baseRes?.facts) {
+      const baseProjected = projectReportFindings(baseRes.facts, {
+        targetSkill: skill,
+        activeCatalog,
+        reviews
+      })
+      const cmp = compareReports(
+        baseRes.facts,
+        baseProjected.findings,
+        targetRes.facts,
+        projected.findings
+      )
+      if (cmp.comparable) {
+        for (const f of cmp.introduced) deltaRank.set(f.findingId, 0)
+        for (const f of cmp.worsened) deltaRank.set(f.findingId, 1)
+        for (const f of cmp.persistent) deltaRank.set(f.findingId, 2)
+      }
+    }
+
+    const filtered = projected.findings
+      .filter(f => {
+        if (input.ruleId && f.ruleId !== input.ruleId) return false
+        if (input.category && f.category !== input.category) return false
+        if (input.state !== undefined) {
+          if (f.state !== input.state) return false
+        } else if (f.state === 'REVIEWED') {
+          return false
+        }
+        return true
+      })
+      .sort((a, b) => {
+        const prioDiff = PRIORITY_ORDER_FOR_ACTIONS[a.priority] - PRIORITY_ORDER_FOR_ACTIONS[b.priority]
+        if (prioDiff !== 0) return prioDiff
+        const rankA = deltaRank.get(a.findingId) ?? 3
+        const rankB = deltaRank.get(b.findingId) ?? 3
+        if (rankA !== rankB) return rankA - rankB
+        return (
+          a.path.localeCompare(b.path) ||
+          (a.range?.startLine ?? 0) - (b.range?.startLine ?? 0) ||
+          a.findingId.localeCompare(b.findingId)
+        )
+      })
+
+    let pageFindings: SkillLintFinding[]
+    let nextOffset: number
+    if (offset === 0) {
+      const highPriority = filtered.filter(f => f.priority === 'TECHNICAL' || f.priority === 'HIGH')
+      const rest = filtered.filter(f => f.priority !== 'TECHNICAL' && f.priority !== 'HIGH')
+      if (highPriority.length >= limit) {
+        pageFindings = highPriority
+        nextOffset = highPriority.length
+      } else {
+        pageFindings = [...highPriority, ...rest.slice(0, limit - highPriority.length)]
+        nextOffset = pageFindings.length
+      }
+    } else {
+      pageFindings = filtered.slice(offset, offset + limit)
+      nextOffset = offset + pageFindings.length
+    }
+
+    const nextCursor = nextOffset < filtered.length ? encodeLintCursor(sig, nextOffset) : undefined
+    const actionItems = pageFindings.map(f => toActionItem(skill.id, targetMeta.version, f, deltaRank))
+
+    return {
+      view: 'actions' as const,
+      identity,
+      coverage: targetRes.coverage,
+      lintHealth: projected.lintHealth,
+      counts: projected.counts,
+      nextAction: actionItems[0] ?? null,
+      actions: actionItems,
+      totalMatchedActions: filtered.length,
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(recurrence.state !== 'NONE' ? { recurrence } : {}),
+      ...(projected.capabilityNotice ? { capabilityNotice: projected.capabilityNotice } : {}),
+      notice:
+        'nextAction is the first ordered attention item for this snapshot; it is not a guaranteed optimal editorial decision.'
+    }
+  }
+
+  catalogActions(input: {
+    status?: AcademySkillStatus
+    scope?: AcademySkillScope
+    ruleId?: string
+    category?: FindingCategory
+    lintHealth?: LintHealth
+    limit?: number
+    cursor?: string
+  }) {
+    const limit = normalizePageLimit(input.limit, 20, 50)
+    const status = input.status ?? 'ACTIVE'
+    const skills = this.store
+      .list(status)
+      .filter(skill => (input.scope ? skill.scope === input.scope : true))
+    const hashMap = new Map(
+      this.store.currentVersionHashes().map(item => [item.skillId, item] as const)
+    )
+
+    const sig = sha256Hex(
+      canonicalJson({
+        mode: 'catalog_actions',
+        status,
+        scope: input.scope ?? null,
+        ruleId: input.ruleId ?? null,
+        category: input.category ?? null,
+        lintHealth: input.lintHealth ?? null,
+        limit,
+        ruleSetVersion: this.ruleSetVersion,
+        tokenizerId: this.tokenizer.id,
+        snapshot: skills.map(s => {
+          const h = hashMap.get(s.id)
+          return `${s.id}:${s.currentVersion}:${h?.packageHash ?? ''}:${h?.contentState ?? 'PRESENT'}`
+        })
+      })
+    )
+    const offset = input.cursor !== undefined ? decodeLintCursor(input.cursor, sig) : 0
+    const slice = skills.slice(offset, offset + limit)
+    const memo = new Map<string, PackageFacts>()
+    const activeCatalog = status === 'ACTIVE' ? skills : this.store.list('ACTIVE')
+
+    const analyzed = slice.map(skill => {
+      const hashInfo = hashMap.get(skill.id)
+      const meta: Pick<AcademySkillVersionMetadata, 'version' | 'packageHash' | 'contentState'> = {
+        version: skill.currentVersion,
+        packageHash: hashInfo?.packageHash ?? '',
+        contentState: hashInfo?.contentState === 'DELETED' ? 'DELETED' : undefined
+      }
+      const res = this.factsForVersionMeta(skill.id, meta, memo)
+      if (!res.facts) {
+        return {
+          skillId: skill.id,
+          name: skill.name,
+          scope: skill.scope,
+          status: skill.status,
+          version: skill.currentVersion,
+          packageHash: meta.packageHash,
+          coverage: 'UNAVAILABLE' as LintCoverage,
+          lintHealth: 'UNKNOWN' as LintHealth,
+          counts: { invalid: 0, openReview: 0, reviewed: 0, observations: 0, total: 0 } satisfies LintCounts,
+          nextAction: null as LintActionItem | null,
+          deepen: {
+            tool: 'get_academy_skill_lint' as const,
+            args: { skillId: skill.id, view: 'actions' as const, version: skill.currentVersion }
+          },
+          findings: [] as SkillLintFinding[]
+        }
+      }
+
+      const reviews = this.store.lint.listActiveReviews(skill.id)
+      const projected = projectReportFindings(res.facts, {
+        targetSkill: skill,
+        activeCatalog,
+        reviews
+      })
+      const openFindings = projected.findings.filter(f => f.state !== 'REVIEWED')
+      const firstAction = openFindings[0]
+        ? toActionItem(skill.id, skill.currentVersion, openFindings[0])
+        : null
+
+      return {
+        skillId: skill.id,
+        name: skill.name,
+        scope: skill.scope,
+        status: skill.status,
+        version: skill.currentVersion,
+        packageHash: res.facts.packageHash,
+        coverage: res.coverage,
+        lintHealth: projected.lintHealth,
+        counts: projected.counts,
+        nextAction: firstAction,
+        deepen: {
+          tool: 'get_academy_skill_lint' as const,
+          args: { skillId: skill.id, view: 'actions' as const, version: skill.currentVersion }
+        },
+        findings: projected.findings
+      }
+    })
+
+    const filtered = analyzed
+      .filter(entry => {
+        if (input.lintHealth && entry.lintHealth !== input.lintHealth) return false
+        if (input.ruleId && !entry.findings.some(f => f.ruleId === input.ruleId)) return false
+        if (input.category && !entry.findings.some(f => f.category === input.category)) return false
+        return true
+      })
+      .sort((a, b) => {
+        const prioA = a.nextAction ? PRIORITY_ORDER_FOR_ACTIONS[a.nextAction.priority] : 99
+        const prioB = b.nextAction ? PRIORITY_ORDER_FOR_ACTIONS[b.nextAction.priority] : 99
+        return prioA - prioB || a.name.localeCompare(b.name)
+      })
+      .map(({ findings: _omit, ...summary }) => summary)
+
+    const nextOffset = offset + slice.length
+    const nextCursor = nextOffset < skills.length ? encodeLintCursor(sig, nextOffset) : undefined
+
+    return {
+      view: 'actions' as const,
+      items: filtered,
+      pageAnalyzed: slice.length,
+      matched: filtered.length,
+      totalInScope: skills.length,
+      ...(nextCursor ? { nextCursor } : {}),
+      notice:
+        'Only skills in the returned page were analyzed and ordered within the page; no global ranking or guarantee about unanalyzed skills is made.',
+      ruleSetVersion: this.ruleSetVersion,
+      tokenizerId: this.tokenizer.id,
+      lineConvention: LINE_CONVENTION
     }
   }
 
@@ -1493,4 +1796,146 @@ function buildFocalPackageDiff(
   }
 
   return { files, diffTruncated }
+}
+
+const PRIORITY_ORDER_FOR_ACTIONS: Record<SkillLintFinding['priority'], number> = {
+  TECHNICAL: 0,
+  HIGH: 1,
+  NORMAL: 2,
+  INFO: 3
+}
+
+export interface LintActionItem {
+  findingId: string
+  ruleId: string
+  category: SkillLintFinding['category']
+  priority: SkillLintFinding['priority']
+  state: 'OPEN' | 'REVIEWED' | 'OBSERVATION'
+  path: string
+  selector?: string
+  range?: SkillLintFinding['range']
+  reason: string
+  recommendation: string
+  deltaStatus?: 'INTRODUCED' | 'WORSENED' | 'PERSISTENT'
+  deepen: {
+    tool: 'get_academy_skill_lint'
+    args: { skillId: string; version: number; ruleId: string }
+  }
+}
+
+function buildActionReason(f: SkillLintFinding): string {
+  switch (f.ruleId) {
+    case 'FORMAT_COMPATIBILITY':
+      return f.obligation === 'ACADEMY_CANONICAL'
+        ? `canonical=${String(f.fact.code ?? 'INVALID_PACKAGE')}`
+        : `field=${String(f.fact.field)} length=${String(f.fact.length)}/${String(f.fact.limit)}`
+    case 'METADATA_REVIEW':
+      return `metadataTokens=${String(f.fact.metadataTokens)} (threshold=${String(f.fact.threshold)})`
+    case 'ROOT_CONTEXT_REVIEW': {
+      const top = Array.isArray(f.fact.topSections)
+        ? (f.fact.topSections as Array<{ selector: string; ownTokens: number }>)
+            .slice(0, 3)
+            .map(s => `${s.selector}(${s.ownTokens})`)
+            .join(',')
+        : ''
+      return `bodyTokens=${String(f.fact.bodyTokens)}, bodyLines=${String(f.fact.bodyLines)}${top ? `; topSections=${top}` : ''}`
+    }
+    case 'EXACT_DUPLICATE':
+    case 'CROSS_FILE_DUPLICATE':
+      return `occurrences=${String(f.fact.occurrenceCount)}, paths=${Array.isArray(f.fact.paths) ? (f.fact.paths as string[]).join(',') : f.path}`
+    case 'LOCAL_REFERENCE_BROKEN':
+      return `target=${String(f.fact.target)}, reason=${String(f.fact.reason)}${f.fact.caseInsensitiveMatch ? `, match=${String(f.fact.caseInsensitiveMatch)}` : ''}`
+    case 'REFERENCE_CHAIN_REVIEW':
+      return `depth=${String(f.fact.depth)}, chain=${Array.isArray(f.fact.chain) ? (f.fact.chain as string[]).join('->') : f.path}${f.fact.inCycle ? ', inCycle=true' : ''}`
+    case 'LONG_REFERENCE_NAVIGATION_REVIEW':
+      return `lines=${String(f.fact.lines)} (threshold=${String(f.fact.threshold)}), hasNavigationIndex=false`
+    case 'DESCRIPTION_COLLISION':
+      if (f.fact.mode === 'DESCRIPTION_TERMS') {
+        return `sharedTermsWith=${Array.isArray(f.fact.comparisons) ? f.fact.comparisons.length : 0}`
+      }
+      return `collidingSkills=${Array.isArray(f.fact.collidingSkills) ? (f.fact.collidingSkills as Array<{ name: string }>).map(c => c.name).join(',') : ''}`
+    case 'CAPABILITY_SURFACE_CHANGE':
+      return `changeKind=${String(f.fact.changeKind)}${f.fact.origin ? `, origin=${String(f.fact.origin)}` : ''}${f.fact.detectionReason ? `, detectedBy=${String(f.fact.detectionReason)}` : ''}`
+    case 'CATALOG_PRESSURE':
+      return `activeSkills=${String(f.fact.activeSkillCount)}, metadataTokensTotal=${String(f.fact.metadataTokensTotal)}, clientBudget=${String(f.fact.clientBudget)}`
+    default:
+      return `${f.ruleId} on ${f.path}`
+  }
+}
+
+function toActionItem(
+  skillId: string,
+  version: number,
+  finding: SkillLintFinding,
+  deltaRank?: Map<string, number>
+): LintActionItem {
+  const rank = deltaRank?.get(finding.findingId)
+  const deltaStatus =
+    rank === 0 ? 'INTRODUCED' : rank === 1 ? 'WORSENED' : rank === 2 ? 'PERSISTENT' : undefined
+  const recommendation =
+    finding.ruleId === 'ROOT_CONTEXT_REVIEW'
+      ? 'Compress redundant instructions or inspect sections via get_academy_skill(view:"outline"|"section") to evaluate cohesion and conditional acquisition.'
+      : finding.action
+
+  return {
+    findingId: finding.findingId,
+    ruleId: finding.ruleId,
+    category: finding.category,
+    priority: finding.priority,
+    state: finding.category === 'OBSERVATION' ? 'OBSERVATION' : (finding.state ?? 'OPEN'),
+    path: finding.path,
+    ...(finding.selector ? { selector: finding.selector } : {}),
+    ...(finding.range ? { range: finding.range } : {}),
+    reason: buildActionReason(finding),
+    recommendation,
+    ...(deltaStatus ? { deltaStatus } : {}),
+    deepen: {
+      tool: 'get_academy_skill_lint',
+      args: { skillId, version, ruleId: finding.ruleId }
+    }
+  }
+}
+
+function buildReferenceCost(skillId: string, version: number, facts: PackageFacts) {
+  const fileMap = new Map(facts.measures.files.map(file => [file.path, file] as const))
+  const directSet = new Set<string>()
+  for (const link of facts.localLinks) {
+    if (link.path !== 'SKILL.md') continue
+    const resolved = resolveLocalTarget('SKILL.md', link.target)
+    if (resolved.status !== 'CANDIDATE') continue
+    if (resolved.resolvedPath === 'SKILL.md') continue
+    if (!fileMap.has(resolved.resolvedPath)) continue
+    directSet.add(resolved.resolvedPath)
+  }
+
+  const directReferencePaths = [...directSet].sort()
+  let directReferenceTokens = 0
+  for (const refPath of directReferencePaths) {
+    directReferenceTokens += fileMap.get(refPath)!.tokens
+  }
+
+  return {
+    metadataTokens: facts.measures.metadataTokens,
+    skillMdTokens: facts.measures.skillMdTokens,
+    directReferenceCount: directReferencePaths.length,
+    directReferencePaths,
+    directReferenceTokens,
+    rootPlusDirectReferenceTokens: facts.measures.skillMdTokens + directReferenceTokens,
+    coverage: facts.coverage,
+    tokenizerId: facts.tokenizerId,
+    tokenizerEncoding: facts.tokenizerEncoding,
+    detectorVersion: SKILL_LINT_DETECTORS.markdown,
+    limitation:
+      'directReferenceTokens is the textual volume of unique complementary files directly linked from SKILL.md; SKILL.md + direct references is a hypothetical full-read volume only, not minimum activation cost, consumed tokens, or observed savings.',
+    selectors: {
+      manifest: {
+        tool: 'get_academy_skill',
+        args: { skillId, view: 'manifest', version }
+      },
+      outline: {
+        tool: 'get_academy_skill',
+        args: { skillId, view: 'outline', version, path: 'SKILL.md' }
+      }
+    }
+  }
 }
