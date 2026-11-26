@@ -42,26 +42,51 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
     additionalProperties: false
   }),
   tool('set_academy_skill_enabled', 'Set activation with independent stateRevision CAS. Returns persisted status and stateRevision; local reconciliation is scheduled separately. Does not publish an installed plugin.', { type: 'object', properties: { skillId: id, enabled: { type: 'boolean' }, expectedStateRevision: version }, required: ['skillId', 'enabled', 'expectedStateRevision'], additionalProperties: false }),
-  tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id, or use view (manifest, resource, outline, section, search) for selective snapshot-bound acquisition without transmitting full bodies.', {
-    type: 'object',
-    properties: {
-      skillId: id,
-      view: { type: 'string', enum: ['package', 'manifest', 'resource', 'outline', 'section', 'search'] },
-      version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
-      path: { type: 'string', minLength: 1 },
-      selector: { type: 'string', minLength: 1 },
-      expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
-      includeDescendants: { type: 'boolean' },
-      query: { type: 'string', minLength: 1, maxLength: 200 },
-      caseSensitive: { type: 'boolean' },
-      textOffset: { type: 'integer', minimum: 0 },
-      textLimit: { type: 'integer', minimum: 1, maximum: 12288 },
-      offset: { type: 'integer', minimum: 0 },
-      limit: { type: 'integer', minimum: 1, maximum: 100 }
-    },
-    required: ['skillId'],
-    additionalProperties: false
-  }),
+  {
+    ...tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id, or use view (manifest, resource, outline, section, search) for selective snapshot-bound acquisition without transmitting full bodies.', {
+      type: 'object',
+      properties: {
+        skillId: id,
+        view: { type: 'string', enum: ['package', 'manifest', 'resource', 'outline', 'section', 'search'] },
+        version: { ...version, maximum: Number.MAX_SAFE_INTEGER },
+        path: { type: 'string', minLength: 1 },
+        selector: { type: 'string', minLength: 1 },
+        expectedPackageHash: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+        includeDescendants: { type: 'boolean' },
+        query: { type: 'string', minLength: 1, maxLength: 200 },
+        caseSensitive: { type: 'boolean' },
+        textOffset: { type: 'integer', minimum: 0 },
+        textLimit: { type: 'integer', minimum: 1, maximum: 12288 },
+        offset: { type: 'integer', minimum: 0 },
+        limit: { type: 'integer', minimum: 1, maximum: 100 }
+      },
+      required: ['skillId'],
+      additionalProperties: false
+    }),
+    outputSchema: {
+      type: 'object',
+      properties: {
+        content: { type: 'string', description: 'Literal source text selected by resource or section view.' },
+        skillId: { type: 'string' },
+        id: { type: 'string' },
+        name: { type: 'string' },
+        scope: { type: 'string' },
+        version: { type: 'integer' },
+        currentVersion: { type: 'integer' },
+        packageHash: { type: 'string' },
+        path: { type: 'string' },
+        offset: { type: 'integer' },
+        totalCharacters: { type: 'integer' },
+        nextOffset: { type: ['integer', 'null'] },
+        selector: { type: 'string' },
+        kind: { type: 'string' },
+        blockType: { type: 'string' },
+        includeDescendants: { type: 'boolean' },
+        range: { type: 'object' }
+      },
+      additionalProperties: true
+    }
+  },
   tool('list_academy_changes', 'Discover immutable Academy skill version events globally in descending persistence order (createdAt DESC, skillId ASC, version DESC) without reading packages. Intersecting filters narrow results: skillId, query (case-insensitive literal substring on current skillName, not body), after/before (inclusive ISO 8601 UTC-normalized persistence timestamps), origin, limit (default 20, max 50), and cursor. skillName reflects the current canonical skill name; previousVersion is the actual persisted predecessor of that skill regardless of date filters. contentState/previousContentState distinguish tombstone deletion and reintroduction. Cursor binds filters, order and limit; visibility matches Academy catalog permissions and does not guarantee an immutable snapshot across pages. Inspect deltas with get_academy_change_diff or read a full package with get_academy_skill_history.', {
     type: 'object',
     properties: {
@@ -205,6 +230,7 @@ export async function executeAcademyTool(
   try {
     const values = objectArgs(args)
     let result: unknown
+    let structuredContent: Record<string, unknown> | undefined
     switch (name) {
       case 'get_academy_git_status': if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); result = projectAcademyGitStatus(service.gitSync.getStatus()); break
       case 'get_academy_git_draft': result = await service.gitSync?.getDraft(string(values.name, 'name')); break
@@ -260,6 +286,7 @@ export async function executeAcademyTool(
             throw new AcademyError('INVALID_ARGUMENT')
           }
           result = service.get(skillId)
+          structuredContent = result as Record<string, unknown>
           break
         }
         const expectedPackageHash = values.expectedPackageHash === undefined ? undefined : sha256(values.expectedPackageHash)
@@ -359,6 +386,25 @@ export async function executeAcademyTool(
             offset: nonNegInt(values.offset),
             limit: values.limit === undefined ? undefined : integer(values.limit, 'limit')
           })
+        }
+        if (view === 'resource' || view === 'section') {
+          const rawView = result as Record<string, unknown>
+          const slice = rawView.content as {
+            text: string
+            offset: number
+            totalCharacters: number
+            nextOffset: number | null
+          }
+          const { content: _nested, ...rest } = rawView
+          structuredContent = {
+            ...rest,
+            content: slice.text,
+            offset: slice.offset,
+            totalCharacters: slice.totalCharacters,
+            nextOffset: slice.nextOffset
+          }
+        } else {
+          structuredContent = result as Record<string, unknown>
         }
         break
       }
@@ -584,7 +630,10 @@ export async function executeAcademyTool(
       }
       default: throw new Error('METHOD_NOT_FOUND')
     }
-    return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+    return {
+      content: [{ type: 'text', text: JSON.stringify(result) }],
+      ...(structuredContent ? { structuredContent } : {})
+    }
   } catch (error) {
     const value = error as { code?: string; message?: string; details?: unknown }
     return { content: [{ type: 'text', text: JSON.stringify({ error: value.code ?? value.message ?? String(error), details: value.details }) }], isError: true }

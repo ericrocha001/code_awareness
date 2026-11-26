@@ -105,9 +105,14 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     const { tools } = await client.listTools()
     const ajv = new AjvJsonSchemaValidator()
     const validators = new Map<string, ReturnType<typeof ajv.getValidator>>()
+    const outputValidators = new Map<string, ReturnType<typeof ajv.getValidator>>()
     for (const tool of tools) {
       validators.set(tool.name, ajv.getValidator(tool.inputSchema as any))
+      if (tool.outputSchema) {
+        outputValidators.set(tool.name, ajv.getValidator(tool.outputSchema as any))
+      }
     }
+    expect(outputValidators.has('get_academy_skill')).toBe(true)
 
     const callMcp = async (name: string, args: Record<string, unknown>) => {
       const validate = validators.get(name)
@@ -115,7 +120,17 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
       expect(validate!(args).valid).toBe(true)
       const res = await client.callTool({ name, arguments: args })
       const text = (res.content as Array<{ type: string; text: string }>)[0]?.text ?? '{}'
-      return { isError: res.isError === true, raw: text, data: JSON.parse(text) }
+      const structuredContent = res.structuredContent as Record<string, unknown> | undefined
+      if (res.isError) {
+        expect(structuredContent).toBeUndefined()
+      } else {
+        const outValidate = outputValidators.get(name)
+        if (outValidate) {
+          expect(structuredContent).toBeDefined()
+          expect(outValidate(structuredContent).valid).toBe(true)
+        }
+      }
+      return { isError: res.isError === true, raw: text, data: JSON.parse(text), structuredContent }
     }
 
     // 1. Create a realistic large skill with duplicated prose, broken local link, and new script
@@ -176,9 +191,10 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     expect(focalAudit.data.findings[0].priority).toBe('HIGH')
     expect(focalAudit.data.inventory.scripts.map((s: any) => s.path)).toEqual(['scripts/helper.sh'])
 
-    // 3. Selective navigation: manifest (no body), outline, section (no siblings)
+    // 3. Selective navigation: manifest (no body), outline, section (no siblings) + structuredContent
     const manifest = await callMcp('get_academy_skill', { skillId, view: 'manifest' })
     expect(manifest.raw).not.toContain('BODY_SENTINEL_SECRET_V1')
+    expect(manifest.structuredContent).toEqual(manifest.data)
 
     const outline = await callMcp('get_academy_skill', {
       skillId,
@@ -186,6 +202,7 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
       version: 1,
       path: 'SKILL.md'
     })
+    expect(outline.structuredContent).toEqual(outline.data)
     const overviewHeading = outline.data.entries.find((e: any) => e.kind === 'HEADING' && e.title === 'Overview')
     const section = await callMcp('get_academy_skill', {
       skillId,
@@ -196,6 +213,44 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     })
     expect(section.data.content.text).toContain('BODY_SENTINEL_SECRET_V1')
     expect(section.data.content.text).not.toContain('Guideline 1:')
+    expect(section.structuredContent).toMatchObject({
+      skillId,
+      name: 'acceptance-skill',
+      scope: 'PROJECT',
+      version: 1,
+      packageHash: v1Hash,
+      path: 'SKILL.md',
+      selector: overviewHeading.selector,
+      kind: 'HEADING',
+      blockType: 'heading',
+      includeDescendants: false,
+      content: section.data.content.text,
+      offset: section.data.content.offset,
+      totalCharacters: section.data.content.totalCharacters,
+      nextOffset: section.data.content.nextOffset
+    })
+    expect((section.structuredContent as any).text).toBeUndefined()
+
+    const searchView = await callMcp('get_academy_skill', {
+      skillId,
+      view: 'search',
+      version: 1,
+      query: 'BODY_SENTINEL_SECRET_V1'
+    })
+    expect(searchView.structuredContent).toEqual(searchView.data)
+
+    const legacyPackage = await callMcp('get_academy_skill', { skillId })
+    expect(legacyPackage.structuredContent).toEqual(legacyPackage.data)
+
+    // Invalid selector/hash/path must return isError without structuredContent
+    const staleErr = await callMcp('get_academy_skill', {
+      skillId,
+      view: 'resource',
+      version: 1,
+      path: '../escape.md'
+    })
+    expect(staleErr.isError).toBe(true)
+    expect(staleErr.structuredContent).toBeUndefined()
 
     // Check SessionStore SkillIntelligence observation classes
     const recordedEvents = sessionStore.skillIntelligence.querySkillEvents({ sessionId, limit: 20 }).events
@@ -299,7 +354,7 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
     const repAfterRev = await callMcp('get_academy_skill_lint', { skillId })
     expect(repAfterRev.data.lintHealth).toBe('REVIEWED')
 
-    // 10. Historical v1 remains literally recoverable
+    // 10. Historical v1 remains literally recoverable + short paged CRLF/Unicode resource reconstruction via structuredContent
     const histV1 = await callMcp('get_academy_skill', {
       skillId,
       view: 'resource',
@@ -307,19 +362,51 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
       path: 'SKILL.md'
     })
     expect(histV1.data.content.text).toContain('BODY_SENTINEL_SECRET_V1')
+    expect(histV1.structuredContent?.content).toBe(histV1.data.content.text)
+
+    const unicodeArtifact = 'Linha 1 ç 漢字\r\nLinha 2 🧪 𠀋\r\nFim'
+    const v7 = await callMcp('update_academy_skill', {
+      skillId,
+      expectedVersion: 6,
+      package: {
+        ...v2Pkg,
+        skillMd: v3Body + '\nUnicode\n',
+        artifacts: { ...v2Pkg.artifacts, 'references/unicode.md': unicodeArtifact }
+      }
+    })
+    expect(v7.isError).toBe(false)
+    let reconstructed = ''
+    let nextOffset: number | null = 0
+    while (nextOffset !== null) {
+      const page = await callMcp('get_academy_skill', {
+        skillId,
+        view: 'resource',
+        version: 7,
+        path: 'references/unicode.md',
+        textOffset: nextOffset,
+        textLimit: 8
+      })
+      expect(typeof page.structuredContent?.content).toBe('string')
+      expect(page.structuredContent?.content).toBe(page.data.content.text)
+      expect(page.structuredContent?.offset).toBe(page.data.content.offset)
+      expect(page.structuredContent?.totalCharacters).toBe(unicodeArtifact.length)
+      reconstructed += page.structuredContent!.content as string
+      nextOffset = page.structuredContent!.nextOffset as number | null
+    }
+    expect(reconstructed).toBe(unicodeArtifact)
 
     // 11. Analysis failure after write keeps PERSISTED result and marks lint UNAVAILABLE/ANALYSIS_FAILED
     const inFlowSpy = vi.spyOn(academy.lint, 'inFlow').mockImplementationOnce(() => {
       throw new Error('SIMULATED_LINT_FAILURE')
     })
-    const v7 = await callMcp('update_academy_skill', {
+    const v8 = await callMcp('update_academy_skill', {
       skillId,
-      expectedVersion: 6,
+      expectedVersion: 7,
       package: { ...v2Pkg, skillMd: v3Body + '\nFinal note\n' }
     })
-    expect(v7.isError).toBe(false)
-    expect(v7.data.currentVersion).toBe(7)
-    expect(v7.data.lint).toMatchObject({ coverage: 'UNAVAILABLE', reason: 'ANALYSIS_FAILED' })
+    expect(v8.isError).toBe(false)
+    expect(v8.data.currentVersion).toBe(8)
+    expect(v8.data.lint).toMatchObject({ coverage: 'UNAVAILABLE', reason: 'ANALYSIS_FAILED' })
     inFlowSpy.mockRestore()
 
     // 12. Verify SQLite academy_lint_facts stores NO package bodies
