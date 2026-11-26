@@ -97,4 +97,29 @@ describe('skill-markdown & skill-measures (U1 pure)', () => {
       tokenizer.count('# Root\nIntro paragraph.\n## Child A\nChild A body text.\n')
     )
   })
+
+  it('extracts inline code spans with exact UTF-16 offsets across Unicode/CRLF and ignores fenced/indented/frontmatter/HTML', () => {
+    const md = [
+      '---',
+      'name: inline-span',
+      'description: `ignored-in-frontmatter.md`',
+      '---',
+      '🧪 𠀋 before `references/a.md` and `` ./references/`b`.md ``.',
+      '',
+      '```md',
+      '`ignored-in-fenced.md`',
+      '```',
+      '',
+      '    `ignored-in-indented.md`',
+      '',
+      '<div>`ignored-in-html.md`</div>',
+      ''
+    ].join('\r\n')
+
+    const parsed = parseMarkdownFile(md, { isSkillMd: true })
+    expect(parsed.inlineCodeSpans.map(s => s.text)).toEqual(['references/a.md', './references/`b`.md'])
+    for (const span of parsed.inlineCodeSpans) {
+      expect(md.slice(span.range.startOffset, span.range.endOffset)).toBe(span.text)
+    }
+  })
 })

@@ -33,6 +33,7 @@ import {
   ruleCatalogPressure
 } from './skill-lint-rules'
 import {
+  REFERENCE_COST_DETECTOR_VERSION,
   SKILL_LINT_DETECTORS,
   SKILL_LINT_PARAMS,
   SKILL_LINT_RULESET,
@@ -1907,6 +1908,12 @@ function buildReferenceCost(skillId: string, version: number, facts: PackageFact
     if (!fileMap.has(resolved.resolvedPath)) continue
     directSet.add(resolved.resolvedPath)
   }
+  for (const mention of facts.inlinePathMentions ?? []) {
+    if (mention.path !== 'SKILL.md') continue
+    if (mention.resolvedPath === 'SKILL.md') continue
+    if (!fileMap.has(mention.resolvedPath)) continue
+    directSet.add(mention.resolvedPath)
+  }
 
   const directReferencePaths = [...directSet].sort()
   let directReferenceTokens = 0
@@ -1925,8 +1932,9 @@ function buildReferenceCost(skillId: string, version: number, facts: PackageFact
     tokenizerId: facts.tokenizerId,
     tokenizerEncoding: facts.tokenizerEncoding,
     detectorVersion: SKILL_LINT_DETECTORS.markdown,
+    complementDetectorVersion: REFERENCE_COST_DETECTOR_VERSION,
     limitation:
-      'directReferenceTokens is the textual volume of unique complementary files directly linked from SKILL.md; SKILL.md + direct references is a hypothetical full-read volume only, not minimum activation cost, consumed tokens, or observed savings.',
+      'directReferenceTokens is the textual volume of unique complementary files recognized from SKILL.md Markdown links and static inline-code file paths; SKILL.md + direct references is a hypothetical full-read volume only, not mandatory acquisition, minimum activation cost, consumed tokens, or proof about unreferenced resources.',
     selectors: {
       manifest: {
         tool: 'get_academy_skill',

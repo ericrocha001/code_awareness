@@ -111,4 +111,40 @@ describe('skill-lint-engine (lintHealth & delta comparison)', () => {
     expect(cmp.introduced).toEqual([])
     expect(cmp.worsened).toEqual([])
   })
+
+  it('captures static inline-code file paths from SKILL.md without altering localLinks or findings', () => {
+    const facts = analyzePackageFacts(
+      {
+        skillMd: [
+          '---',
+          'name: inline-paths',
+          'description: Inline paths test',
+          '---',
+          'Load `references/academy-change-impact.md` and `./references/norm.md` and `EXTRA.txt`.',
+          'Ignore `references/missing.md`, `references`, `../outside.md`, `https://example.com/a.md`,',
+          '`cat references/academy-change-impact.md`, `references/*.md`, and `SKILL.md`.',
+          '',
+          '```sh',
+          'cat `references/in-fence.md`',
+          '```'
+        ].join('\n'),
+        artifacts: {
+          'references/academy-change-impact.md': '# Impact\nDetails\n',
+          'references/norm.md': '# Norm\nDetails\n',
+          'references/in-fence.md': '# Fenced\n',
+          'EXTRA.txt': 'root file'
+        }
+      },
+      tok
+    )
+
+    expect(facts.inlinePathMentions.map(m => m.resolvedPath)).toEqual([
+      'references/academy-change-impact.md',
+      'references/norm.md',
+      'EXTRA.txt'
+    ])
+    expect(facts.localLinks).toEqual([])
+    expect(facts.localFindings.some(f => f.ruleId === 'LOCAL_REFERENCE_BROKEN')).toBe(false)
+    expect(facts.localFindings.some(f => f.ruleId === 'REFERENCE_CHAIN_REVIEW')).toBe(false)
+  })
 })

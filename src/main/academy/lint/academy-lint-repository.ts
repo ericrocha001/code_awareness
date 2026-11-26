@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type Database from 'better-sqlite3'
+import { FACTS_SCHEMA_VERSION } from './skill-lint-engine'
 import type { FindingMagnitude, LintReviewRecord, PackageFacts } from './skill-lint-types'
 
 type Row = Record<string, any>
@@ -43,7 +44,9 @@ export class AcademyLintRepository {
         )
         .get(packageHash, ruleSetVersion, tokenizerId) as Row | undefined
       if (!row || typeof row.facts_json !== 'string') return null
-      return JSON.parse(row.facts_json) as PackageFacts
+      const parsed = JSON.parse(row.facts_json) as PackageFacts
+      if (parsed.schemaVersion !== FACTS_SCHEMA_VERSION) return null
+      return parsed
     } catch {
       return null
     }

@@ -1,5 +1,6 @@
 import type {
   LintRange,
+  ParsedInlineCodeSpan,
   ParsedMarkdownBlock,
   ParsedMarkdownFile,
   ParsedMarkdownHeading,
@@ -124,6 +125,75 @@ function maskInlineCode(segment: string): string {
     }
   }
   return out.join('')
+}
+
+function extractInlineCodeSpansFromLine(line: RawLine, spans: ParsedInlineCodeSpan[]): void {
+  const s = line.text
+  let i = 0
+  while (i < s.length) {
+    if (s[i] === '\\') {
+      i += 2
+      continue
+    }
+    if (s[i] !== '`') {
+      i++
+      continue
+    }
+    let tickCount = 0
+    while (i + tickCount < s.length && s[i + tickCount] === '`') tickCount++
+    let j = i + tickCount
+    let foundClose = false
+    while (j < s.length) {
+      if (s[j] === '`') {
+        let closeCount = 0
+        while (j + closeCount < s.length && s[j + closeCount] === '`') closeCount++
+        if (closeCount === tickCount) {
+          let contentStart = i + tickCount
+          let contentEnd = j
+          let content = s.slice(contentStart, contentEnd)
+          if (
+            content.length >= 2 &&
+            content.startsWith(' ') &&
+            content.endsWith(' ') &&
+            /[^ ]/.test(content)
+          ) {
+            contentStart += 1
+            contentEnd -= 1
+            content = content.slice(1, -1)
+          }
+          if (content.length > 0) {
+            spans.push({
+              text: content,
+              range: {
+                startLine: line.lineNumber,
+                endLine: line.lineNumber,
+                startOffset: line.start + contentStart,
+                endOffset: line.start + contentEnd
+              }
+            })
+          }
+          i = j + closeCount
+          foundClose = true
+          break
+        }
+        j += closeCount
+      } else {
+        j++
+      }
+    }
+    if (!foundClose) {
+      i += tickCount
+    }
+  }
+}
+
+function extractInlineFromLine(
+  line: RawLine,
+  links: ParsedMarkdownLink[],
+  inlineCodeSpans: ParsedInlineCodeSpan[]
+): void {
+  extractInlineLinksFromLine(line, links)
+  extractInlineCodeSpansFromLine(line, inlineCodeSpans)
 }
 
 function extractInlineLinksFromLine(line: RawLine, links: ParsedMarkdownLink[]): void {
@@ -256,6 +326,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
   const blocks: ParsedMarkdownBlock[] = []
   const headings: ParsedMarkdownHeading[] = []
   const links: ParsedMarkdownLink[] = []
+  const inlineCodeSpans: ParsedInlineCodeSpan[] = []
 
   if (options.isSkillMd && lines.length > 0 && lines[0].text.trim() === '---') {
     let closeIdx = -1
@@ -379,7 +450,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
         range,
         rawText: text.slice(range.startOffset, range.endOffset)
       })
-      extractInlineLinksFromLine(line, links)
+      extractInlineFromLine(line, links, inlineCodeSpans)
       idx++
       prevWasBlank = false
       continue
@@ -427,7 +498,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
     if (BLOCKQUOTE_RE.test(line.text)) {
       const startIdx = idx
       while (idx < lines.length && BLOCKQUOTE_RE.test(lines[idx].text)) {
-        extractInlineLinksFromLine(lines[idx], links)
+        extractInlineFromLine(lines[idx], links, inlineCodeSpans)
         idx++
       }
       const endIdx = idx - 1
@@ -450,7 +521,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
     if (TABLE_RE.test(line.text)) {
       const startIdx = idx
       while (idx < lines.length && TABLE_RE.test(lines[idx].text)) {
-        extractInlineLinksFromLine(lines[idx], links)
+        extractInlineFromLine(lines[idx], links, inlineCodeSpans)
         idx++
       }
       const endIdx = idx - 1
@@ -473,7 +544,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
     if (LIST_ITEM_RE.test(line.text)) {
       const startIdx = idx
       let lastListIdx = idx
-      extractInlineLinksFromLine(lines[idx], links)
+      extractInlineFromLine(lines[idx], links, inlineCodeSpans)
       idx++
       while (idx < lines.length) {
         if (isBlank(lines[idx])) {
@@ -494,7 +565,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
         ) {
           break
         }
-        extractInlineLinksFromLine(lines[idx], links)
+        extractInlineFromLine(lines[idx], links, inlineCodeSpans)
         lastListIdx = idx
         idx++
       }
@@ -551,7 +622,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
 
     if (setextLevel !== null) {
       const headingEndIdx = idx
-      for (let i = startIdx; i < headingEndIdx; i++) extractInlineLinksFromLine(lines[i], links)
+      for (let i = startIdx; i < headingEndIdx; i++) extractInlineFromLine(lines[i], links, inlineCodeSpans)
       const title = lines.slice(startIdx, headingEndIdx).map(l => l.text.trim()).join(' ')
       const range: LintRange = {
         startLine: lines[startIdx].lineNumber,
@@ -577,7 +648,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
     }
 
     const endIdx = idx - 1
-    for (let i = startIdx; i <= endIdx; i++) extractInlineLinksFromLine(lines[i], links)
+    for (let i = startIdx; i <= endIdx; i++) extractInlineFromLine(lines[i], links, inlineCodeSpans)
     const range: LintRange = {
       startLine: lines[startIdx].lineNumber,
       endLine: lines[endIdx].lineNumber,
@@ -606,6 +677,7 @@ export function parseMarkdownFile(text: string, options: { isSkillMd: boolean })
     hasNavigationIndex,
     headings,
     blocks,
-    links
+    links,
+    inlineCodeSpans
   }
 }

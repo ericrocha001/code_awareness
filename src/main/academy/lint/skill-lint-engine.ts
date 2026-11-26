@@ -12,6 +12,7 @@ import {
   getMagnitudeDimensions,
   isNonLocalReference,
   normalizeProseText,
+  resolveLocalTarget,
   ruleCapabilitySurfaceChange,
   ruleCatalogPressure,
   ruleDescriptionCollision
@@ -22,6 +23,7 @@ import {
   type FileOutlineEntry,
   type FileOutlineFact,
   type FindingMagnitude,
+  type InlinePathMentionFact,
   type LintComparisonResult,
   type LintCounts,
   type LintCoverage,
@@ -35,7 +37,7 @@ import {
 } from './skill-lint-types'
 import { measurePackage, sha256Hex } from './skill-measures'
 
-export const FACTS_SCHEMA_VERSION = 1
+export const FACTS_SCHEMA_VERSION = 2
 
 const PRIORITY_ORDER: Record<SkillLintFinding['priority'], number> = {
   TECHNICAL: 0,
@@ -109,8 +111,10 @@ export function analyzePackageFacts(
   const outlines: Record<string, FileOutlineFact> = {}
   const proseBlocks: ProseBlockFact[] = []
   const localLinks: LocalLinkFact[] = []
+  const inlinePathMentions: InlinePathMentionFact[] = []
   const externalRefs: ExternalRefFact[] = []
   const scripts: ScriptCandidate[] = []
+  const packageFileSet = new Set(measures.files.map(f => f.path))
 
   const sectionByFileAndBlock = new Map<string, (typeof measures.sections)[number]>()
   for (const section of measures.sections) {
@@ -190,6 +194,22 @@ export function analyzePackageFacts(
           localLinks.push({ path: filePath, target: link.rawTarget, range: link.range })
         }
       }
+
+      if (filePath === 'SKILL.md') {
+        for (const span of parsed.inlineCodeSpans) {
+          if (/\s/.test(span.text) || span.text.includes('\\')) continue
+          const resolved = resolveLocalTarget('SKILL.md', span.text)
+          if (resolved.status !== 'CANDIDATE') continue
+          if (resolved.resolvedPath === 'SKILL.md') continue
+          if (!packageFileSet.has(resolved.resolvedPath)) continue
+          inlinePathMentions.push({
+            path: 'SKILL.md',
+            target: span.text,
+            resolvedPath: resolved.resolvedPath,
+            range: span.range
+          })
+        }
+      }
     }
 
     if (filePath !== 'SKILL.md') {
@@ -226,6 +246,7 @@ export function analyzePackageFacts(
     outlines,
     proseBlocks,
     localLinks,
+    inlinePathMentions,
     externalRefs,
     scripts,
     localFindings: []
