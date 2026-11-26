@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import Database from 'better-sqlite3'
+import { buildSync } from 'esbuild'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcademyService } from '../academy/academy-service'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
@@ -10,9 +11,12 @@ import type { IArtifactReader } from '../continuum/continuum-types'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
-import { executeSessionTool, type SessionToolName } from '../session-context/mcp'
+import { SessionContextClient } from '../session-context/client'
+import { stepCodexSourceIndex } from '../session-context/native-codex-source'
+import { nativeDigest } from '../session-context/native-hooks'
 import { digest } from '../session-context/privacy'
-import { SessionStore } from '../session-context/store'
+import { SessionStore, sessionStorePath } from '../session-context/store'
+import { sourceFingerprint } from '../session-context/target'
 
 const cleanup: Array<() => void | Promise<void>> = []
 
@@ -55,11 +59,10 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
     cleanup.push(() => safeRemove(base))
     const repoRoot = join(base, 'repo-a')
     const foreignRoot = join(base, 'repo-b')
-    const storePath = join(base, 'store', 'session-context.sqlite')
     const academyDbPath = join(base, 'academy', 'academy.sqlite')
-    mkdirSync(repoRoot, { recursive: true })
+    mkdirSync(join(repoRoot, '.git'), { recursive: true })
+    writeFileSync(join(repoRoot, '.git/HEAD'), 'ref: refs/heads/main\n')
     mkdirSync(foreignRoot, { recursive: true })
-    mkdirSync(dirname(storePath), { recursive: true })
 
     const academy = new AcademyService(academyDbPath)
     cleanup.push(() => academy.close())
@@ -67,6 +70,8 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
     const destA = academy.store.upsertDestination(repoRoot, 'Repo A')
     const destForeign = academy.store.upsertDestination(foreignRoot, 'Repo B')
     const repositoryId = destA.id
+    const storePath = sessionStorePath(base, repositoryId)
+    mkdirSync(dirname(storePath), { recursive: true })
 
     const SKILL_V1_BODY = '---\nname: deploy-guard\ndescription: Guard deployments safely.\n---\n\n# Deploy Guard v1\n\nUNIQUE_SECRET_BODY_V1_DO_NOT_PERSIST_IN_SQLITE\n'
     const SKILL_V2_BODY = '---\nname: deploy-guard\ndescription: Guard deployments safely with preflight.\n---\n\n# Deploy Guard v2\n\nUNIQUE_SECRET_BODY_V2_WITH_PREFLIGHT\n'
@@ -155,38 +160,48 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
         sessionId: boundSessionId
       }
     })
+    const worktreeId = nativeDigest(`wt:${repositoryId}`)
+    const foreignWorktreeId = nativeDigest(`wt:foreign:${repositoryId}`)
+    const generation = nativeDigest(`gen:${repositoryId}`)
     const unboundAuthority = authorizeArtifactAgent(principal, repositoryId, () => true)
+    const foreignWtAuthority = authorizeArtifactAgent(principal, repositoryId, () => true, foreignWorktreeId)
 
-    let currentAuthMode: 'bound' | 'unbound' = 'bound'
-    const sessionContext = {
-      call: async (name: SessionToolName, args: unknown, allowArtifactMetadata = false) => {
-        try {
-          return await executeSessionTool(
-            store,
-            {},
-            name,
-            args,
-            () => {},
-            undefined,
-            [],
-            undefined,
-            repoRoot,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            allowArtifactMetadata
-          )
-        } catch (err) {
-          return {
-            isError: true,
-            content: [{ type: 'text', text: JSON.stringify({ code: err instanceof Error ? err.message : 'ERROR' }) }]
-          }
+    const workerPath = join(base, 'session-context-worker.cjs')
+    const builtWorker = buildSync({
+      entryPoints: ['src/main/session-context/worker.ts'],
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      packages: 'external',
+      write: false
+    }).outputFiles[0].text
+    writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(process.cwd(), 'package.json'))});\n` + builtWorker)
+
+    const fp = sourceFingerprint(repoRoot)
+    const resolver = Object.assign(
+      async (sel: { worktreeId: string; generation: string }) => {
+        if (sel.worktreeId === worktreeId && sel.generation === generation) {
+          return { root: repoRoot, fingerprint: fp, validate: async () => {} }
         }
-      }
-    } as McpProjectContext['sessionContext']
+        throw new Error('WORKTREE_NOT_DISCOVERED')
+      },
+      { discover: async () => [{ worktreeId, generation, root: repoRoot, fingerprint: fp }] }
+    )
 
+    const sessionContext = new SessionContextClient(
+      base,
+      repositoryId,
+      repoRoot,
+      () => true,
+      workerPath,
+      resolver as any,
+      30_000
+    )
+    cleanup.push(() => sessionContext.dispose())
+
+    let currentAuthMode: 'bound' | 'unbound' | 'foreign_worktree' = 'bound'
+
+    // Production-equivalent composition: pass SessionContextClient via sessionContext, NEVER inject skillIntelligence directly
     const adapter = new ChannelMcpAdapter(
       {
         projectId: destA.id,
@@ -195,8 +210,7 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
         continuum: { repositoryId, get: artifactReader.get, list: artifactReader.list } as never,
         sessionContext,
         artifactReader,
-        skillObserver: (ev) => { store.skillIntelligence.recordSkillEvent(ev) },
-        skillIntelligence: store.skillIntelligence
+        skillObserver: (ev) => { store.skillIntelligence.recordSkillEvent(ev) }
       },
       undefined,
       undefined,
@@ -209,7 +223,13 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
       () => {},
       undefined,
       undefined,
-      () => (currentAuthMode === 'bound' ? boundAuthority : unboundAuthority)
+      () => (
+        currentAuthMode === 'bound'
+          ? boundAuthority
+          : currentAuthMode === 'foreign_worktree'
+            ? foreignWtAuthority
+            : unboundAuthority
+      )
     )
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     cleanup.push(() => new Promise<void>((resolve, reject) => server.close(err => err ? reject(err) : resolve())))
@@ -465,23 +485,220 @@ describe('Academy Intelligence Q20/Q21 — typed Skill events, historical fideli
     expect(histEvt).toBeDefined()
     expect(histEvt!.observationClass).toBe('DISCOVERED_MANIFEST_FETCHED')
 
-    // 11. Reverse Skill target (Q20: Skill@v1 -> sessions & literal deepen selectors, even after v2 exists)
+    // 11. Reverse Skill target via real SessionContextClient -> worker -> SessionStore + literal deepen selector execution
+    const codexProfile = join(base, 'codex-profile')
+    const codexAccHash = nativeDigest(JSON.stringify(['u', 'a']))
+    const codexConfigPath = join(dirname(storePath), 'session-context.provider.json')
+    writeFileSync(codexConfigPath, JSON.stringify({
+      repositoryId,
+      nativeSources: { codex: { profile: codexProfile, creatorAccountHash: codexAccHash } }
+    }))
+    const codexSessionUuid = '01a1e000-0000-7000-8000-000000000203'
+    const codexNativeHash = nativeDigest(JSON.stringify([repositoryId, 'codex', codexSessionUuid]))
+    const uuidDay = new Date(Number.parseInt(codexSessionUuid.replaceAll('-', '').slice(0, 12), 16))
+      .toISOString()
+      .slice(0, 10)
+      .split('-')
+    const rolloutDir = join(codexProfile, 'sessions', ...uuidDay)
+    mkdirSync(rolloutDir, { recursive: true })
+    const rolloutPath = join(rolloutDir, `rollout-2026-11-26T10-00-00-${codexSessionUuid}.jsonl`)
+    writeFileSync(rolloutPath, [
+      {
+        timestamp: '2026-11-26T10:00:00Z',
+        type: 'session_meta',
+        payload: {
+          id: codexSessionUuid,
+          session_id: codexSessionUuid,
+          account_scoped: true,
+          creator_user_id: 'u',
+          creator_account_id: 'a',
+          cwd: repoRoot,
+          runtime_workspace_roots: [repoRoot],
+          cli_version: '0.169.0-alpha.11.1'
+        }
+      },
+      { timestamp: '2026-11-26T10:00:01Z', type: 'turn_context', payload: { turn_id: 'turn-codex-v1', cwd: repoRoot } },
+      {
+        timestamp: '2026-11-26T10:00:02Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          name: 'mcp__code_awareness__get_academy_skill',
+          call_id: 'codex-call-v1',
+          arguments: JSON.stringify({
+            skillId,
+            view: 'section',
+            version: 1,
+            path: 'SKILL.md',
+            selector: 'sec-main'
+          })
+        }
+      },
+      {
+        timestamp: '2026-11-26T10:00:03Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'codex-call-v1',
+          output: JSON.stringify({
+            structuredContent: {
+              skillId,
+              scope: 'PROJECT',
+              version: 1,
+              packageHash: v1Hash,
+              path: 'SKILL.md',
+              selector: 'sec-main',
+              range: { startLine: 1, endLine: 6, startOffset: 0, endOffset: 120 },
+              content: SKILL_V1_BODY,
+              offset: 0,
+              totalCharacters: SKILL_V1_BODY.length,
+              nextOffset: null
+            }
+          })
+        }
+      }
+    ].map(r => JSON.stringify(r)).join('\n') + '\n')
+
+    const indexedCodex = stepCodexSourceIndex({
+      refs: store.references.native,
+      storePath,
+      repositoryId,
+      worktreeId,
+      generation,
+      worktreeRoot: repoRoot,
+      nativeHash: codexNativeHash,
+      sourceSessionId: codexSessionUuid,
+      mode: 'STEP',
+      assertCurrent: () => {}
+    })
+    expect(indexedCodex.status).toBe('READY')
+
+    currentAuthMode = 'bound'
     const q20ReverseV1 = await mcpCall('inspect_intelligence_evidence', {
       questionId: 'Q20',
       repositoryId,
       target: { skill: { skillId, version: 1, packageHash: v1Hash } }
     })
     expect(q20ReverseV1.isError).toBe(false)
-    expect(q20ReverseV1.data.evidence.reverseAcquisitions.length).toBeGreaterThanOrEqual(1)
+    expect(q20ReverseV1.data.gaps).not.toContain('SKILL_INTELLIGENCE_UNAVAILABLE')
+    expect(q20ReverseV1.data.evidence.reverseAcquisitions.length).toBeGreaterThanOrEqual(2)
     expect(
       q20ReverseV1.data.evidence.reverseAcquisitions.every(
         (a: any) => a.skillId === skillId && a.version === 1
       )
     ).toBe(true)
-    expect(q20ReverseV1.data.evidence.reverseAcquisitions[0].deepenSession).toEqual({
-      tool: 'inspect_agent_session',
-      arguments: expect.objectContaining({ sessionId: expect.any(String), view: 'FOCAL' })
+
+    const codexAcq = q20ReverseV1.data.evidence.reverseAcquisitions.find(
+      (a: any) => a.sessionWitness?.nativeSessionId === codexNativeHash
+    )
+    expect(codexAcq).toBeDefined()
+    expect(codexAcq.sessionWitness.sourceSessionId).toBe(codexSessionUuid)
+    expect(codexAcq.callEventId).toBeTruthy()
+    expect(codexAcq.resultEventId).toBeTruthy()
+    expect(codexAcq.deepenSession.tool).toBe('inspect_agent_session')
+    expect(codexAcq.deepenCallEvent.tool).toBe('list_agent_session_events')
+    expect(codexAcq.deepenResultEvent.tool).toBe('list_agent_session_events')
+
+    // Execute returned selectors literally without rewriting tool names/args/revisions
+    const deepenedCodexSession = await mcpCall(
+      codexAcq.deepenSession.tool,
+      codexAcq.deepenSession.arguments
+    )
+    expect(deepenedCodexSession.isError).toBe(false)
+    expect(typeof deepenedCodexSession.data.revision).toBe('number')
+
+    const callList = await mcpCall(
+      codexAcq.deepenCallEvent.tool,
+      codexAcq.deepenCallEvent.arguments
+    )
+    expect(callList.isError).toBe(false)
+    expect(callList.data.events).toHaveLength(1)
+    expect(callList.data.events[0].eventId).toBe(codexAcq.callEventId)
+    const readCall = await mcpCall('read_agent_session_event', {
+      repositoryId,
+      nativeSession: codexAcq.deepenCallEvent.arguments.nativeSession,
+      sourceSessionId: codexAcq.deepenCallEvent.arguments.sourceSessionId,
+      expectedRevision: callList.data.revision,
+      eventId: callList.data.events[0].eventId
     })
+    expect(readCall.isError).toBe(false)
+    expect(readCall.data.eventId).toBe(codexAcq.callEventId)
+    expect(readCall.data.payloadDigest).toBeTruthy()
+
+    const resultList = await mcpCall(
+      codexAcq.deepenResultEvent.tool,
+      codexAcq.deepenResultEvent.arguments
+    )
+    expect(resultList.isError).toBe(false)
+    expect(resultList.data.events).toHaveLength(1)
+    expect(resultList.data.events[0].eventId).toBe(codexAcq.resultEventId)
+    const readResult = await mcpCall('read_agent_session_event', {
+      repositoryId,
+      nativeSession: codexAcq.deepenResultEvent.arguments.nativeSession,
+      sourceSessionId: codexAcq.deepenResultEvent.arguments.sourceSessionId,
+      expectedRevision: resultList.data.revision,
+      eventId: resultList.data.events[0].eventId
+    })
+    expect(readResult.isError).toBe(false)
+    expect(readResult.data.eventId).toBe(codexAcq.resultEventId)
+    expect(readResult.data.payloadDigest).toBeTruthy()
+
+    // Execute imported session deepen selector literally & check stale expectedRevision rejection
+    const importedAcq = q20ReverseV1.data.evidence.reverseAcquisitions.find(
+      (a: any) => a.sessionWitness?.sessionId === boundSessionId
+    )
+    expect(importedAcq).toBeDefined()
+    const deepenedImported = await mcpCall(
+      importedAcq.deepenSession.tool,
+      importedAcq.deepenSession.arguments
+    )
+    expect(deepenedImported.isError).toBe(false)
+    expect(deepenedImported.data.sessionId).toBe(boundSessionId)
+    const staleImportedRead = await mcpCall('read_agent_session_event', {
+      repositoryId,
+      sessionId: boundSessionId,
+      expectedRevision: deepenedImported.data.revision + 99,
+      eventId: '00000000-0000-4000-8000-000000000001'
+    })
+    expect(staleImportedRead.isError).toBe(true)
+    expect(staleImportedRead.data.code).toBe('REVISION_CONFLICT')
+
+    // Worktree isolation negative: foreign worktree authority excludes Codex native acquisition from items AND total
+    currentAuthMode = 'foreign_worktree'
+    const foreignWtRes = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId, version: 1, packageHash: v1Hash } }
+    })
+    expect(foreignWtRes.isError).toBe(false)
+    expect(foreignWtRes.data.pagination.total).toBe(0)
+    expect(foreignWtRes.data.evidence.reverseAcquisitions).toHaveLength(0)
+
+    // Revoked Codex grant negative: removes Codex native observations from items AND total while preserving imported
+    currentAuthMode = 'bound'
+    unlinkSync(codexConfigPath)
+    const afterRevoke = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId, version: 1, packageHash: v1Hash } }
+    })
+    expect(afterRevoke.isError).toBe(false)
+    expect(
+      afterRevoke.data.evidence.reverseAcquisitions.some(
+        (a: any) => a.sessionWitness?.nativeSessionId === codexNativeHash
+      )
+    ).toBe(false)
+    expect(afterRevoke.data.pagination.total).toBeLessThan(q20ReverseV1.data.pagination.total)
+
+    // Empty result for nonexistent skillId with available Store is distinct from SKILL_INTELLIGENCE_UNAVAILABLE
+    const emptySkillRes = await mcpCall('inspect_intelligence_evidence', {
+      questionId: 'Q20',
+      repositoryId,
+      target: { skill: { skillId: 'skill-does-not-exist' } }
+    })
+    expect(emptySkillRes.isError).toBe(false)
+    expect(emptySkillRes.data.gaps).not.toContain('SKILL_INTELLIGENCE_UNAVAILABLE')
+    expect(emptySkillRes.data.pagination.total).toBe(0)
 
     // Historical version/hash mismatch on reverse Skill target emits HISTORICAL_VERSION_HASH_MISMATCH
     const q20ReverseMismatch = await mcpCall('inspect_intelligence_evidence', {

@@ -69,6 +69,61 @@ export class SessionContextClient implements SessionContextPort {
     if (!this.active()) throw new Error('PROJECT_CONTEXT_CHANGED')
     return readExecutionSessionAssociations(sessionStorePath(this.storageBase, this.repositoryId), { ...scope, repositoryId: this.repositoryId })
   }
+  async querySkillEvents(
+    query: import('./skill-intelligence-store').SkillEventQuery,
+    options?: { worktreeId?: string; allowNativeSource?: boolean }
+  ): Promise<import('./skill-intelligence-store').SkillEventQueryResult> {
+    if (!this.active()) throw new Error('PROJECT_CONTEXT_CHANGED')
+    if (this.pending.size >= 16) throw new Error('BACKPRESSURE')
+    const id = ++this.serial
+    const result = await new Promise<McpToolResult>(resolve => {
+      const timeoutMs = this.timeoutMs ?? 5000
+      const deadline = Date.now() + timeoutMs
+      const request: Request = {
+        resolve,
+        deadline,
+        phase: 'worker-recovery',
+        selectionValidators: new Map(),
+        timer: setTimeout(() => this.expire(id), timeoutMs)
+      }
+      this.pending.set(id, request)
+      void (async () => {
+        try {
+          await this.retiring
+          if (!this.pending.has(id) || !this.active()) return
+          if (Date.now() >= deadline) { this.expire(id); return }
+          request.phase = 'worker-dispatch'
+          request.generation = this.generation ?? this.createGeneration()
+          request.generation.worker.postMessage({
+            id,
+            internalOp: 'query_skill_events',
+            args: {
+              ...query,
+              repositoryId: this.repositoryId,
+              ...(options?.worktreeId ? { worktreeId: options.worktreeId } : {}),
+              ...(options?.allowNativeSource !== undefined ? { allowNativeSource: options.allowNativeSource } : {})
+            },
+            deadline
+          })
+        } catch (error) {
+          this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
+        }
+      })()
+    })
+    const first = result.content[0]
+    if (result.isError) {
+      let code = 'SESSION_CONTEXT_UNAVAILABLE'
+      if (first?.type === 'text') {
+        try {
+          const parsed = JSON.parse(first.text) as { code?: string }
+          if (typeof parsed.code === 'string') code = parsed.code
+        } catch {}
+      }
+      throw new Error(code)
+    }
+    if (first?.type !== 'text') throw new Error('SESSION_CONTEXT_UNAVAILABLE')
+    return JSON.parse(first.text) as import('./skill-intelligence-store').SkillEventQueryResult
+  }
   call(name: SessionToolName, args: unknown, allowArtifactMetadata = false): Promise<McpToolResult> {
     if (!this.active()) return Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
     if (Buffer.byteLength(JSON.stringify(args ?? {})) > 8192) return Promise.resolve(failure('INVALID_ARGUMENT'))

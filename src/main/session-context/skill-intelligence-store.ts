@@ -199,6 +199,10 @@ export interface SkillEventRecord {
   extractorVersion: string | null
   gaps: string[]
   revision: number
+  sourceSessionId?: string | null
+  sessionRevision?: number | null
+  callEventPersisted?: boolean
+  resultEventPersisted?: boolean
 }
 
 export interface SkillSourceCoverageRecord {
@@ -214,6 +218,8 @@ export interface SkillEventQuery {
   executionId?: string
   nativeSessionId?: string
   repositoryId?: string
+  worktreeId?: string
+  allowNativeSource?: boolean
   skillId?: string
   version?: number
   packageHash?: string
@@ -523,6 +529,13 @@ export class SkillIntelligenceStore {
       where.push('(repositoryId IS NULL OR repositoryId = ?)')
       params.push(filter.repositoryId)
     }
+    if (filter.worktreeId) {
+      where.push('worktreeId = ?')
+      params.push(filter.worktreeId)
+    }
+    if (filter.allowNativeSource === false) {
+      where.push('(sessionId IS NOT NULL OR nativeSessionId IS NULL)')
+    }
     if (filter.skillId) {
       where.push('skillId = ?')
       params.push(filter.skillId)
@@ -562,6 +575,13 @@ export class SkillIntelligenceStore {
 
     const unboundWhere: string[] = ["sessionBindingState = 'UNBOUND'"]
     const unboundParams: Array<string | number> = []
+    if (filter.worktreeId) {
+      unboundWhere.push('worktreeId = ?')
+      unboundParams.push(filter.worktreeId)
+    }
+    if (filter.allowNativeSource === false) {
+      unboundWhere.push('(sessionId IS NOT NULL OR nativeSessionId IS NULL)')
+    }
     if (filter.skillId) {
       unboundWhere.push('skillId = ?')
       unboundParams.push(filter.skillId)
@@ -595,6 +615,41 @@ export class SkillIntelligenceStore {
         ).all() as SkillSourceCoverageRecord[])
 
     const events = rows.map(rowToRecord)
+    if (events.length > 0) {
+      const hasSessions = Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions'").get())
+      const hasEventsTable = Boolean(this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='events'").get())
+      const lookupNativeSource = hasNativeSources
+        ? this.db.prepare('SELECT sourceSessionId FROM native_reference_sources WHERE nativeKey = ? AND revision = ?')
+        : undefined
+      const lookupSessionRev = hasSessions
+        ? this.db.prepare('SELECT revision FROM sessions WHERE id = ?')
+        : undefined
+      const lookupPersistedEvent = hasEventsTable
+        ? this.db.prepare('SELECT 1 FROM events WHERE sessionId = ? AND id = ? LIMIT 1')
+        : undefined
+      for (const ev of events) {
+        if (lookupNativeSource && ev.sourceNamespace && ev.sourceRevision !== null) {
+          const src = lookupNativeSource.get(ev.sourceNamespace, ev.sourceRevision) as { sourceSessionId?: string } | undefined
+          if (typeof src?.sourceSessionId === 'string') {
+            ev.sourceSessionId = src.sourceSessionId
+          }
+        }
+        if (lookupSessionRev && ev.sessionId) {
+          const sess = lookupSessionRev.get(ev.sessionId) as { revision?: number } | undefined
+          if (typeof sess?.revision === 'number') {
+            ev.sessionRevision = sess.revision
+          }
+          if (lookupPersistedEvent) {
+            if (ev.callEventId) {
+              ev.callEventPersisted = Boolean(lookupPersistedEvent.get(ev.sessionId, ev.callEventId))
+            }
+            if (ev.resultEventId) {
+              ev.resultEventPersisted = Boolean(lookupPersistedEvent.get(ev.sessionId, ev.resultEventId))
+            }
+          }
+        }
+      }
+    }
     const scopeRevRows = this.db.prepare(
       `SELECT eventId, revision FROM skill_events ${whereSql} ORDER BY captureOrder ASC, observedAt ASC, eventId ASC`
     ).all(...params) as Array<{ eventId: string; revision: number }>
