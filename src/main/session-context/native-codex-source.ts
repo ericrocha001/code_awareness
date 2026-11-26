@@ -22,6 +22,11 @@ import {
 } from './native-source-index'
 import { readZstdFirstLine } from './native-zstd-jsonl'
 import { NATIVE_CODEX_NORMALIZER, nativeReferenceKey, type NativeSessionReferences } from './native-session-references'
+import {
+  extractSkillCallMetadata,
+  qualifySkillToolObservation,
+  resolveCanonicalSkillTool
+} from './skill-intelligence-extractor'
 import { digest, sanitize } from './privacy'
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/)
@@ -822,7 +827,8 @@ function buildCodexStepOptions(options: {
         return
       }
       if (item.type === 'function_call' || item.type === 'custom_tool_call' || item.type === 'local_shell_call') {
-        const tool = sanitize(String(item.name || item.type || 'shell')).slice(0, 80)
+        const rawToolName = String(item.name || item.type || 'shell')
+        const tool = sanitize(rawToolName).slice(0, 80)
         const callId = typeof item.call_id === 'string' && item.call_id.length > 0 ? item.call_id : undefined
         const rawInput = typeof item.arguments === 'string'
           ? item.arguments
@@ -843,6 +849,45 @@ function buildCodexStepOptions(options: {
           ...(acc.state.currentTurnId ? { turnId: acc.state.currentTurnId } : {}),
           pairing: 'DANGLING'
         }
+        const canonicalSkillTool = resolveCanonicalSkillTool(rawToolName)
+        if (canonicalSkillTool) {
+          const callArgs = extractSkillCallMetadata(canonicalSkillTool, rawInput)
+          if (callId) {
+            acc.state.openSkillCalls ??= {}
+            if (!acc.state.openSkillCalls[callId]) {
+              acc.state.openSkillCalls[callId] = {
+                ...callArgs,
+                canonicalTool: canonicalSkillTool,
+                callEventId: event.eventId,
+                ordinal,
+                ...(timestamp ? { timestamp } : {}),
+                ...(acc.state.currentTurnId ? { turnId: acc.state.currentTurnId } : {})
+              }
+            }
+          } else {
+            const obs = qualifySkillToolObservation({
+              canonicalTool: canonicalSkillTool,
+              callArgs,
+              hasResult: false,
+              nativeSessionId: nativeHash,
+              repositoryId,
+              provider: 'codex',
+              worktreeId,
+              generation,
+              sourceSurface: 'native_source_event',
+              sourceContract: 'codex-native/v1',
+              sourceNamespace: nativeKey,
+              callEventId: event.eventId,
+              originalEventId: event.eventId,
+              turnId: acc.state.currentTurnId ?? null,
+              sessionBindingState: 'BOUND_BY_WITNESS',
+              bindingAuthority: 'codex_native_source',
+              captureOrder: ordinal,
+              sourceTimestamp: timestamp ?? null
+            })
+            if (obs) acc.skillEvents.push(obs)
+          }
+        }
         if (callId && !acc.state.openCalls[callId]) {
           acc.state.openCalls[callId] = ref
         } else if (!callId && acc.state.unmatchedDangling.length < 5) {
@@ -857,11 +902,38 @@ function buildCodexStepOptions(options: {
         const match = callId ? acc.state.openCalls[callId] : undefined
         const pairing = match ? 'PAIRED' : 'UNPAIRED'
         acc.state.typedRecords++
-        emitIndexedEvent(acc, {
+        const resultEvent = emitIndexedEvent(acc, {
           ordinal, part: 0, type: classified.isError ? 'ERROR' : 'TOOL_RESULT', rawText: rawOutput,
           timestamp, tool: match?.tool, turnId: acc.state.currentTurnId,
           status: classified.status, pairing, errorKind: classified.errorKind, lineStart, lineEnd
         })
+        const skillCall = callId ? acc.state.openSkillCalls?.[callId] : undefined
+        if (skillCall && callId) {
+          const obs = qualifySkillToolObservation({
+            canonicalTool: skillCall.canonicalTool,
+            callArgs: skillCall,
+            rawOutput,
+            hasResult: true,
+            nativeSessionId: nativeHash,
+            repositoryId,
+            provider: 'codex',
+            worktreeId,
+            generation,
+            sourceSurface: 'native_source_event',
+            sourceContract: 'codex-native/v1',
+            sourceNamespace: nativeKey,
+            callEventId: skillCall.callEventId,
+            resultEventId: resultEvent.eventId,
+            originalEventId: resultEvent.eventId,
+            turnId: acc.state.currentTurnId ?? skillCall.turnId ?? null,
+            sessionBindingState: 'BOUND_BY_WITNESS',
+            bindingAuthority: 'codex_native_source',
+            captureOrder: ordinal,
+            sourceTimestamp: timestamp ?? null
+          })
+          if (obs) acc.skillEvents.push(obs)
+          delete acc.state.openSkillCalls![callId]
+        }
         if (match && callId) {
           acc.state.attemptCounts.dangling--
           applyAttemptOutcome(acc.state.attemptCounts, classified.status)
@@ -880,6 +952,34 @@ function buildCodexStepOptions(options: {
         return
       }
       emitOpaqueRecord(acc, { ordinal, rawRecord, timestamp, limitation: 'UNRECOGNIZED_FORMAT', lineStart, lineEnd })
+    },
+    onFinalizeSkillCalls: (acc: StepAccumulator) => {
+      const open = acc.state.openSkillCalls
+      if (!open) return
+      for (const [callId, skillCall] of Object.entries(open)) {
+        const obs = qualifySkillToolObservation({
+          canonicalTool: skillCall.canonicalTool,
+          callArgs: skillCall,
+          hasResult: false,
+          nativeSessionId: nativeHash,
+          repositoryId,
+          provider: 'codex',
+          worktreeId,
+          generation,
+          sourceSurface: 'native_source_event',
+          sourceContract: 'codex-native/v1',
+          sourceNamespace: nativeKey,
+          callEventId: skillCall.callEventId,
+          originalEventId: skillCall.callEventId,
+          turnId: skillCall.turnId ?? null,
+          sessionBindingState: 'BOUND_BY_WITNESS',
+          bindingAuthority: 'codex_native_source',
+          captureOrder: skillCall.ordinal,
+          sourceTimestamp: skillCall.timestamp ?? null
+        })
+        if (obs) acc.skillEvents.push(obs)
+        delete open[callId]
+      }
     }
   }
 }
