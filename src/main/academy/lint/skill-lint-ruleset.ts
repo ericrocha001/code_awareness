@@ -19,6 +19,8 @@ export const SKILL_LINT_DETECTORS = Object.freeze({
   scripts: 'script-detector/1'
 })
 
+export const REFERENCE_COST_DETECTOR_VERSION = 'inline-literal-path/1'
+
 const paramDigest = createHash('sha256')
   .update(canonicalJson({ params: SKILL_LINT_PARAMS, detectors: SKILL_LINT_DETECTORS }))
   .digest('hex')

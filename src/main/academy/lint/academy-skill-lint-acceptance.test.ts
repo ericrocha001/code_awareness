@@ -151,6 +151,7 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
       duplicatedProse,
       '',
       'See [guide](references/guide.md) before editing.',
+      'Load `references/inline-ref.md` when auditing.',
       '',
       duplicatedProse,
       '',
@@ -163,7 +164,10 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
       projectIds: [dest.id],
       package: {
         skillMd: v1Body,
-        artifacts: { 'scripts/helper.sh': '#!/bin/sh\necho ok\n' }
+        artifacts: {
+          'scripts/helper.sh': '#!/bin/sh\necho ok\n',
+          'references/inline-ref.md': '# Inline Ref\n\nInline referenced resource.\n'
+        }
       }
     })
     expect(created.isError).toBe(false)
@@ -202,7 +206,11 @@ describe('Academy Skill Linter global acceptance (U1-U4 real HTTP/SDK/AJV)', () 
 
     const focalRefCost = await callMcp('get_academy_skill_lint', { skillId, deepen: ['REFERENCE_COST'] })
     expect(focalRefCost.isError).toBe(false)
-    expect(focalRefCost.data.referenceCost.directReferenceCount).toBe(0)
+    expect(focalRefCost.data.referenceCost.directReferenceCount).toBe(1)
+    expect(focalRefCost.data.referenceCost.directReferencePaths).toEqual(['references/inline-ref.md'])
+    expect(focalRefCost.data.referenceCost.directReferenceTokens).toBeGreaterThan(0)
+    expect(focalAudit.data.referenceCost).toBeUndefined()
+    expect(focalActions.data.referenceCost).toBeUndefined()
 
     // 3. Selective navigation: manifest (no body), outline, section (no siblings) + structuredContent
     const manifest = await callMcp('get_academy_skill', { skillId, view: 'manifest' })

@@ -49,6 +49,11 @@ export interface ParsedMarkdownLink {
   kind: 'INLINE' | 'IMAGE' | 'REFERENCE'
 }
 
+export interface ParsedInlineCodeSpan {
+  text: string
+  range: LintRange
+}
+
 export interface ParsedMarkdownFile {
   coverage: 'COMPLETE' | 'PARTIAL'
   partialReasons: string[]
@@ -59,6 +64,7 @@ export interface ParsedMarkdownFile {
   headings: ParsedMarkdownHeading[]
   blocks: ParsedMarkdownBlock[]
   links: ParsedMarkdownLink[]
+  inlineCodeSpans: ParsedInlineCodeSpan[]
 }
 
 export interface FileMeasure {
@@ -196,6 +202,13 @@ export interface SkillLintFinding {
   improved?: boolean
 }
 
+export interface InlinePathMentionFact {
+  path: string
+  target: string
+  resolvedPath: string
+  range: LintRange
+}
+
 export interface PackageFacts {
   schemaVersion: number
   packageHash: string
@@ -215,6 +228,7 @@ export interface PackageFacts {
   outlines: Record<string, FileOutlineFact>
   proseBlocks: ProseBlockFact[]
   localLinks: LocalLinkFact[]
+  inlinePathMentions: InlinePathMentionFact[]
   externalRefs: ExternalRefFact[]
   scripts: ScriptCandidate[]
   localFindings: SkillLintFinding[]

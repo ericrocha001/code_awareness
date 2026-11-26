@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import Database from 'better-sqlite3'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../../continuum/agent-authority'
 import { getCanonicalTokenizer, type TokenizerPort } from '../../core/tokenizer'
@@ -694,6 +695,93 @@ describe('AcademySkillLintService & U1 opt-in list/history', () => {
       expect(repWithCost.referenceCost.limitation).toContain('hypothetical full-read volume only')
       expect(repWithCost.findings).toEqual(fullRep.findings.map((f: any) => ({ ...f, state: 'REVIEWED', review: expect.any(Object) })))
     } finally {
+      await service.close()
+    }
+  })
+
+  it('counts inline-code literal paths in REFERENCE_COST deduplicated with links and lazily invalidates schemaVersion:1 cache', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-lint-refcost-cache-'))
+    roots.push(root)
+    const dbPath = join(root, 'academy.db')
+    const service = new AcademyService(dbPath)
+    try {
+      const refBody = '# Academy Change Impact\n\nDetailed guidance for impact preflight.\n'
+      const skill = await service.create({
+        package: {
+          skillMd: [
+            '---',
+            'name: refcost-inline',
+            'description: Inline path reference cost test',
+            '---',
+            'Load `references/academy-change-impact.md` and [same](references/academy-change-impact.md).',
+            'Also see `./EXTRA.txt` and ignore `references/nonexistent.md`.'
+          ].join('\n'),
+          artifacts: {
+            'references/academy-change-impact.md': refBody,
+            'EXTRA.txt': 'extra root resource'
+          }
+        },
+        scope: 'GLOBAL',
+        origin: 'MCP'
+      })
+
+      const rep1 = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', {
+          skillId: skill.id,
+          deepen: ['REFERENCE_COST']
+        })).content[0].text
+      )
+      const expectedTokens =
+        getCanonicalTokenizer().count(refBody) + getCanonicalTokenizer().count('extra root resource')
+      expect(rep1.referenceCost).toMatchObject({
+        directReferenceCount: 2,
+        directReferencePaths: ['EXTRA.txt', 'references/academy-change-impact.md'],
+        directReferenceTokens: expectedTokens,
+        complementDetectorVersion: 'inline-literal-path/1'
+      })
+      expect(rep1.referenceCost.directReferenceTokens).toBeLessThanOrEqual(
+        rep1.sizeBreakdown.measures.resourcesTokens
+      )
+      expect(rep1.sizeBreakdown.measures.packageTokens).toBe(
+        rep1.sizeBreakdown.measures.skillMdTokens + rep1.sizeBreakdown.measures.resourcesTokens
+      )
+
+      // Downgrade cached facts_json to legacy schemaVersion:1 without inlinePathMentions
+      const rawDb = new Database(dbPath)
+      const row = rawDb
+        .prepare('SELECT facts_json FROM academy_lint_facts WHERE package_hash=?')
+        .get(skill.current.packageHash) as { facts_json: string }
+      expect(row.facts_json).not.toContain('Detailed guidance for impact preflight')
+      const legacyFacts = JSON.parse(row.facts_json)
+      legacyFacts.schemaVersion = 1
+      delete legacyFacts.inlinePathMentions
+      rawDb
+        .prepare('UPDATE academy_lint_facts SET facts_json=? WHERE package_hash=?')
+        .run(JSON.stringify(legacyFacts), skill.current.packageHash)
+      rawDb.close()
+
+      // Reading again lazily invalidates schemaVersion:1 and recomputes schemaVersion:2
+      const rep2 = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', {
+          skillId: skill.id,
+          deepen: ['REFERENCE_COST']
+        })).content[0].text
+      )
+      expect(rep2.referenceCost.directReferenceCount).toBe(2)
+      expect(rep2.referenceCost.directReferenceTokens).toBe(expectedTokens)
+
+      // Subsequent read hits schemaVersion:2 cache without re-tokenizing
+      const tokSpy = vi.spyOn(getCanonicalTokenizer(), 'count')
+      const rep3 = JSON.parse(
+        (await executeAcademyTool(service, 'get_academy_skill_lint', {
+          skillId: skill.id,
+          deepen: ['REFERENCE_COST']
+        })).content[0].text
+      )
+      expect(rep3.referenceCost.directReferenceTokens).toBe(expectedTokens)
+      expect(tokSpy).not.toHaveBeenCalled()
+    } finally {
+      vi.restoreAllMocks()
       await service.close()
     }
   })
